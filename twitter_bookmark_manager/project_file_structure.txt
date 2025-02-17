@@ -1,0 +1,63 @@
+twitter_bookmark_manager/
+├── core/
+│   ├── __init__.py
+│   ├── auth.py
+│   ├── data_ingestion.py
+│   ├── ai_categorization.py
+│   ├── deduplication.py
+│   ├── rag.py
+│   ├── search.py
+│   ├── populate_vector_store.py
+│   ├── process_categories.py
+│   ├── chat/
+│   │   ├── __init__.py
+│   │   └── engine.py
+├── database/
+│   ├── db.py
+│   ├── models.py
+│   ├── vector_store.py
+│   ├── update_bookmarks.py
+│   ├── twitter_bookmarks.db
+│   ├── vector_db/
+│   │   └── chroma.sqlite3
+│   ├── json_history/
+│   │   ├── twitter_bookmarks_20250131.json
+│   │   ├── twitter_bookmarks_20250201.json
+│   │   ├── twitter_bookmarks_20250202.json
+│   │   ├── twitter_bookmarks_20250203.json
+│   │   └── twitter_bookmarks_20250204.json
+├── web/
+│   ├── server.py
+│   ├── test_server.py
+│   ├── static/
+│   │   ├── styles.css
+│   │   ├── script.js
+│   │   └── images/
+│   ├── templates/
+│   │   ├── index.html
+│   │   ├── chat.html
+│   │   └── base.html
+├── config/
+│   ├── constants.py
+│   └── secrets.json
+├── tests/
+│   ├── test_auth.py
+│   ├── test_data_ingestion.py
+│   ├── test_models.py
+│   ├── test_ai_categorization.py
+│   ├── test_search.py
+│   ├── test_rag.py
+│   ├── conftest.py
+├── models/
+│   └── mistral-7b-instruct-v0.1.Q4_K_M.gguf
+├── media/
+├── venv/
+├── .env
+├── .gitignore
+├── requirements.txt
+├── main.py
+├── run_ingestion.py
+├── bookmarks.db
+├── backup_project.py
+├── update_log_*.txt
+└── project_structure.txt

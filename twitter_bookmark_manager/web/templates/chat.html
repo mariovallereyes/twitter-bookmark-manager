@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="flex flex-col min-h-screen bg-transparent max-w-3xl mx-auto px-4" x-data="chatApp()" x-init="initChat()">
+    <!-- Main chat area - now part of the full page -->
+    <div class="flex-1 p-4">
+        <!-- Error message display -->
+        <div x-show="error" class="bg-red-500 bg-opacity-10 border border-red-500 text-red-500 px-4 py-2 rounded-lg mb-4">
+            <p x-text="error"></p>
+        </div>
+
+        <!-- Chat messages -->
+        <div class="space-y-4 mb-20" id="messages-container">
+            <template x-for="(message, index) in messages" :key="index">
+                <div class="flex" :class="message.role === 'user' ? 'justify-end' : 'justify-start'">
+                    <div class="flex items-end" :class="message.role === 'user' ? 'flex-row-reverse' : 'flex-row'">
+                        <!-- Avatar -->
+                        <div class="w-8 h-8 rounded-full bg-gray-700 flex-shrink-0 flex items-center justify-center text-sm text-white" 
+                             x-text="message.role === 'user' ? 'U' : 'A'"></div>
+                        <!-- Chat bubble -->
+                        <div class="mx-2 p-3 rounded-lg max-w-xs sm:max-w-md" 
+                             :class="message.role === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-gray-800 text-white rounded-bl-none'">
+                            <p class="whitespace-pre-wrap text-sm" x-text="message.content"></p>
+                            <!-- Detailed bookmark display if available -->
+                            <template x-if="message.bookmarks && message.bookmarks.length > 0">
+                                <div class="mt-2 space-y-2">
+                                    <template x-for="(bookmark, idx) in message.bookmarks" :key="idx">
+                                        <div class="p-2 border border-gray-700 rounded-md hover:bg-gray-700 transition-colors">
+                                            <p class="text-sm text-gray-300">
+                                                <strong x-text="bookmark.author"></strong>: <span x-text="bookmark.text"></span>
+                                            </p>
+                                            <p class="text-xs text-gray-400" x-text="`Categories: ${bookmark.categories.join(', ')}`"></p>
+                                            <a :href="bookmark.tweet_url.startsWith('http') ? bookmark.tweet_url : 'https://' + bookmark.tweet_url" 
+                                               target="_blank" 
+                                               rel="noopener noreferrer" 
+                                               class="text-blue-400 text-xs hover:underline">View on Twitter</a>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                            <!-- Fallback bookmark count if no detailed bookmarks -->
+                            <template x-if="!message.bookmarks && message.bookmarks_used">
+                                <div class="mt-1 text-xs text-gray-400" x-text="`Found ${message.bookmarks_used} relevant bookmark${message.bookmarks_used > 1 ? 's' : ''}`"></div>
+                            </template>
+                            <!-- Model info and timestamp -->
+                            <div class="mt-1 flex justify-between items-center text-xs text-gray-400">
+                                <span x-text="formatTimestamp(message.timestamp || new Date())"></span>
+                                <template x-if="message.model">
+                                    <span x-text="message.model === 'gemini' ? '🧠 Gemini' : '🤖 Mistral'"></span>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Typing indicator -->
+            <div x-show="typing" class="flex justify-start">
+                <div class="flex items-end">
+                    <div class="w-8 h-8 rounded-full bg-gray-700 flex-shrink-0 flex items-center justify-center text-sm text-white">A</div>
+                    <div class="mx-2 p-3 rounded-lg bg-gray-800 text-white rounded-bl-none">
+                        <div class="flex space-x-2">
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 0.4s"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading indicator -->
+            <div x-show="loading" class="flex justify-center items-center">
+                <svg class="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fixed input area at bottom -->
+    <div class="fixed bottom-0 left-0 right-0 bg-transparent backdrop-blur-sm p-4">
+        <div class="max-w-3xl mx-auto px-4">
+            <form @submit.prevent="sendMessage(); $refs.chatInput.focus();" class="flex space-x-2">
+                <div class="flex-1 relative">
+                    <input type="text" 
+                           x-model="userInput" 
+                           placeholder="Ask about your bookmarks or chat naturally..." 
+                           class="w-full px-4 py-2 rounded-lg bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                           @keydown.enter.prevent="sendMessage(); $event.target.focus();"
+                           :disabled="loading"
+                           x-ref="chatInput"
+                           @focus="$event.target.select()"
+                           autofocus>
+                    <button type="button" 
+                            @click="resetChat" 
+                            class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-white"
+                            :class="{ 'opacity-50 cursor-not-allowed': loading }"
+                            :disabled="loading">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
+                        </svg>
+                    </button>
+                </div>
+                <button type="submit" 
+                        :disabled="!userInput.trim() || loading" 
+                        class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center min-w-[80px]">
+                    <template x-if="!loading">
+                        <span>Send</span>
+                    </template>
+                    <template x-if="loading">
+                        <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </template>
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+function chatApp() {
+    return {
+        messages: [],
+        userInput: '',
+        loading: false,
+        typing: false,
+        error: null,
+
+        initChat() {
+            this.messages.push({
+                role: 'assistant',
+                content: 'Hi! I can help you explore your Twitter bookmarks and chat about any topic. Try asking about specific topics, or just chat naturally!',
+                timestamp: new Date(),
+                model: 'gemini'
+            });
+            this.$nextTick(() => {
+                this.$refs.chatInput.focus();
+            });
+        },
+
+        formatTimestamp(date) {
+            return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        },
+
+        async sendMessage() {
+            if (!this.userInput.trim()) return;
+            
+            const message = this.userInput;
+            this.error = null;
+            
+            // Store reference to input element
+            const inputEl = this.$refs.chatInput;
+            
+            // Append user message
+            this.messages.push({ 
+                role: 'user', 
+                content: message,
+                timestamp: new Date()
+            });
+            
+            this.userInput = '';
+            this.loading = true;
+            this.typing = true;
+            
+            // Ensure focus remains on input
+            inputEl.focus();
+            
+            // Scroll to bottom
+            this.scrollToBottom();
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        message,
+                        context: {
+                            history: this.messages.slice(-5).map(m => ({
+                                role: m.role,
+                                content: m.content
+                            }))
+                        }
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+
+                const data = await response.json();
+                
+                // Short delay to show typing indicator
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Add the assistant's response
+                this.messages.push({
+                    role: 'assistant',
+                    content: data.response,
+                    bookmarks: data.bookmarks || [],
+                    model: data.model || 'gemini',
+                    timestamp: new Date()
+                });
+            } catch (error) {
+                console.error('Chat error:', error);
+                this.error = 'Sorry, I encountered an error. Please try again.';
+                this.messages.push({
+                    role: 'assistant',
+                    content: 'Sorry, I encountered an error. Please try again.',
+                    timestamp: new Date(),
+                    model: 'mistral'
+                });
+            } finally {
+                this.loading = false;
+                this.typing = false;
+                this.scrollToBottom();
+                // Ensure focus remains on input after everything
+                this.$nextTick(() => {
+                    inputEl.focus();
+                });
+            }
+        },
+
+        resetChat() {
+            if (this.loading) return;
+            
+            this.messages = [];
+            this.error = null;
+            this.initChat();
+            this.scrollToBottom();
+            // Keep focus on input after reset
+            this.$refs.chatInput.focus();
+        },
+
+        scrollToBottom() {
+            this.$nextTick(() => {
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    behavior: 'smooth'
+                });
+            });
+        }
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div x-data="dashboardApp" class="w-full max-w-[2400px] mx-auto bg-gray-900 min-h-screen px-4 py-6">
+    <!-- Stats Overview -->
+    <div class="max-w-7xl mx-auto mb-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h3 class="text-gray-400 text-sm font-medium">Total Bookmarks</h3>
+            <p class="text-white text-2xl font-bold mt-2" x-text="stats.total_bookmarks">0</p>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h3 class="text-gray-400 text-sm font-medium">Total Categories</h3>
+            <p class="text-white text-2xl font-bold mt-2" x-text="stats.total_categories">0</p>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h3 class="text-gray-400 text-sm font-medium">Unique Authors</h3>
+            <p class="text-white text-2xl font-bold mt-2" x-text="stats.unique_authors">0</p>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h3 class="text-gray-400 text-sm font-medium">Monthly Activity</h3>
+            <p class="text-white text-2xl font-bold mt-2" x-text="stats.monthly_activity">0</p>
+        </div>
+    </div>
+
+    <!-- Filter Section -->
+    <div class="max-w-7xl mx-auto mb-8 bg-gray-800 rounded-lg p-4 shadow-lg">
+        <div class="flex flex-wrap items-center gap-4">
+            <div class="flex-1 min-w-[200px]">
+                <label for="date-range" class="block text-sm font-medium text-gray-300 mb-1">Date Range</label>
+                <select id="date-range" x-model="filters.dateRange" class="w-full bg-gray-700 border border-gray-600 rounded-md text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d">Last 30 Days</option>
+                    <option value="90d">Last 90 Days</option>
+                    <option value="180d">Last 180 Days</option>
+                    <option value="1y">Last Year</option>
+                    <option value="all">All Time</option>
+                </select>
+            </div>
+            <div class="flex-1 min-w-[200px]">
+                <label for="category-filter" class="block text-sm font-medium text-gray-300 mb-1">Category</label>
+                <select id="category-filter" x-model="filters.category" class="w-full bg-gray-700 border border-gray-600 rounded-md text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="all">All Categories</option>
+                    <template x-for="category in categories" :key="category">
+                        <option :value="category" x-text="category"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="flex items-end">
+                <button @click="refreshData()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity Visualizations -->
+    <div class="grid grid-cols-1 2xl:grid-cols-3 gap-6 mb-6">
+        <!-- Calendar Heatmap -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Activity Heatmap</h2>
+            <div id="heatmap-viz" class="w-full h-[300px]"></div>
+        </div>
+
+        <!-- Hourly Distribution -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Hourly Activity</h2>
+            <div id="heatmap-viz-hourly" class="w-full h-[300px]"></div>
+        </div>
+
+        <!-- Activity Trends -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Activity Trends</h2>
+            <div id="activity-trends-viz" class="w-full h-[300px]"></div>
+        </div>
+    </div>
+
+    <!-- Categories and Authors -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <!-- Category Distribution -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Category Distribution</h2>
+            <div id="category-viz" class="w-full h-[400px]"></div>
+        </div>
+
+        <!-- Top Authors -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Top Authors</h2>
+            <div id="author-viz" class="w-full h-[400px]"></div>
+        </div>
+    </div>
+
+    <!-- Topics and Word Cloud -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Topic Bubbles -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Topic Relationships</h2>
+            <div id="topic-viz" class="w-full h-[500px]"></div>
+        </div>
+
+        <!-- Word Cloud -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-white text-lg font-medium mb-4">Category Word Cloud</h2>
+            <div id="wordcloud-viz" class="w-full h-[500px]"></div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="animate-spin rounded-full h-32 w-32 border-t-2 border-b-2 border-blue-500"></div>
+    </div>
+
+    <!-- Error Alert -->
+    <div id="error-alert" class="fixed top-4 right-4 bg-red-600 text-white px-6 py-4 rounded-lg shadow-lg hidden">
+        <div class="flex items-center gap-3">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span id="error-message">An error occurred</span>
+        </div>
+    </div>
+</div>
+
+<!-- Override base template constraints -->
+<style>
+.content-area {
+    max-width: none !important;
+    width: 100% !important;
+    padding: 0 !important;
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="{{ url_for('static', filename='js/dashboard/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard/heatmap.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard/categories.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard/authors.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard/topics.js') }}"></script>
+{% endblock %} 
