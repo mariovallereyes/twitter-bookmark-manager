@@ -7,7 +7,7 @@
     <h2 class="text-lg font-semibold text-gray-300 mb-3">Latest Bookmarks</h2>
     <div class="grid gap-3">
         {% for tweet in latest_tweets %}
-        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden">
+        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" data-tweet-id="{{ tweet.id }}">
             <div class="p-3">
                 <!-- Author and Date -->
                 <div class="flex items-center justify-between mb-2">
@@ -30,9 +30,26 @@
                 
                 <!-- Tweet Content -->
                 <p class="text-sm text-gray-300 mb-2">{{ tweet.text|urlize }}</p>
+                <div class="flex items-center justify-between mt-4">
+                    <div class="flex items-center space-x-3">
+                        <a href="https://twitter.com/{{ tweet.author_username }}/status/{{ tweet.id }}" 
+                           target="_blank" 
+                           class="text-blue-400 hover:text-blue-300 text-sm">
+                            View on Twitter
+                        </a>
+                        <button onclick="loadEmbed(this, '{{ tweet.author_username }}', '{{ tweet.id }}')"
+                                class="text-gray-400 hover:text-gray-300 text-sm">
+                            Show Tweet
+                        </button>
+                    </div>
+                    <button class="archive-btn text-sm px-2 py-1 rounded text-gray-400 hover:text-gray-300"
+                            data-tweet-id="{{ tweet.id }}">
+                        Archive
+                    </button>
+                </div>
                 
                 <!-- Tweet Embed -->
-                <div class="tweet-embed-container w-full" data-id="{{ tweet.id }}">
+                <div class="tweet-embed-container w-full mt-4" data-id="{{ tweet.id }}">
                     <blockquote class="twitter-tweet" data-theme="dark">
                         <a href="https://twitter.com/{{ tweet.author_username }}/status/{{ tweet.id }}"></a>
                     </blockquote>
@@ -57,7 +74,7 @@
 <!-- Results grid -->
 <div class="grid gap-6" id="results-container">
     {% for tweet in results %}
-    <div class="bg-[#1a1a1a] rounded-lg overflow-hidden">
+    <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" data-tweet-id="{{ tweet.id }}">
         <!-- Tweet header -->
         <div class="p-4 border-b border-gray-800">
             <div class="flex items-center justify-between">
@@ -86,15 +103,21 @@
         <!-- Tweet content -->
         <div class="p-4">
             <p class="text-sm text-gray-300 whitespace-pre-wrap">{{ tweet.text|urlize }}</p>
-            <div class="mt-4">
-                <a href="https://twitter.com/{{ tweet.author_username }}/status/{{ tweet.id }}" 
-                   target="_blank" 
-                   class="text-blue-400 hover:text-blue-300 text-sm">
-                    View on Twitter
-                </a>
-                <button onclick="loadEmbed(this, '{{ tweet.author_username }}', '{{ tweet.id }}')"
-                        class="ml-4 text-gray-400 hover:text-gray-300 text-sm">
-                    Show Tweet
+            <div class="flex items-center justify-between mt-4">
+                <div class="flex items-center space-x-3">
+                    <a href="https://twitter.com/{{ tweet.author_username }}/status/{{ tweet.id }}" 
+                       target="_blank" 
+                       class="text-blue-400 hover:text-blue-300 text-sm">
+                        View on Twitter
+                    </a>
+                    <button onclick="loadEmbed(this, '{{ tweet.author_username }}', '{{ tweet.id }}')"
+                            class="text-gray-400 hover:text-gray-300 text-sm">
+                        Show Tweet
+                    </button>
+                </div>
+                <button class="archive-btn text-sm px-2 py-1 rounded text-gray-400 hover:text-gray-300"
+                        data-tweet-id="{{ tweet.id }}">
+                    Archive
                 </button>
             </div>
             <div class="tweet-embed-container mt-4 hidden"></div>
@@ -123,81 +146,147 @@
 </button>
 
 <script>
-const query = "{{ query|default('', true) }}";
-const isRecent = {{ 'true' if is_recent else 'false' }};
+(function() {
+    // Get template variables safely
+    const query = {% if query %}"{{ query }}"{% else %}""{% endif %};
+    const isRecent = {% if is_recent %}true{% else %}false{% endif %};
 
-function loadEmbed(button, username, tweetId) {
-    const container = button.parentElement.nextElementSibling;
-    container.classList.remove('hidden');
-    container.innerHTML = `
-        <blockquote class="twitter-tweet" data-theme="dark">
-            <a href="https://twitter.com/${username}/status/${tweetId}"></a>
-        </blockquote>
-    `;
-    twttr.widgets.load(container);
-    button.remove(); // Remove the button after loading
-}
-
-function createTweetCard(tweet) {
-    const div = document.createElement('div');
-    div.className = 'bg-[#1a1a1a] rounded-lg overflow-hidden';
-    
-    // Function to make URLs clickable
-    function linkifyText(text) {
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
-        return text.replace(urlRegex, url => 
-            `<a href="${url}" target="_blank" class="text-blue-400 hover:text-blue-300">${url}</a>`
-        );
+    // Initialize archived tweets from localStorage
+    let archivedTweets = [];
+    try {
+        archivedTweets = JSON.parse(localStorage.getItem('archived_tweets') || '[]');
+        console.log('Loaded archived tweets:', archivedTweets);
+    } catch (e) {
+        console.error('Error loading archived tweets:', e);
     }
 
-    div.innerHTML = `
-        <div class="p-4 border-b border-gray-800">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center">
-                    <a href="https://twitter.com/${tweet.author_username}" 
-                       target="_blank"
-                       class="text-sm font-medium text-gray-300 hover:text-white">
-                        @${tweet.author_username}
-                    </a>
-                </div>
-                <div class="text-xs text-gray-500">
-                    ${tweet.created_at}
-                </div>
-            </div>
-            <div class="mt-2 flex flex-wrap gap-1">
-                ${tweet.categories.map(cat => `
-                    <span class="px-1.5 py-0.5 bg-gray-800 rounded text-xs text-gray-400">
-                        ${cat}
-                    </span>
-                `).join('')}
-            </div>
-        </div>
-        <div class="p-4">
-            <p class="text-sm text-gray-300 whitespace-pre-wrap">${linkifyText(tweet.text)}</p>
-            <div class="mt-4">
-                <a href="https://twitter.com/${tweet.author_username}/status/${tweet.id}" 
-                   target="_blank" 
-                   class="text-blue-400 hover:text-blue-300 text-sm">
-                    View on Twitter
-                </a>
-                <button onclick="loadEmbed(this, '${tweet.author_username}', '${tweet.id}')"
-                        class="ml-4 text-gray-400 hover:text-gray-300 text-sm">
-                    Show Tweet
-                </button>
-            </div>
-            <div class="tweet-embed-container mt-4 hidden"></div>
-        </div>
-    `;
-    return div;
-}
-
-window.addEventListener('scroll', function() {
-    const backToTop = document.getElementById('back-to-top');
-    if (window.scrollY > 500) {
-        backToTop.classList.remove('hidden');
-    } else {
-        backToTop.classList.add('hidden');
+    function loadEmbed(button, username, tweetId) {
+        const container = button.parentElement.nextElementSibling;
+        container.classList.remove('hidden');
+        container.innerHTML = `
+            <blockquote class="twitter-tweet" data-theme="dark">
+                <a href="https://twitter.com/${username}/status/${tweetId}"></a>
+            </blockquote>
+        `;
+        twttr.widgets.load(container);
+        button.remove(); // Remove the button after loading
     }
-});
+
+    // Function to toggle archive status
+    function toggleArchive(tweetId) {
+        console.log('Toggling archive for tweet:', tweetId);
+        
+        if (!tweetId) {
+            console.error('No tweet ID provided');
+            return;
+        }
+
+        const buttons = document.querySelectorAll(`.archive-btn[data-tweet-id="${tweetId}"]`);
+        const tweetCards = document.querySelectorAll(`.tweet-card[data-tweet-id="${tweetId}"]`);
+        
+        console.log('Found buttons:', buttons.length);
+        console.log('Found cards:', tweetCards.length);
+
+        const isCurrentlyArchived = archivedTweets.includes(tweetId);
+        console.log('Is currently archived:', isCurrentlyArchived);
+        
+        if (isCurrentlyArchived) {
+            // Unarchive
+            archivedTweets = archivedTweets.filter(id => id !== tweetId);
+            buttons.forEach(btn => {
+                btn.textContent = 'Archive';
+                btn.classList.remove('bg-gray-700');
+                btn.classList.add('text-gray-400');
+            });
+            tweetCards.forEach(card => {
+                card.classList.remove('archived');
+            });
+        } else {
+            // Archive
+            archivedTweets.push(tweetId);
+            buttons.forEach(btn => {
+                btn.textContent = 'Unarchive';
+                btn.classList.add('bg-gray-700');
+                btn.classList.remove('text-gray-400');
+            });
+            tweetCards.forEach(card => {
+                card.classList.add('archived');
+            });
+        }
+        
+        // Save to localStorage
+        try {
+            localStorage.setItem('archived_tweets', JSON.stringify(archivedTweets));
+            console.log('Saved to localStorage:', archivedTweets);
+        } catch (e) {
+            console.error('Error saving to localStorage:', e);
+        }
+        
+        // Re-sort results if we're in search/results view
+        if (document.getElementById('results-container')) {
+            sortResults();
+        }
+    }
+
+    // Function to sort results, moving archived tweets to the bottom
+    function sortResults() {
+        const container = document.getElementById('results-container');
+        if (!container) return;
+        
+        const tweets = Array.from(container.children);
+        tweets.sort((a, b) => {
+            const aArchived = archivedTweets.includes(a.dataset.tweetId);
+            const bArchived = archivedTweets.includes(b.dataset.tweetId);
+            if (aArchived === bArchived) return 0;
+            return aArchived ? 1 : -1;
+        });
+        
+        tweets.forEach(tweet => container.appendChild(tweet));
+    }
+
+    // Add styles for archived tweets
+    const style = document.createElement('style');
+    style.textContent = '.tweet-card.archived { opacity: 0.7; transition: opacity 0.2s; } .tweet-card.archived:hover { opacity: 1; }';
+    document.head.appendChild(style);
+
+    // Initialize everything when the DOM is loaded
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log('DOM loaded, initializing archive functionality');
+        
+        // Add click handlers to all archive buttons
+        document.querySelectorAll('.archive-btn').forEach(btn => {
+            const tweetId = btn.dataset.tweetId;
+            console.log('Setting up button for tweet:', tweetId);
+            
+            // Add click handler
+            btn.addEventListener('click', function(e) {
+                console.log('Archive button clicked for tweet:', tweetId);
+                e.preventDefault();
+                e.stopPropagation();
+                toggleArchive(tweetId);
+            });
+            
+            // Set initial state
+            if (archivedTweets.includes(tweetId)) {
+                btn.textContent = 'Unarchive';
+                btn.classList.add('bg-gray-700');
+                btn.classList.remove('text-gray-400');
+                btn.closest('.tweet-card')?.classList.add('archived');
+            }
+        });
+        
+        // Initial sort if we're in results view
+        sortResults();
+    });
+
+    window.addEventListener('scroll', function() {
+        const backToTop = document.getElementById('back-to-top');
+        if (window.scrollY > 500) {
+            backToTop.classList.remove('hidden');
+        } else {
+            backToTop.classList.add('hidden');
+        }
+    });
+})();
 </script>
 {% endblock %}
