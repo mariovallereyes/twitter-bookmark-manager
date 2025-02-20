@@ -232,6 +232,85 @@ docker run -p 8000:8000 \
   twitter_bookmark_manager
 ```
 
+### **4️⃣ PythonAnywhere Deployment**
+For deploying on PythonAnywhere, special considerations are needed due to the platform's specific requirements:
+
+> **Note**: For detailed, step-by-step deployment instructions and platform-specific troubleshooting, refer to `deployment/README.md`.
+
+#### **Environment Setup**
+```bash
+# Create and activate virtual environment
+python3.10 -m venv venv
+source venv/bin/activate
+
+# Install platform-specific dependencies
+pip install -r deployment/pythonanywhere/requirements.txt
+```
+
+#### **ChromaDB Configuration**
+PythonAnywhere requires specific ChromaDB configuration due to version compatibility (0.3.21):
+
+1. **Modified Vector Store Implementation**
+   - Location: `deployment/pythonanywhere/database/vector_store.py`
+   - Key changes:
+     - Uses `chromadb.Client()` instead of `PersistentClient`
+     - Simplified settings initialization
+     - Local caching for sentence transformer model
+     - Cosine similarity space configuration
+
+2. **Directory Structure**
+```
+deployment/
+├── pythonanywhere/
+│   ├── database/
+│   │   └── vector_store.py    # PythonAnywhere-compatible version
+│   └── requirements.txt       # Platform-specific dependencies
+└── README.md                  # Deployment instructions
+```
+
+#### **WSGI Configuration**
+Create a WSGI configuration file (`wsgi.py`):
+```python
+import sys
+import os
+from pathlib import Path
+
+# Add the project directory to the Python path
+project_path = Path(__file__).parent
+sys.path.append(str(project_path))
+
+# Import your Flask app
+from api_server import app as application
+
+# Optional: Set environment variables if needed
+os.environ['WIX_DOMAIN'] = 'your-wix-domain.com'
+```
+
+#### **API Server Setup**
+The `api_server.py` file is configured specifically for PythonAnywhere:
+- CORS configuration for domain access
+- Proper path handling for imports
+- Enhanced logging setup
+- Health check endpoint for monitoring
+
+#### **Deployment Steps**
+1. Upload code to PythonAnywhere
+2. Configure Web app:
+   - Set Python version to 3.10
+   - Set virtualenv path
+   - Configure WSGI file
+   - Set up static files
+3. Install dependencies from `deployment/pythonanywhere/requirements.txt`
+4. Initialize database and vector store
+5. Reload the web app
+
+#### **Troubleshooting**
+Common issues and solutions:
+- ChromaDB version conflicts: Use provided PythonAnywhere-specific version
+- Import errors: Check Python path in WSGI file
+- Memory issues: Monitor resource usage in PythonAnywhere dashboard
+- Model loading: Use local caching for sentence transformers
+
 ---
 
 ## **7. Environment Variables & Configuration**
