@@ -7,7 +7,9 @@
     <h2 class="text-lg font-semibold text-gray-300 mb-3">Latest Bookmarks</h2>
     <div class="grid gap-3">
         {% for tweet in latest_tweets %}
-        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" data-tweet-id="{{ tweet.id }}">
+        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" 
+             data-tweet-id="{{ tweet.id }}"
+             data-username="{{ tweet.author_username }}">
             <div class="p-3">
                 <!-- Author and Date -->
                 <div class="flex items-center justify-between mb-2">
@@ -74,7 +76,9 @@
 <!-- Results grid -->
 <div class="grid gap-6" id="results-container">
     {% for tweet in results %}
-    <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" data-tweet-id="{{ tweet.id }}">
+    <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" 
+         data-tweet-id="{{ tweet.id }}"
+         data-username="{{ tweet.author_username }}">
         <!-- Tweet header -->
         <div class="p-4 border-b border-gray-800">
             <div class="flex items-center justify-between">
@@ -160,16 +164,53 @@
         console.error('Error loading archived tweets:', e);
     }
 
-    function loadEmbed(button, username, tweetId) {
-        const container = button.parentElement.nextElementSibling;
+    // Make loadEmbed globally available
+    window.loadEmbed = function(button, username, tweetId) {
+        const container = button.closest('.tweet-card').querySelector('.tweet-embed-container');
+        if (!container) return;
+
+        // Show loading state
         container.classList.remove('hidden');
+        container.innerHTML = '<div class="text-gray-500 text-sm">Loading tweet...</div>';
+
+        // Create and set up tweet embed
         container.innerHTML = `
             <blockquote class="twitter-tweet" data-theme="dark">
                 <a href="https://twitter.com/${username}/status/${tweetId}"></a>
             </blockquote>
         `;
-        twttr.widgets.load(container);
-        button.remove(); // Remove the button after loading
+
+        // Load the tweet
+        if (window.twttr) {
+            twttr.widgets.load(container);
+            // Hide the button after successful load
+            button.style.display = 'none';
+        }
+    };
+
+    // Function to initialize archive buttons
+    function initializeArchiveButtons() {
+        document.querySelectorAll('.archive-btn').forEach(btn => {
+            const tweetId = btn.dataset.tweetId;
+            
+            // Add click handler
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleArchive(tweetId);
+            });
+            
+            // Set initial state
+            if (archivedTweets.includes(tweetId)) {
+                btn.textContent = 'Unarchive';
+                btn.classList.add('bg-gray-700');
+                btn.classList.remove('text-gray-400');
+                btn.closest('.tweet-card')?.classList.add('archived');
+            }
+        });
+        
+        // Initial sort if we're in results view
+        sortResults();
     }
 
     // Function to toggle archive status
@@ -249,36 +290,6 @@
     style.textContent = '.tweet-card.archived { opacity: 0.7; transition: opacity 0.2s; } .tweet-card.archived:hover { opacity: 1; }';
     document.head.appendChild(style);
 
-    // Initialize everything when the DOM is loaded
-    document.addEventListener('DOMContentLoaded', function() {
-        console.log('DOM loaded, initializing archive functionality');
-        
-        // Add click handlers to all archive buttons
-        document.querySelectorAll('.archive-btn').forEach(btn => {
-            const tweetId = btn.dataset.tweetId;
-            console.log('Setting up button for tweet:', tweetId);
-            
-            // Add click handler
-            btn.addEventListener('click', function(e) {
-                console.log('Archive button clicked for tweet:', tweetId);
-                e.preventDefault();
-                e.stopPropagation();
-                toggleArchive(tweetId);
-            });
-            
-            // Set initial state
-            if (archivedTweets.includes(tweetId)) {
-                btn.textContent = 'Unarchive';
-                btn.classList.add('bg-gray-700');
-                btn.classList.remove('text-gray-400');
-                btn.closest('.tweet-card')?.classList.add('archived');
-            }
-        });
-        
-        // Initial sort if we're in results view
-        sortResults();
-    });
-
     window.addEventListener('scroll', function() {
         const backToTop = document.getElementById('back-to-top');
         if (window.scrollY > 500) {
@@ -286,6 +297,11 @@
         } else {
             backToTop.classList.add('hidden');
         }
+    });
+
+    // Initialize when DOM is loaded
+    document.addEventListener('DOMContentLoaded', function() {
+        initializeArchiveButtons();
     });
 })();
 </script>
