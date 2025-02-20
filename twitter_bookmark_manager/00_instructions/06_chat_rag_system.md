@@ -254,6 +254,46 @@ MISTRAL_MODEL_PATH=path/to/model.gguf
 🔹 **Improved AI Personalization** (Tailor responses based on user preferences).
 🔹 **Real-time Bookmark Updates** (Detect new bookmarks & auto-embed them).
 🔹 **Advanced Query Understanding** (Refining prompt engineering for AI responses).
+🔹 **Enhanced Intent Classification for Opinion Queries**
+   - Better distinction between search and opinion requests
+   - Improved context tracking for technology/topic references
+   - Specialized handling of "what do you think about X" queries
+   - Enhanced conversation flow for opinion-based discussions
+   
+   Current limitations:
+   ```python
+   # Example of current classification in intent_classifier.py
+   'search_implicit': [
+       'interested in', 'looking for', 'want to know', 'curious about',
+       'any thoughts on', 'what do you think about',  # <- Problem: Opinion phrases mixed with search
+       'tell me about'
+   ]
+   ```
+   
+   Proposed solution:
+   ```python
+   # Separate classification for opinions vs searches
+   'search_implicit': [
+       'interested in', 'looking for', 'want to know',
+       'tell me about', 'find', 'search for'
+   ]
+   
+   'opinion_requests': [
+       'what do you think about', 'what are your thoughts on',
+       'how do you feel about', 'your opinion on'
+   ]
+   
+   'contextual_references': [
+       'this technology', 'these tools', 'this approach',
+       'that method', 'these results'
+   ]
+   ```
+
+   Implementation priorities:
+   1. Separate opinion markers from search markers
+   2. Add context tracking for referenced topics
+   3. Enhance conversation flow for opinion discussions
+   4. Improve topic reference resolution
 
 **This document fully describes the Chat & RAG system, ensuring it aligns with the goal of a conversational AI assistant capable of both bookmark-related and general queries.** 🚀
 

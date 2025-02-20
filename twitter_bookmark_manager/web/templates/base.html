@@ -212,6 +212,18 @@
                                 <span class="progress-icon">⭕</span>
                                 <span class="text-sm text-gray-400">Validating JSON...</span>
                             </div>
+                            <div id="step-find-new" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Finding new bookmarks...</span>
+                            </div>
+                            <div id="step-init-ai" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Initializing AI models...</span>
+                            </div>
+                            <div id="step-dedup" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Checking for duplicates...</span>
+                            </div>
                             <div id="step-sql" class="flex items-center gap-2">
                                 <span class="progress-icon">⭕</span>
                                 <span class="text-sm text-gray-400">Updating SQL database...</span>
@@ -223,6 +235,10 @@
                             <div id="step-vectors" class="flex items-center gap-2">
                                 <span class="progress-icon">⭕</span>
                                 <span class="text-sm text-gray-400">Rebuilding vector store...</span>
+                            </div>
+                            <div id="step-sync" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Verifying database sync...</span>
                             </div>
                         </div>
 
@@ -464,6 +480,21 @@
             updateProgress('upload', 'done');
             updateProgress('validate', 'done');
 
+            // Finding new bookmarks
+            updateProgress('find-new', 'processing');
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
+            updateProgress('find-new', 'done');
+
+            // Initialize AI
+            updateProgress('init-ai', 'processing');
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
+            updateProgress('init-ai', 'done');
+
+            // Deduplication
+            updateProgress('dedup', 'processing');
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
+            updateProgress('dedup', 'done');
+
             // Update database
             updateProgress('sql', 'processing');
             const updateResponse = await fetch('/update-database', {
@@ -475,8 +506,21 @@
                 
                 // Update progress for each step
                 updateProgress('sql', 'done');
+                
+                // Categories processing
+                updateProgress('categories', 'processing');
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
                 updateProgress('categories', 'done');
+                
+                // Vector store rebuild
+                updateProgress('vectors', 'processing');
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
                 updateProgress('vectors', 'done');
+
+                // Final sync verification
+                updateProgress('sync', 'processing');
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
+                updateProgress('sync', 'done');
                 
                 // Success message and reload
                 document.getElementById('file-name').textContent = 'Update successful! Reloading...';
@@ -484,11 +528,10 @@
             } else {
                 throw new Error('Database update failed');
             }
-            
         } catch (error) {
             console.error('Error:', error);
             // Mark current step as error
-            ['upload', 'validate', 'sql', 'categories', 'vectors'].forEach(step => {
+            ['upload', 'validate', 'find-new', 'init-ai', 'dedup', 'sql', 'categories', 'vectors', 'sync'].forEach(step => {
                 const element = document.getElementById(`step-${step}`);
                 if (element && element.querySelector('.progress-icon').textContent === '⚡') {
                     updateProgress(step, 'error');
