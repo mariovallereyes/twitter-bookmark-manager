@@ -14,13 +14,20 @@ class BookmarkSearch:
         try:
             self.embedding_model = None  # Will load when needed
             self.vector_store = get_vector_store()
-            # Get total number of bookmarks from DB session
-            with get_db_session() as session:
-                self.total_tweets = session.query(Bookmark).count()
+            self.total_tweets = self._get_total_tweets()  # Use new method
             logger.info(f"✓ Search initialized successfully with {self.total_tweets} bookmarks")
         except Exception as e:
             logger.error(f"❌ Error initializing search: {e}")
             raise
+
+    def _get_total_tweets(self):
+        """Get current total number of tweets from database"""
+        try:
+            with get_db_session() as session:
+                return session.query(Bookmark).count()
+        except Exception as e:
+            logger.error(f"❌ Error getting total tweets: {e}")
+            return 0
 
     def _ensure_model_loaded(self):
         """Load the embedding model if not already loaded"""
@@ -28,8 +35,79 @@ class BookmarkSearch:
             from sentence_transformers import SentenceTransformer
             self.embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
+    def _batched_vector_search(self, query, max_results=None, batch_size=100):
+        """
+        Perform vector search in batches to avoid ChromaDB limitations.
+        Uses the new search_with_exclusions method to get more than 100 results.
+        
+        Args:
+            query: The search query string
+            max_results: Maximum total results to return (None for all matching)
+            batch_size: Size of each batch (default: 100 to avoid ChromaDB errors)
+            
+        Returns:
+            List of vector search results
+        """
+        all_results = []
+        excluded_ids = set()  # Track IDs we've already seen
+        
+        # Default max_results to total_tweets if None
+        if max_results is None:
+            max_results = self.total_tweets
+            
+        # Set a reasonable upper limit for iterations to prevent infinite loops
+        max_iterations = 10
+        
+        logger.info(f"🔎 Starting batched vector search for '{query}' (max results: {max_results})")
+        
+        # Continue fetching batches until we have enough results or no more are available
+        for iteration in range(max_iterations):
+            try:
+                # Stop if we've collected enough results
+                if len(all_results) >= max_results:
+                    logger.info(f"✓ Reached max results limit ({max_results}). Stopping batched search.")
+                    break
+                    
+                # Calculate how many more results we need
+                remaining = max_results - len(all_results)
+                current_batch_size = min(batch_size, remaining)
+                
+                logger.info(f"📊 Batch {iteration+1}: Fetching {current_batch_size} results (excluded: {len(excluded_ids)})")
+                
+                # Get next batch with exclusions
+                batch_results = self.vector_store.search_with_exclusions(
+                    query=query,
+                    limit=current_batch_size,
+                    excluded_ids=list(excluded_ids)
+                )
+                
+                # Stop if no new results
+                if not batch_results:
+                    logger.info(f"✓ No more results found. Stopping batched search.")
+                    break
+                
+                # Add batch results to our collection
+                all_results.extend(batch_results)
+                
+                # Update excluded IDs for next iteration
+                for result in batch_results:
+                    excluded_ids.add(result['bookmark_id'])
+                    
+                # If batch is smaller than requested, we've exhausted all matches
+                if len(batch_results) < current_batch_size:
+                    logger.info(f"✓ Fewer results returned than requested ({len(batch_results)} < {current_batch_size}). All available results found.")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"❌ Error in batch {iteration+1}: {e}")
+                break
+        
+        logger.info(f"🔍 Batched search complete. Found {len(all_results)} total results for '{query}'")
+        return all_results
+
     def get_total_tweets(self):
-        """Return total number of tweets in the database"""
+        """Return total number of tweets in the database with refresh"""
+        self.total_tweets = self._get_total_tweets()  # Refresh count
         return self.total_tweets
 
     def search(self, 
@@ -40,6 +118,9 @@ class BookmarkSearch:
         Search bookmarks using semantic similarity with optional category filtering
         """
         try:
+            # Update total count before search
+            self.total_tweets = self._get_total_tweets()
+            
             # No criteria provided - return all bookmarks
             if not query and not categories:
                 return self.get_all_bookmarks(limit=limit if limit else 1000)
@@ -66,12 +147,26 @@ class BookmarkSearch:
                 logger.info(f"🔍 Searching for: '{query}'")
                 
                 try:
-                    # Try vector search first
+                    # Try batched vector search
                     self._ensure_model_loaded()
-                    vector_results = self.vector_store.search(
-                        query=query,
-                        n_results=min(self.total_tweets, 100)  # Limit to 100 max
-                    )
+                    
+                    # Use all available tweets as max_results to get comprehensive results
+                    # This removes the 100 result limitation
+                    max_search_results = self.total_tweets
+                    
+                    try:
+                        # First try with batched search for more comprehensive results
+                        vector_results = self._batched_vector_search(
+                            query=query, 
+                            max_results=max_search_results
+                        )
+                    except Exception as batch_err:
+                        # Fall back to regular search with limit if batched search fails
+                        logger.warning(f"Batched search failed, falling back to regular search: {batch_err}")
+                        vector_results = self.vector_store.search(
+                            query=query,
+                            n_results=min(self.total_tweets, 100)  # Limit to 100 max
+                        )
                     
                     processed_results = []
                     seen_ids = set()
@@ -165,6 +260,9 @@ class BookmarkSearch:
     def get_all_bookmarks(self, limit: int = 1000) -> List[Dict[str, Any]]:
         """Get all bookmarks"""
         try:
+            # Update total count before retrieving all bookmarks
+            self.total_tweets = self._get_total_tweets()
+            
             with get_db_session() as session:
                 total = session.query(Bookmark).count()
                 logger.info(f"📚 Fetching {limit} of {total} total bookmarks")

@@ -90,6 +90,82 @@ class ChromaStore:
             logger.error(f"Search error in ChromaStore: {e}")
             return []
 
+    def search_with_exclusions(self, 
+                              query_embedding: List[float] = None,
+                              query: str = None,
+                              limit: int = 100,
+                              excluded_ids: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Search that supports excluding specific bookmark IDs from results.
+        
+        Args:
+            query_embedding: Optional pre-computed embedding
+            query: Text query (will be encoded if query_embedding not provided)
+            limit: Maximum number of results to return
+            excluded_ids: List of bookmark IDs to exclude from results
+            
+        Returns:
+            List of processed search results with excluded IDs filtered out
+        """
+        try:
+            # Convert excluded_ids to a set for faster lookups
+            excluded_set = set(excluded_ids or [])
+            
+            # Handle both embedding and text-based search
+            if query_embedding is None and query is not None:
+                query_embedding = self.model.encode(query).tolist()
+            elif query_embedding is None and query is None:
+                raise ValueError("Either query_embedding or query must be provided")
+            
+            # Request more results than needed to account for exclusions
+            # At minimum, request twice the limit, but cap at collection size
+            collection_size = self.collection.count()
+            buffer_size = min(max(limit * 2, 100), collection_size)
+            
+            logger.info(f"Performing vector search with exclusions: limit={limit}, buffer={buffer_size}, excluded={len(excluded_set)}")
+            
+            # Perform the search with the buffer size
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=buffer_size,
+                include=['metadatas', 'distances', 'documents']
+            )
+            
+            # Process results, excluding specified IDs
+            processed_results = []
+            if results and 'ids' in results and len(results['ids']) > 0:
+                for i in range(len(results['ids'][0])):
+                    try:
+                        bookmark_id = str(results['ids'][0][i])
+                        
+                        # Skip excluded IDs
+                        if bookmark_id in excluded_set:
+                            continue
+                            
+                        distance = results['distances'][0][i] if 'distances' in results else 0.0
+                        processed_results.append({
+                            'bookmark_id': bookmark_id,
+                            'score': 1.0 - distance,
+                            'distance': distance,  # Include raw distance for debugging
+                            'metadata': results['metadatas'][0][i] if 'metadatas' in results else {},
+                            'text': results['documents'][0][i] if 'documents' in results else None
+                        })
+                        
+                        # Stop if we have enough results after filtering
+                        if len(processed_results) >= limit:
+                            break
+                            
+                    except Exception as e:
+                        logger.warning(f"Error processing result {i}: {e}")
+                        continue
+            
+            logger.info(f"Vector search with exclusions found {len(processed_results)} results after filtering")
+            return processed_results
+            
+        except Exception as e:
+            logger.error(f"Search with exclusions error in ChromaStore: {e}")
+            return []
+
     def delete_bookmark(self, bookmark_id: str):
         """Delete a bookmark from the vector store"""
         try:
