@@ -1,12 +1,25 @@
-# Environment variables
+# Environment files (contain sensitive information)
 .env
+.env.*
+.flaskenv
 
-# Python
+# Editor settings
+*.code-workspace
+.vscode/
+.idea/
+
+# Data and backups
+database/json_history/
+*.backup
+*.bak
+
+# Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -18,21 +31,21 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# Virtual environment
 venv/
 ENV/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.cursor/
+# Logs
+logs/
+*.log
+
+# Temporary files
+*~
+h
 
 # Project specific
 media/
