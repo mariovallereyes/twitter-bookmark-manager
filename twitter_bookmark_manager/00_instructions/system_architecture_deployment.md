@@ -233,9 +233,37 @@ docker run -p 8000:8000 \
 ```
 
 ### **4️⃣ PythonAnywhere Deployment**
-For deploying on PythonAnywhere, special considerations are needed due to the platform's specific requirements:
+For deploying on PythonAnywhere, the system uses a different database configuration than local development:
 
-> **Note**: For detailed, step-by-step deployment instructions and platform-specific troubleshooting, refer to `deployment/README.md`.
+#### **Database Configuration**
+- **Local Development**: SQLite + ChromaDB
+- **PythonAnywhere**: PostgreSQL + Qdrant
+
+#### **PostgreSQL Setup**
+```bash
+# Environment variables for PostgreSQL
+export POSTGRES_DB=your_database_name
+export POSTGRES_USER=your_username
+export POSTGRES_PASSWORD=your_password
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+```
+
+#### **Qdrant Vector Store**
+```bash
+# Qdrant configuration
+export VECTOR_STORE_TYPE=qdrant
+export QDRANT_HOST=localhost
+export QDRANT_PORT=6333
+export QDRANT_COLLECTION=bookmarks
+```
+
+#### **Migration Notes**
+- The system automatically detects the environment and uses appropriate database connections
+- Local development continues to use SQLite + ChromaDB
+- PythonAnywhere deployment uses PostgreSQL + Qdrant
+- Data migration scripts are provided in `deployment/pythonanywhere/database/`
 
 #### **Environment Setup**
 ```bash
@@ -474,3 +502,26 @@ export GEMINI_API_KEY="your-api-key"
 ---
 
 **This guide provides full details on system setup, architecture, and deployment. Future improvements should be documented here.** 🚀
+
+<!-- New Section: PythonAnywhere Execution Details -->
+## 11. PythonAnywhere Execution Details
+
+This section describes the modifications and configurations specific to PythonAnywhere deployment. These adjustments do not affect local execution, which continues to use the original configuration (SQLite for the database and ChromaDB for the vector store).
+
+### Key PythonAnywhere-Specific Adjustments
+
+- **Database Configuration**:
+  - *Local Setup*: Uses SQLite with `sqlite:///database/twitter_bookmarks.db`.
+  - *PythonAnywhere Deployment*: Uses PostgreSQL, configured via the `DATABASE_URL` environment variable. Schema migration and initialization are handled by `deployment/pythonanywhere/postgres/migrate_schema.py` and `deployment/pythonanywhere/postgres/init_db.py`.
+
+- **Vector Store Configuration**:
+  - *Local Setup*: Utilizes ChromaDB for vector storage.
+  - *PythonAnywhere Deployment*: Utilizes Qdrant, implemented in `deployment/pythonanywhere/database/vector_store_pa.py`. Notable modifications include deterministic UUID generation for bookmarks using `uuid.uuid5` and integration with Qdrant's client for upsert, search, and deletion operations.
+
+- **Bookmark Update Process**:
+  - PythonAnywhere-specific bookmark updates are managed by `deployment/pythonanywhere/database/update_bookmarks_pa.py`, which updates the PostgreSQL database and Qdrant vector store in batches, featuring enhanced error handling and duplicate prevention.
+
+- **WSGI and API Server Configuration**:
+  - The WSGI configuration in `wsgi.py` and the API server in `api_server.py` are modified to load environment variables from `.env.pythonanywhere`, and to adapt file paths and logging for the PythonAnywhere environment.
+
+These changes ensure that the production environment on PythonAnywhere is optimized and runs reliably, while local development remains unaffected.

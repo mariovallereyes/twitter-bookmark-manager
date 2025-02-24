@@ -98,4 +98,28 @@ For issues specific to PythonAnywhere deployment:
 
 ## Local Development
 
-For local development, continue using the original `vector_store.py` from the main project directory. The PythonAnywhere-specific version is only for deployment. 
+For local development, continue using the original `vector_store.py` from the main project directory. The PythonAnywhere-specific version is only for deployment.
+
+<!-- New Section: PythonAnywhere Execution Details -->
+## PythonAnywhere Execution Details
+
+The PythonAnywhere deployment of Twitter Bookmarks Manager incorporates several modifications to ensure optimal performance and reliability in the production environment, without affecting local development.
+
+### Key Modifications
+
+- **Environment Configuration**:
+  - Environment variables are loaded from a dedicated `.env.pythonanywhere` file to configure the application securely.
+  - The WSGI configuration (`wsgi.py`) and the API server (`api_server.py`) are adjusted to use absolute paths and appropriate logging for PythonAnywhere.
+
+- **Database Setup**:
+  - Instead of using SQLite, PostgreSQL is used as the primary relational database. The connection is managed via the `DATABASE_URL` environment variable.
+  - Schema migration is handled by the script `deployment/pythonanywhere/postgres/migrate_schema.py`, and database initialization is performed by `deployment/pythonanywhere/postgres/init_db.py`.
+
+- **Vector Store**:
+  - The local ChromaDB vector store is replaced by a Qdrant-based implementation, configured in `deployment/pythonanywhere/database/vector_store_pa.py`.
+  - This implementation includes deterministic UUID generation for bookmarks, ensuring consistency for vector operations.
+
+- **Bookmark Update Process**:
+  - Bookmark updates in the PythonAnywhere environment are executed via `deployment/pythonanywhere/database/update_bookmarks_pa.py`, which processes bookmarks in batches with enhanced error handling and duplicate checking.
+
+These adjustments isolate the production setup from the local development configuration, allowing local execution to continue using SQLite and ChromaDB without interference. 

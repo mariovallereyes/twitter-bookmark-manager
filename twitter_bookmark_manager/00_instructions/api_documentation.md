@@ -152,3 +152,73 @@ Currently, the system **does not require authentication** for API requests. Futu
 - **User-based authentication & private bookmark collections.**
 
 **This document serves as the complete API reference for the system. Any new API additions should be documented here.** 🚀
+
+## **4. PythonAnywhere-Specific API Configuration**
+
+### **Environment-Specific Endpoints**
+The PythonAnywhere deployment includes modified API endpoints that handle PostgreSQL and Qdrant integration:
+
+#### **POST `/upload-bookmarks`** - Enhanced File Upload
+- **Additional Validations**:
+  ```json
+  {
+    "max_file_size": "16MB",
+    "allowed_types": ["application/json"],
+    "temp_storage": "temp_uploads/"
+  }
+  ```
+- **Enhanced Response Format**:
+  ```json
+  {
+    "message": "File uploaded successfully",
+    "details": {
+        "original_name": "bookmarks.json",
+        "final_path": "/path/to/database/twitter_bookmarks.json",
+        "backup_created": true,
+        "timestamp": "2025-02-08T04:05:00Z"
+    }
+  }
+  ```
+
+#### **POST `/update-database`** - PostgreSQL Updates
+- **Process Details**:
+  ```json
+  {
+    "message": "Database updated successfully",
+    "details": {
+        "new_bookmarks": 50,
+        "updated_bookmarks": 10,
+        "errors": 0,
+        "total_processed": 60,
+        "unique_ids": 60
+    }
+  }
+  ```
+
+### **Error Handling**
+PythonAnywhere-specific error responses include additional context:
+```json
+{
+    "error": "Database operation failed",
+    "details": {
+        "operation": "bookmark_update",
+        "stage": "vector_store_sync",
+        "error_code": "QDRANT_SYNC_ERROR",
+        "timestamp": "2025-02-08T04:05:00Z"
+    },
+    "traceback": "Detailed error trace"
+}
+```
+
+### **Rate Limiting**
+PythonAnywhere-specific rate limits:
+- Upload endpoint: 10 requests/hour
+- Database update: 5 requests/hour
+- Search operations: 100 requests/minute
+
+### **Logging**
+Enhanced logging configuration:
+- Location: `/home/username/logs/`
+- Format: Detailed timestamps and request context
+- Rotation: Daily with 7-day retention
+- Error tracking: Integrated with PythonAnywhere's error console

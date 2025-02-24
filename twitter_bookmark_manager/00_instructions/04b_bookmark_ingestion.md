@@ -124,4 +124,45 @@ The **SQLAlchemy ORM** schema consists of:
 - **Enhanced AI categorization**: Train a custom model for topic detection.
 
 ---
+
+## **8. PythonAnywhere-Specific Ingestion**
+### **Overview**
+The PythonAnywhere deployment uses a modified ingestion process that:
+- Uses PostgreSQL instead of SQLite
+- Implements Qdrant instead of ChromaDB for vector storage
+- Features enhanced batch processing and error handling
+
+### **Key Components**
+- **Database Updates**: Uses `update_bookmarks_pa.py` for PostgreSQL-specific operations
+- **Vector Store**: Implements `vector_store_pa.py` for Qdrant integration
+- **Data Validation**: Enhanced duplicate checking and error handling
+- **Batch Processing**: Optimized for larger datasets
+
+### **Process Flow**
+1. **File Upload**:
+   - JSON file is uploaded via the web interface
+   - Stored temporarily in `temp_uploads/`
+   - Validated for structure and content
+
+2. **Data Processing**:
+   - Bookmarks are processed in configurable batches
+   - Each bookmark is mapped to the correct schema
+   - Duplicate detection uses PostgreSQL-specific queries
+   - Vector embeddings are generated and stored in Qdrant
+
+3. **Error Handling**:
+   - Transaction-based updates with rollback support
+   - Detailed logging of processing steps
+   - Batch-level error recovery
+   - Session management for long-running operations
+
+4. **Data Consistency**:
+   - UUID-based bookmark identification
+   - Atomic database operations
+   - Synchronized vector store updates
+   - Maintains data integrity across components
+
+This PythonAnywhere-specific implementation ensures reliable processing of large bookmark collections while maintaining compatibility with the existing system architecture.
+
+---
 **This document will evolve as new features are added.**

@@ -44,7 +44,26 @@ The **Twitter Bookmarks Manager** is structured into key components, each respon
 - **`database/db.py`** – Manages database connections.
 
 ## 4. Database Layer
-**Primary Role**: Stores structured bookmark data and facilitates efficient querying.
+The system supports two different database configurations:
+
+### Local Development
+- **Main Database**: SQLite
+- **Vector Store**: ChromaDB
+- **Location**: Local files in the project directory
+- **Configuration**: Automatically handled by SQLAlchemy
+
+### PythonAnywhere Deployment
+- **Main Database**: PostgreSQL
+- **Vector Store**: Qdrant
+- **Configuration**: Environment variables in `.env.pythonanywhere`
+- **Migration**: Automatic detection and configuration based on environment
+
+### Common Features
+- SQLAlchemy ORM for database operations
+- Automatic schema management
+- Vector embeddings for semantic search
+- Category processing and management
+- Bookmark metadata storage
 
 ### **Key Storage Components:**
 - **SQLite Database** (via SQLAlchemy ORM): Stores structured bookmark data.
@@ -74,7 +93,7 @@ The **Twitter Bookmarks Manager** is structured into key components, each respon
 **Primary Role**: Enables users to **ask questions in natural language** and retrieve bookmarks intelligently.
 
 ### **How It Works:**
-1. User **inputs a query** (e.g., “Find me tweets about AI ethics”).
+1. User **inputs a query** (e.g., "Find me tweets about AI ethics").
 2. The system **retrieves relevant bookmarks** from the vector database.
 3. AI **analyzes content** and formulates a response.
 4. User **can continue the conversation** with follow-up queries.

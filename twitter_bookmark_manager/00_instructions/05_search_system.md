@@ -195,4 +195,26 @@ Common error codes:
 - **Cross-Language Search:** Multi-language support
 - **Analytics Dashboard:** Search effectiveness tracking
 
+## Vector Store Configuration
+
+The search system supports two vector store implementations:
+
+### Local Development (ChromaDB)
+- Uses ChromaDB for vector storage and similarity search
+- Stores embeddings locally in the project directory
+- Simple setup with no additional infrastructure required
+- Ideal for development and testing
+
+### PythonAnywhere Deployment (Qdrant)
+- Uses Qdrant for production-grade vector storage
+- Better performance and scalability
+- Supports larger bookmark collections
+- Provides advanced filtering and search capabilities
+
+### Common Features
+- Both implementations use the same embedding model
+- Consistent search API regardless of backend
+- Automatic configuration based on environment
+- Seamless switching between implementations
+
 This document **fully describes** the **Search & Retrieval System** and how all components work together. **Future updates will refine this as new features are added.**
