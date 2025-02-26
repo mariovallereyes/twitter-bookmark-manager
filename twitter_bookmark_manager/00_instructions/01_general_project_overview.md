@@ -63,6 +63,21 @@ The **Twitter Bookmarks Manager** is a specialized web application designed to *
 - **Retrieval-Augmented Generation (RAG)** system for enhanced conversational capabilities
 - Dynamic model selection via environment configuration
 
+### 5. Deployment Architecture
+- **Dual Deployment Capability**: The system is designed to run in both local development and production environments.
+- **Local Development**:
+  - Uses **SQLite** for relational database storage
+  - Uses **ChromaDB** for vector embeddings
+  - Entry point via `main.py` and `server.py`
+  - File-based configuration via `.env`
+- **PythonAnywhere Production**:
+  - Uses **PostgreSQL** for relational database storage
+  - Uses **Qdrant** for vector embeddings
+  - Entry point via `wsgi.py` and `api_server.py`
+  - PythonAnywhere-specific configuration via `.env.pythonanywhere`
+  - Enhanced error handling and logging optimized for production
+  - Same codebase with environment-specific adapters in the `deployment` folder
+
 ## Data Flow Overview
 
 1. **API Request Handling**:
@@ -97,9 +112,11 @@ The **Twitter Bookmarks Manager** is a specialized web application designed to *
 
 - **Python 3.8+**
 - **Flask web framework**
-- **SQLite for database**
-- **ChromaDB for vector storage**
-- **GPU recommended for AI-powered features**
+- **SQLite for database** (local development)
+- **PostgreSQL** (PythonAnywhere production)
+- **ChromaDB for vector storage** (local development)
+- **Qdrant for vector storage** (PythonAnywhere production)
+- **GPU recommended for AI-powered features** (local development)
 - **Web browser for frontend access**
 
 ## Next Steps

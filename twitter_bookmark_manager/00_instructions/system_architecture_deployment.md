@@ -510,18 +510,114 @@ This section describes the modifications and configurations specific to PythonAn
 
 ### Key PythonAnywhere-Specific Adjustments
 
-- **Database Configuration**:
-  - *Local Setup*: Uses SQLite with `sqlite:///database/twitter_bookmarks.db`.
-  - *PythonAnywhere Deployment*: Uses PostgreSQL, configured via the `DATABASE_URL` environment variable. Schema migration and initialization are handled by `deployment/pythonanywhere/postgres/migrate_schema.py` and `deployment/pythonanywhere/postgres/init_db.py`.
+#### Database Configuration
+- **Local Setup**: Uses SQLite with `sqlite:///database/twitter_bookmarks.db`.
+- **PythonAnywhere Deployment**: Uses PostgreSQL, configured via the `DATABASE_URL` environment variable. Schema migration and initialization are handled by `deployment/pythonanywhere/postgres/migrate_schema.py` and `deployment/pythonanywhere/postgres/init_db.py`.
 
-- **Vector Store Configuration**:
-  - *Local Setup*: Utilizes ChromaDB for vector storage.
-  - *PythonAnywhere Deployment*: Utilizes Qdrant, implemented in `deployment/pythonanywhere/database/vector_store_pa.py`. Notable modifications include deterministic UUID generation for bookmarks using `uuid.uuid5` and integration with Qdrant's client for upsert, search, and deletion operations.
+#### Vector Store Configuration
+- **Local Setup**: Utilizes ChromaDB for vector storage.
+- **PythonAnywhere Deployment**: Utilizes Qdrant, implemented in `deployment/pythonanywhere/database/vector_store_pa.py`. Notable modifications include deterministic UUID generation for bookmarks using `uuid.uuid5` and integration with Qdrant's client for upsert, search, and deletion operations.
 
-- **Bookmark Update Process**:
-  - PythonAnywhere-specific bookmark updates are managed by `deployment/pythonanywhere/database/update_bookmarks_pa.py`, which updates the PostgreSQL database and Qdrant vector store in batches, featuring enhanced error handling and duplicate prevention.
+#### Bookmark Update Process
+- PythonAnywhere-specific bookmark updates are managed by `deployment/pythonanywhere/database/update_bookmarks_pa.py`, which updates the PostgreSQL database and Qdrant vector store in batches, featuring enhanced error handling and duplicate prevention.
 
-- **WSGI and API Server Configuration**:
-  - The WSGI configuration in `wsgi.py` and the API server in `api_server.py` are modified to load environment variables from `.env.pythonanywhere`, and to adapt file paths and logging for the PythonAnywhere environment.
+#### WSGI and API Server Configuration
+- The WSGI configuration in `wsgi.py` and the API server in `api_server.py` are modified to load environment variables from `.env.pythonanywhere`, and to adapt file paths and logging for the PythonAnywhere environment.
+
+### Implementation Details
+
+#### WSGI Implementation (`wsgi.py`)
+The `wsgi.py` file serves as the entry point for the PythonAnywhere web server and performs several critical functions:
+
+1. **Path Setup and Environment Configuration**:
+   - Sets project paths for correct module imports
+   - Loads PythonAnywhere-specific environment variables from `.env.pythonanywhere`
+   - Configures logging for comprehensive error tracking
+
+2. **Import Handling and Module Patching**:
+   - Blocks ChromaDB imports to prevent SQLite version conflicts (PythonAnywhere has an older SQLite version)
+   - Creates compatibility layers for libraries like `huggingface_hub`
+   - Pre-loads PythonAnywhere database modules to ensure proper initialization
+
+3. **Custom Import Hook**:
+   - Installs a fallback import hook to redirect import requests
+   - Ensures database imports use the PythonAnywhere-specific implementations
+   - Maintains compatibility with existing code expecting certain module paths
+
+#### API Server Implementation (`api_server.py`)
+The `api_server.py` file implements the Flask application that handles all HTTP requests:
+
+1. **Initialization and Configuration**:
+   - Sets up absolute paths for PythonAnywhere environment
+   - Configures enhanced logging with session tracking
+   - Creates required directories (logs, temp_uploads, etc.)
+
+2. **API Endpoints**:
+   - Implements standard endpoints (`/search`, `/api/chat`, etc.)
+   - Adds PythonAnywhere-specific endpoints (`/api/status`, `/debug-database`)
+   - Enhances error handling with detailed responses
+
+3. **File Upload Handling**:
+   - Implements robust file validation
+   - Creates timestamped backups before processing
+   - Uses session IDs for tracking operations
+
+4. **Database Update Process**:
+   - Implements batch processing with pause/resume capability
+   - Tracks progress for long-running operations
+   - Uses transaction-based operations for consistency
+
+### PostgreSQL Database Adapter (`db_pa.py`)
+The PostgreSQL adapter provides a compatible interface with the following features:
+
+1. **Connection Pooling**:
+   - Efficiently manages database connections
+   - Implements connection retry logic
+   - Uses environment variables for secure configuration
+
+2. **Session Management**:
+   - Provides context managers for database sessions
+   - Ensures proper transaction handling
+   - Maintains backward compatibility with existing code
+
+3. **Database Status Monitoring**:
+   - Implements health check functions
+   - Provides detailed error reporting
+   - Supports administrative queries
+
+### Qdrant Vector Store Implementation (`vector_store_pa.py`)
+The Qdrant vector store implementation replaces ChromaDB with the following features:
+
+1. **API Compatibility**:
+   - Implements the same interface as the ChromaDB version
+   - Allows seamless switching between environments
+   - Supports all required operations (add, search, delete)
+
+2. **Deterministic UUID Generation**:
+   - Uses `uuid.uuid5` with a namespace for consistent IDs
+   - Ensures bookmark vectors have the same ID across operations
+   - Prevents duplicate entries and enables efficient updates
+
+3. **Vector Operations**:
+   - Optimized batch upsert operations
+   - Efficient similarity search with filtering
+   - Proper error handling and retry logic
+
+### Environment Configuration (`.env.pythonanywhere`)
+The PythonAnywhere environment is configured through a dedicated `.env.pythonanywhere` file:
+
+1. **Database Configuration**:
+   - PostgreSQL connection parameters
+   - Qdrant connection settings
+   - Explicit database credentials
+
+2. **Path Configuration**:
+   - Absolute paths for PythonAnywhere environment
+   - Directory locations for logs, uploads, and data
+
+3. **AI Model Configuration**:
+   - API keys for cloud-based AI services
+   - Model selection parameters
+   - Performance settings
 
 These changes ensure that the production environment on PythonAnywhere is optimized and runs reliably, while local development remains unaffected.

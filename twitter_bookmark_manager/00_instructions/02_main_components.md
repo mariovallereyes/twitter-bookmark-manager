@@ -28,6 +28,10 @@ The **Twitter Bookmarks Manager** is structured into key components, each respon
 - **Flask (Python) for the backend API**.
 - **SQLAlchemy ORM for database management**.
 
+### **Environment-Specific Components:**
+- **Local Development**: Entry point via `server.py` for local development server
+- **PythonAnywhere Production**: Entry point via `wsgi.py` which loads `api_server.py`
+
 ## 3. Bookmark Ingestion & Processing
 **Primary Role**: Processes raw Twitter bookmark JSON files, extracting relevant data and ensuring **data consistency**.
 
@@ -42,21 +46,36 @@ The **Twitter Bookmarks Manager** is structured into key components, each respon
 - **`update_bookmarks.py`** – Handles data ingestion and database updates.
 - **`database/models.py`** – Defines the database schema.
 - **`database/db.py`** – Manages database connections.
+- **`deployment/pythonanywhere/database/update_bookmarks_pa.py`** - Handles PythonAnywhere-specific bookmark updates
 
 ## 4. Database Layer
 The system supports two different database configurations:
 
-### Local Development
+### Local Development Database Architecture
 - **Main Database**: SQLite
+  - **Connection**: File-based via SQLAlchemy
+  - **Schema**: Defined in `database/models.py`
+  - **Operations**: Managed through `database/db.py`
+  - **Location**: `database/twitter_bookmarks.db`
+  
 - **Vector Store**: ChromaDB
-- **Location**: Local files in the project directory
-- **Configuration**: Automatically handled by SQLAlchemy
+  - **Implementation**: `database/vector_store.py`
+  - **Storage**: Persistent ChromaDB collection in `vector_db/`
+  - **Embeddings**: Generated using SentenceTransformers
+  - **Operations**: Add, search, and delete vectors
 
-### PythonAnywhere Deployment
+### PythonAnywhere Production Database Architecture
 - **Main Database**: PostgreSQL
+  - **Connection**: Network-based via SQLAlchemy using `DATABASE_URL` environment variable
+  - **Schema**: Identical to local, defined in `database/models.py`
+  - **Operations**: Managed through `deployment/pythonanywhere/database/db_pa.py`
+  - **Setup**: Initialization via `deployment/pythonanywhere/postgres/init_db.py`
+  
 - **Vector Store**: Qdrant
-- **Configuration**: Environment variables in `.env.pythonanywhere`
-- **Migration**: Automatic detection and configuration based on environment
+  - **Implementation**: `deployment/pythonanywhere/database/vector_store_pa.py`
+  - **Connectivity**: Network-based via Qdrant client
+  - **UUID Generation**: Deterministic UUIDs for consistent vector operations
+  - **API Compatibility**: Implements the same interface as ChromaDB for seamless swapping
 
 ### Common Features
 - SQLAlchemy ORM for database operations

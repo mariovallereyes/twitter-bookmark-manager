@@ -140,7 +140,7 @@ The PythonAnywhere deployment uses a modified ingestion process that:
 
 ### **Process Flow**
 1. **File Upload**:
-   - JSON file is uploaded via the web interface
+   - JSON file is uploaded via the web interface to `api_server.py`
    - Stored temporarily in `temp_uploads/`
    - Validated for structure and content
 
@@ -148,21 +148,37 @@ The PythonAnywhere deployment uses a modified ingestion process that:
    - Bookmarks are processed in configurable batches
    - Each bookmark is mapped to the correct schema
    - Duplicate detection uses PostgreSQL-specific queries
-   - Vector embeddings are generated and stored in Qdrant
 
-3. **Error Handling**:
-   - Transaction-based updates with rollback support
-   - Detailed logging of processing steps
-   - Batch-level error recovery
-   - Session management for long-running operations
+3. **Vector Embedding**:
+   - Text content is extracted from bookmarks
+   - SentenceTransformers generates embeddings
+   - Qdrant stores embeddings with deterministic UUIDs
+   - Search functionality is preserved with the same interface
 
-4. **Data Consistency**:
-   - UUID-based bookmark identification
-   - Atomic database operations
-   - Synchronized vector store updates
-   - Maintains data integrity across components
+4. **Category Assignment**:
+   - AI categorization remains similar to local execution
+   - Results are stored in PostgreSQL with efficient batch operations
+   - Categories are indexed for faster retrieval
 
-This PythonAnywhere-specific implementation ensures reliable processing of large bookmark collections while maintaining compatibility with the existing system architecture.
+### **Key Differences from Local Execution**
+- **Connection Management**: Uses PostgreSQL connection pooling for efficiency
+- **Error Handling**: Enhanced logging with session IDs and detailed error tracking
+- **Resume Capability**: Processing can be paused and resumed through the `/update-database` endpoint
+- **Progress Tracking**: Progress is stored in a progress file to support resumption
+- **Backup System**: JSON snapshots are stored with timestamps in the history directory
+- **API Endpoints**: Additional endpoints like `/api/status` for monitoring database health
+
+### **Troubleshooting**
+- **Common Issues**:
+  - Database connection errors: Check `.env.pythonanywhere` configuration
+  - Import errors: Ensure proper module paths in `wsgi.py`
+  - Permission issues: Verify file access permissions in PythonAnywhere
+  - Vector store connectivity: Confirm Qdrant is properly initialized
+
+- **Monitoring and Debugging**:
+  - Check `/api/status` endpoint for database connection status
+  - Review logs in `logs/api_server.log` for detailed error information
+  - Session IDs in logs help track specific upload and update operations
 
 ---
 **This document will evolve as new features are added.**

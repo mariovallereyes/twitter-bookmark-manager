@@ -126,6 +126,49 @@ GET /recent?limit=5
 
 ---
 
+### **4️⃣ PythonAnywhere-Specific Endpoints**
+#### **GET `/api/status`** - Check database connection status and system health.
+##### **Purpose:**
+Verifies database connectivity and reports system status, particularly useful for debugging PythonAnywhere deployment issues.
+
+##### **Response Format:**
+```json
+{
+  "database_connection": "ok",
+  "category_count": 15,
+  "tweet_count": 1250,
+  "categories": [
+    {"id": 1, "name": "AI & Machine Learning"},
+    {"id": 2, "name": "Business & Finance"}
+  ]
+}
+```
+
+#### **GET `/debug-database`** - Detailed database information for troubleshooting.
+##### **Purpose:**
+Provides deeper insights into database structure and connectivity, intended for admin use during deployment troubleshooting.
+
+##### **Response Format:**
+```json
+{
+  "status": "success",
+  "database_connection": "ok",
+  "category_count": 15,
+  "categories": [...],
+  "tweet_count": 1250
+}
+```
+
+##### **Error Response:**
+```json
+{
+  "error": "Database connection error",
+  "details": "could not translate host name to address"
+}
+```
+
+---
+
 ## **2. Backend Interactions & Dependencies**
 Each API endpoint interacts with multiple system components:
 | Endpoint | Module Interaction |
@@ -134,6 +177,7 @@ Each API endpoint interacts with multiple system components:
 | `/api/chat` | `engine.py` (AI-powered chat) |
 | `/upload-bookmarks` | `update_bookmarks.py`, `process_categories.py` |
 | `/update-database` | `vector_store.py`, `db.py` |
+| `/api/status` | `db_pa.py` (PythonAnywhere specific) |
 
 ---
 
@@ -145,11 +189,38 @@ Currently, the system **does not require authentication** for API requests. Futu
 
 ---
 
-## **4. Future API Enhancements**
+## **4. Environment-Specific API Behaviors**
+
+### **Local Development Environment**
+- Uses `server.py` as the main entry point
+- SQLite database with file-based access
+- ChromaDB for vector embeddings
+- Simplified error handling for development purposes
+- Adds Flask debug information in responses when `FLASK_DEBUG=true`
+
+### **PythonAnywhere Production Environment**
+- Uses `wsgi.py` and `api_server.py` as entry points
+- PostgreSQL database with connection pooling
+- Qdrant for vector embeddings
+- Enhanced error handling with detailed logging
+- Session tracking with unique session IDs for each operation
+- Additional endpoints for system monitoring and troubleshooting
+
+#### **PythonAnywhere-Specific Request Handling**
+- **Batch Processing**: The `/update-database` endpoint processes bookmarks in batches, with the ability to pause and resume
+- **Progress Tracking**: Operations track progress and can be resumed after interruption
+- **Enhanced Logging**: Detailed logs with operation IDs for traceability
+- **File Handling**: Improved file validation and storage with secure temporary directories
+- **Status Monitoring**: Additional endpoints for checking system health and database connectivity
+
+---
+
+## **5. Future API Enhancements**
 🚀 **Planned Improvements:**
 - **Integration with Twitter API** for live bookmark updates.
-- **WebSocket support** for real-time chat updates.
-- **User-based authentication & private bookmark collections.**
+- **Enhanced monitoring endpoints** for better production observability.
+- **User authentication system** for personalized bookmark collections.
+- **API versioning** to ensure backward compatibility.
 
 **This document serves as the complete API reference for the system. Any new API additions should be documented here.** 🚀
 
