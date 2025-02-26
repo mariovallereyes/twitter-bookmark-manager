@@ -97,6 +97,20 @@ deployment/
        ```
      - This ensures compatibility with code that expects the older function name
 
+   - If you see `"Database error: name 'db_session' is not defined"` errors during bookmark updates:
+     - This occurs in the `update_bookmarks_pa.py` file when it's trying to use db_session incorrectly
+     - Make sure to import both `db_session` and `get_db_session` in the file:
+       ```python
+       # Import the Bookmark model and db_session
+       from .db_pa import db_session, get_db_session
+       ```
+     - Ensure that database sessions are created using `get_db_session()` as a context manager:
+       ```python
+       with get_db_session() as session:
+           # Database operations
+       ```
+     - This is the preferred pattern for database access throughout the codebase
+
 ### Maintenance
 
 1. **Updates**
