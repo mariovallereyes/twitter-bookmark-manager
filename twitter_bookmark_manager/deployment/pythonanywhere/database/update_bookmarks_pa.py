@@ -6,10 +6,17 @@ import os
 import json
 import logging
 import traceback
+import uuid  # Added for session_id generation
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import String, cast, create_engine
+from sqlalchemy import String, cast, create_engine, text
 from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
+from typing import Dict, Any, Optional, List, Tuple, Generator
+
+# Import the Bookmark model and db_session
+from .db_pa import db_session, get_db_session
+from twitter_bookmark_manager.database.models import Bookmark
 
 # Set up base directory for PythonAnywhere
 PA_BASE_DIR = '/home/mariovallereyes/twitter_bookmark_manager'
@@ -17,22 +24,9 @@ DATABASE_DIR = os.path.join(PA_BASE_DIR, 'database')
 MEDIA_DIR = os.path.join(PA_BASE_DIR, 'media')
 VECTOR_DB_DIR = os.path.join(DATABASE_DIR, 'vector_db')
 
-# Add application directory to Python path
+# Add application directory to Python path if not already there
 if PA_BASE_DIR not in sys.path:
     sys.path.insert(0, PA_BASE_DIR)
-
-# Import required modules
-try:
-    from database.models import Bookmark
-    from deployment.pythonanywhere.postgres.config import get_database_url
-    from deployment.pythonanywhere.database.vector_store_pa import VectorStore
-    logger = logging.getLogger('pa_update')
-    logger.info("Successfully imported required modules")
-except Exception as e:
-    print(f"Error importing modules: {str(e)}")
-    print(traceback.format_exc())
-    print(f"Current sys.path: {sys.path}")
-    raise
 
 # Set up logging with absolute paths
 LOG_DIR = os.path.join(PA_BASE_DIR, 'logs')
@@ -70,11 +64,13 @@ def map_bookmark_data(data):
         # Extract tweet ID from URL
         tweet_url = data.get('tweet_url', '')
         if not tweet_url:
-            raise ValueError("No tweet_url found in data")
+            logger.error("No tweet_url found in data")
+            return None
             
         tweet_id = tweet_url.split('/')[-1] if tweet_url else None
         if not tweet_id:
-            raise ValueError("Could not extract tweet ID from URL")
+            logger.error("Could not extract tweet ID from URL")
+            return None
         
         # Parse datetime
         created_at = None
@@ -103,34 +99,63 @@ def map_bookmark_data(data):
         
         # Validate required fields
         if not mapped_data['id']:
-            raise ValueError("No valid ID could be extracted")
+            logger.error("No valid ID could be extracted")
+            return None
             
         return mapped_data
         
     except Exception as e:
         logger.error(f"Error mapping bookmark data: {e}")
-        raise
+        return None
 
-def pa_update_bookmarks():
-    """PythonAnywhere-specific function to update bookmarks from JSON file"""
+def pa_update_bookmarks(session_id=None, start_index=0):
+    """PythonAnywhere-specific function to update bookmarks from JSON file
+    
+    Args:
+        session_id (str, optional): Unique identifier for this update session. If not provided, one will be generated.
+        start_index (int, optional): Index to start/resume processing from. Defaults to 0.
+        
+    Returns:
+        dict: Result dictionary containing progress information and success status
+    """
     try:
+        # Generate a session ID if none provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            
         logger.info("="*50)
-        logger.info("Starting PythonAnywhere bookmark update process")
+        logger.info(f"Starting PythonAnywhere bookmark update process for session {session_id} from index {start_index}")
         
         # Define paths
         json_file = os.path.join(DATABASE_DIR, 'twitter_bookmarks.json')
+        progress_file = os.path.join(DATABASE_DIR, 'update_progress.json')
         logger.info(f"Looking for JSON file at: {json_file}")
         
-        # Ensure directories exist
-        os.makedirs(DATABASE_DIR, exist_ok=True)
-        os.makedirs(MEDIA_DIR, exist_ok=True)
-        os.makedirs(VECTOR_DB_DIR, exist_ok=True)
+        # Load progress if exists
+        current_progress = {}
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    current_progress = json.load(f)
+                logger.info(f"Loaded progress: {current_progress}")
+            except Exception as e:
+                logger.error(f"Error loading progress: {e}")
         
-        if not os.path.exists(json_file):
-            error_msg = f"Bookmarks JSON file not found at {json_file}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
+        # Use provided start_index or resume from saved progress if start_index is 0
+        if start_index == 0 and current_progress.get('last_processed_index'):
+            logger.info(f"No start_index provided, resuming from saved progress: {current_progress.get('last_processed_index')}")
+            start_index = current_progress.get('last_processed_index', 0)
             
+        processed_ids = set(current_progress.get('processed_ids', []))
+        
+        # Initialize statistics from progress or start fresh
+        stats = current_progress.get('stats', {
+            'new_count': 0,
+            'updated_count': 0,
+            'errors': 0,
+            'total_processed': 0
+        })
+        
         # Load and parse JSON
         logger.info(f"Reading bookmarks from {json_file}")
         try:
@@ -138,168 +163,167 @@ def pa_update_bookmarks():
                 new_bookmarks = json.load(f)
             total_bookmarks = len(new_bookmarks)
             logger.info(f"Successfully loaded {total_bookmarks} bookmarks from JSON")
+            
+            # Skip already processed bookmarks based on start_index
+            if start_index > 0:
+                logger.info(f"Resuming from index {start_index} of {total_bookmarks}")
+                new_bookmarks = new_bookmarks[start_index:]
+            
+            logger.info(f"Processing remaining {len(new_bookmarks)} bookmarks")
         except Exception as e:
             error_msg = f"Error reading JSON file: {str(e)}"
             logger.error(error_msg)
-            raise
-            
-        # Initialize vector store
+            return {'success': False, 'error': error_msg}
+        
+        # Process bookmarks in smaller batches
+        BATCH_SIZE = 25  # Reduced batch size
+        current_batch = []
+        
         try:
-            vector_store = VectorStore()
-            logger.info("Successfully initialized vector store")
-        except Exception as e:
-            error_msg = f"Failed to initialize vector store: {str(e)}"
-            logger.error(error_msg)
-            raise
-
-        # Initialize PostgreSQL engine and session
-        engine = create_engine(get_database_url())
-        Session = sessionmaker(bind=engine)
-        session = Session()
-
-        # Track statistics
-        new_count = 0
-        updated_count = 0
-        errors = 0
-        processed_ids = set()  # Track processed IDs to avoid duplicates
-
-        try:
-            # Get existing bookmark URLs
-            existing_bookmarks = {}
-            for bookmark in session.query(Bookmark).all():
-                if bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
-                    existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
-            
-            # Identify new bookmarks using tweet_url
-            new_urls = {bookmark['tweet_url'] for bookmark in new_bookmarks}
-            to_add = new_urls - set(existing_bookmarks.keys())
-            
-            logger.info(f"Found {len(to_add)} new bookmarks to add")
-            logger.info(f"Found {len(new_urls - to_add)} existing bookmarks")
-
-            # Process bookmarks in batches
-            BATCH_SIZE = 50
-            for i, bookmark_data in enumerate(new_bookmarks, 1):
-                try:
-                    tweet_url = bookmark_data.get('tweet_url')
-                    if not tweet_url:
-                        logger.warning(f"Skipping bookmark without tweet_url at index {i}")
-                        continue
-
-                    # Map the bookmark data
+            with get_db_session() as session:
+                # Get existing bookmarks once
+                existing_bookmarks = {}
+                for bookmark in session.query(Bookmark).all():
+                    if bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
+                        existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
+                
+                # Process each bookmark
+                for i, bookmark_data in enumerate(new_bookmarks, start_index):
                     try:
-                        mapped_data = map_bookmark_data(bookmark_data)
-                    except Exception as e:
-                        logger.error(f"Error mapping bookmark data for {tweet_url}: {e}")
-                        errors += 1
-                        continue
-                        
-                    # Skip if we've already processed this ID
-                    if mapped_data['id'] in processed_ids:
-                        logger.warning(f"Skipping duplicate bookmark ID: {mapped_data['id']}")
-                        continue
-                    processed_ids.add(mapped_data['id'])
-                    
-                    # If this is a new bookmark
-                    if tweet_url in to_add:
-                        try:
-                            # Create new bookmark with mapped data
-                            new_bookmark = Bookmark(**mapped_data)
-                            session.merge(new_bookmark)  # Use merge instead of add
-                            session.flush()  # Get the ID
+                        tweet_url = bookmark_data.get('tweet_url')
+                        if not tweet_url or tweet_url in processed_ids:
+                            continue
                             
-                            # Add to vector store
-                            metadata = {
-                                'tweet_url': tweet_url,
-                                'screen_name': bookmark_data.get('screen_name', 'unknown'),
-                                'author_name': bookmark_data.get('name', 'unknown'),
-                                'id': str(new_bookmark.id)
+                        mapped_data = map_bookmark_data(bookmark_data)
+                        if not mapped_data:
+                            stats['errors'] += 1
+                            continue
+                        
+                        # Add to current batch
+                        current_batch.append((tweet_url, mapped_data, bookmark_data))
+                        
+                        # Process batch if full or last item
+                        if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) + start_index - 1:
+                            # Process the batch
+                            for url, data, raw in current_batch:
+                                try:
+                                    if url not in existing_bookmarks:
+                                        new_bookmark = Bookmark(**data)
+                                        session.add(new_bookmark)
+                                        session.flush()
+                                        stats['new_count'] += 1
+                                    else:
+                                        existing = existing_bookmarks[url]
+                                        for key, value in data.items():
+                                            setattr(existing, key, value)
+                                        stats['updated_count'] += 1
+                                    
+                                    processed_ids.add(url)
+                                except Exception as e:
+                                    logger.error(f"Error processing bookmark {url}: {e}")
+                                    stats['errors'] += 1
+                            
+                            # Commit the batch
+                            session.commit()
+                            
+                            # Update progress file with session_id
+                            stats['total_processed'] = i + 1
+                            progress_data = {
+                                'session_id': session_id,
+                                'last_processed_index': i + 1,
+                                'processed_ids': list(processed_ids),
+                                'stats': stats,
+                                'last_update': datetime.now().isoformat()
                             }
                             
-                            vector_store.add_bookmark(
-                                bookmark_id=metadata['id'],
-                                text=mapped_data['text'] or '',
-                                metadata=metadata
-                            )
+                            with open(progress_file, 'w') as f:
+                                json.dump(progress_data, f)
                             
-                            new_count += 1
-                            logger.debug(f"Added new bookmark: {tweet_url}")
-                        except Exception as e:
-                            logger.error(f"Error adding new bookmark {tweet_url}: {e}")
-                            session.rollback()
-                            errors += 1
-                            continue
-                    else:
-                        try:
-                            # Update existing bookmark
-                            existing = existing_bookmarks[tweet_url]
-                            for key, value in mapped_data.items():
-                                setattr(existing, key, value)
-                            updated_count += 1
-                            logger.debug(f"Updated bookmark: {tweet_url}")
-                        except Exception as e:
-                            logger.error(f"Error updating bookmark {tweet_url}: {e}")
-                            session.rollback()
-                            errors += 1
-                            continue
-
-                    # Commit in batches
-                    if i % BATCH_SIZE == 0:
-                        try:
-                            session.commit()
-                            logger.info(f"Progress: {i}/{total_bookmarks} bookmarks processed ({(i/total_bookmarks)*100:.1f}%)")
-                        except Exception as e:
-                            logger.error(f"Error committing batch: {str(e)}")
-                            session.rollback()
-                            errors += len(processed_ids)
-                            processed_ids.clear()  # Reset processed IDs after rollback
-                            continue
-
-                except Exception as e:
-                    errors += 1
-                    logger.error(f"Error processing bookmark {bookmark_data.get('tweet_url', 'unknown')}: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    continue
-
-            # Final commit
-            try:
-                session.commit()
-                logger.info("Successfully committed all database changes")
-            except Exception as e:
-                logger.error(f"Error in final commit: {str(e)}")
-                session.rollback()
-                raise
-
-        finally:
-            session.close()
-
-        # Log summary
-        logger.info("="*50)
-        logger.info(f"Update Summary:")
-        logger.info(f"Total bookmarks in JSON: {total_bookmarks}")
-        logger.info(f"New bookmarks added: {new_count}")
-        logger.info(f"Bookmarks updated: {updated_count}")
-        logger.info(f"Errors encountered: {errors}")
-        logger.info(f"Unique IDs processed: {len(processed_ids)}")
-        logger.info("="*50)
-
-        return {
-            'success': True,
-            'new_bookmarks': new_count,
-            'updated_bookmarks': updated_count,
-            'errors': errors,
-            'total_processed': total_bookmarks,
-            'unique_ids': len(processed_ids)
-        }
-
+                            # Clear batch
+                            current_batch = []
+                            
+                            # Log progress
+                            progress_percent = ((i + 1) / total_bookmarks) * 100
+                            logger.info(f"Progress: {progress_percent:.1f}% ({i + 1}/{total_bookmarks})")
+                            
+                    except Exception as e:
+                        logger.error(f"Error in batch processing: {e}")
+                        stats['errors'] += 1
+                        continue
+                
+                # Return progress information
+                is_complete = stats['total_processed'] >= total_bookmarks
+                logger.info(f"Update {'completed' if is_complete else 'in progress'}: {stats['total_processed']}/{total_bookmarks} bookmarks processed")
+                
+                return {
+                    'success': True,
+                    'session_id': session_id,
+                    'progress': {
+                        'total': total_bookmarks,
+                        'processed': stats['total_processed'],
+                        'new': stats['new_count'],
+                        'updated': stats['updated_count'],
+                        'errors': stats['errors'],
+                        'percent_complete': (stats['total_processed'] / total_bookmarks) * 100
+                    },
+                    'is_complete': is_complete,
+                    'next_index': stats['total_processed'] if not is_complete else None
+                }
+                
+        except Exception as e:
+            error_msg = f"Database error: {str(e)}"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'error': error_msg,
+                'session_id': session_id,
+                'progress': {
+                    'last_index': start_index,
+                    'stats': stats
+                }
+            }
+            
     except Exception as e:
-        logger.error(f"Fatal error in pa_update_bookmarks: {str(e)}")
+        logger.error(f"Update error: {str(e)}")
+        return {'success': False, 'error': str(e), 'session_id': session_id if session_id else None}
+
+def test_resumable_update():
+    """
+    Test function to validate the resumable update functionality.
+    This can be run with:
+        python -c "from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import test_resumable_update; test_resumable_update()"
+    """
+    try:
+        # First run - start from beginning
+        logger.info("STARTING TEST: First run (from beginning)")
+        result1 = pa_update_bookmarks(start_index=0)
+        logger.info(f"First run result: {result1}")
+        
+        if not result1['success']:
+            logger.error(f"First run failed: {result1.get('error')}")
+            return
+            
+        if result1['is_complete']:
+            logger.info("First run completed all bookmarks - nothing to resume")
+            return
+            
+        # Second run - resume from where we left off
+        next_index = result1['next_index']
+        session_id = result1['session_id']
+        logger.info(f"STARTING TEST: Second run (resuming from index {next_index})")
+        
+        result2 = pa_update_bookmarks(session_id=session_id, start_index=next_index)
+        logger.info(f"Second run result: {result2}")
+        
+        if not result2['success']:
+            logger.error(f"Second run failed: {result2.get('error')}")
+            return
+            
+        logger.info("TEST COMPLETED SUCCESSFULLY")
+        
+    except Exception as e:
+        logger.error(f"Test error: {str(e)}")
         logger.error(traceback.format_exc())
-        return {
-            'success': False,
-            'error': str(e),
-            'traceback': traceback.format_exc()
-        }
 
 if __name__ == "__main__":
     pa_update_bookmarks() 
