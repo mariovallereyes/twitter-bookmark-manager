@@ -74,6 +74,29 @@ deployment/
    - Ensure proper file permissions for the vector store directory
    - Check write permissions for log files
 
+4. **Database Connection Issues**
+   - If you see `"could not translate host name \"None\" to address"` errors:
+     - Ensure the `.env.pythonanywhere` file has explicit database parameters:
+       ```
+       # Explicit database connection parameters (for SQLAlchemy)
+       DB_USER=mariovallereyes
+       DB_PASSWORD=${POSTGRES_PASSWORD}
+       DB_HOST=mariovallereyes-4374.postgres.pythonanywhere-services.com
+       DB_NAME=mariovallereyes$default
+       ```
+     - Check the environment variables are loading correctly with the `/api/status` endpoint
+     - Reload the web app after making changes to environment variables
+     - For troubleshooting, use the `/api/status` endpoint to see detailed database connection status
+   
+   - If you see `"cannot import name 'get_db_session' from 'database.db'"` errors:
+     - This occurs when the PythonAnywhere database module (`db_pa.py`) is missing the `get_db_session` function alias
+     - Make sure the following alias is present in `deployment/pythonanywhere/database/db_pa.py`:
+       ```python
+       # Alias for backward compatibility
+       get_db_session = get_session
+       ```
+     - This ensures compatibility with code that expects the older function name
+
 ### Maintenance
 
 1. **Updates**

@@ -453,91 +453,142 @@
         }
     }
 
+    let updateInProgress = false;
+    let currentStartIndex = 0;
+    let maxRetries = 3;
+    let retryCount = 0;
+    let updateTimeout = null;
+
+    async function continueProcessing() {
+        if (!updateInProgress) return;
+        
+        try {
+            const response = await fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ start_index: currentStartIndex })
+            });
+            
+            const result = await response.json();
+            
+            if (response.status === 202) {  // Processing should continue
+                // Update progress
+                const progress = result.progress;
+                if (progress) {
+                    updateProgressUI(progress);
+                }
+                
+                // Schedule next batch
+                currentStartIndex = result.next_index;
+                retryCount = 0;  // Reset retry count on successful batch
+                
+                // Wait a bit before next batch to prevent overload
+                updateTimeout = setTimeout(continueProcessing, 1000);
+            } else if (response.status === 200) {  // Processing complete
+                updateInProgress = false;
+                updateProgressUI(result.progress, true);
+                showSuccess("Processing completed successfully!");
+            } else {
+                throw new Error(result.error || 'Unknown error');
+            }
+        } catch (error) {
+            console.error('Error during processing:', error);
+            
+            if (retryCount < maxRetries) {
+                retryCount++;
+                // Exponential backoff
+                const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+                updateTimeout = setTimeout(continueProcessing, delay);
+            } else {
+                updateInProgress = false;
+                showError(`Processing failed after ${maxRetries} retries. Please try again later.`);
+            }
+        }
+    }
+
+    function updateProgressUI(progress, isComplete = false) {
+        const {
+            total,
+            processed,
+            new: newCount,
+            updated: updatedCount,
+            errors,
+            percent_complete
+        } = progress;
+
+        // Update progress steps
+        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
+        document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
+        
+        const findNewStep = document.getElementById('step-find-new');
+        findNewStep.querySelector('.progress-icon').textContent = '🔄';
+        findNewStep.querySelector('span:last-child').textContent = 
+            `Finding new bookmarks... (${processed}/${total}, ${percent_complete.toFixed(1)}%)`;
+        
+        if (isComplete) {
+            findNewStep.querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-categories').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-sync').querySelector('.progress-icon').textContent = '✅';
+        }
+    }
+
+    function showError(message) {
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'mt-4 p-4 bg-red-900 text-white rounded-lg';
+        errorDiv.textContent = message;
+        document.getElementById('progress-steps').appendChild(errorDiv);
+    }
+
+    function showSuccess(message) {
+        const successDiv = document.createElement('div');
+        successDiv.className = 'mt-4 p-4 bg-green-900 text-white rounded-lg';
+        successDiv.textContent = message;
+        document.getElementById('progress-steps').appendChild(successDiv);
+    }
+
     async function handleUploadDirect() {
         const fileInput = document.getElementById('json-file');
         const file = fileInput.files[0];
-        
         if (!file) return;
-
-        // Show progress section
-        document.getElementById('progress-steps').style.display = 'block';
-        document.getElementById('upload-actions').style.display = 'none';
 
         const formData = new FormData();
         formData.append('file', file);
 
         try {
-            // Upload file
-            updateProgress('upload', 'processing');
+            // Upload file first
             const uploadResponse = await fetch('/upload-bookmarks', {
                 method: 'POST',
                 body: formData
             });
 
             if (!uploadResponse.ok) {
-                throw new Error('Upload failed');
+                throw new Error('File upload failed');
             }
-            updateProgress('upload', 'done');
-            updateProgress('validate', 'done');
 
-            // Finding new bookmarks
-            updateProgress('find-new', 'processing');
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-            updateProgress('find-new', 'done');
-
-            // Initialize AI
-            updateProgress('init-ai', 'processing');
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-            updateProgress('init-ai', 'done');
-
-            // Deduplication
-            updateProgress('dedup', 'processing');
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-            updateProgress('dedup', 'done');
-
-            // Update database
-            updateProgress('sql', 'processing');
-            const updateResponse = await fetch('/update-database', {
-                method: 'POST'
-            });
-
-            if (updateResponse.ok) {
-                const result = await updateResponse.json();
-                
-                // Update progress for each step
-                updateProgress('sql', 'done');
-                
-                // Categories processing
-                updateProgress('categories', 'processing');
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-                updateProgress('categories', 'done');
-                
-                // Vector store rebuild
-                updateProgress('vectors', 'processing');
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-                updateProgress('vectors', 'done');
-
-                // Final sync verification
-                updateProgress('sync', 'processing');
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for backend
-                updateProgress('sync', 'done');
-                
-                // Success message and reload
-                document.getElementById('file-name').textContent = 'Update successful! Reloading...';
-                setTimeout(() => location.reload(), 3000);
-            } else {
-                throw new Error('Database update failed');
-            }
+            // Start processing
+            updateInProgress = true;
+            currentStartIndex = 0;
+            retryCount = 0;
+            document.getElementById('progress-steps').style.display = 'block';
+            
+            // Begin processing
+            await continueProcessing();
         } catch (error) {
             console.error('Error:', error);
-            // Mark current step as error
-            ['upload', 'validate', 'find-new', 'init-ai', 'dedup', 'sql', 'categories', 'vectors', 'sync'].forEach(step => {
-                const element = document.getElementById(`step-${step}`);
-                if (element && element.querySelector('.progress-icon').textContent === '⚡') {
-                    updateProgress(step, 'error');
-                }
-            });
-            document.getElementById('file-name').textContent = 'Error: ' + error.message;
+            showError(error.message);
+        }
+    }
+
+    // Cleanup on modal close
+    function cleanupUpdate() {
+        updateInProgress = false;
+        if (updateTimeout) {
+            clearTimeout(updateTimeout);
+            updateTimeout = null;
         }
     }
     </script>

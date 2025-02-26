@@ -6,45 +6,76 @@ from qdrant_client.http import models
 from typing import List, Dict, Any
 import logging
 import os
+import time
+import glob
 from pathlib import Path
 import uuid
 import hashlib
+import random
+import string
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
 class VectorStore:
     def __init__(self, persist_directory: str = None):
-        """Initialize Qdrant client"""
+        """Initialize Qdrant client in memory mode to avoid lock issues"""
         try:
             # Import config here to avoid circular imports
             from deployment.pythonanywhere.postgres.config import VECTOR_STORE_CONFIG
             
-            # Initialize Qdrant client
-            self.client = QdrantClient(
-                path=VECTOR_STORE_CONFIG['persist_directory']
-            )
+            # Store path for later use (may be used for backup/restore)
+            self.vector_db_path = VECTOR_STORE_CONFIG['persist_directory']
             
-            # Initialize sentence transformer
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            # Initialize with retry logic
+            retry_count = 0
+            max_retries = 3
+            last_error = None
             
-            # Create collection if it doesn't exist
-            self.collection_name = "bookmarks"
-            self.vector_size = self.model.get_sentence_embedding_dimension()
+            # Generate a unique instance ID to prevent collisions
+            instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            logger.info(f"Creating Qdrant in-memory instance with ID: {instance_id}")
             
-            try:
-                self.client.get_collection(self.collection_name)
-            except:
-                self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=models.VectorParams(
-                        size=self.vector_size,
-                        distance=models.Distance.COSINE
+            while retry_count < max_retries:
+                try:
+                    # Initialize Qdrant client in MEMORY mode to avoid lock issues
+                    self.client = QdrantClient(
+                        location=":memory:",  # Use in-memory storage
+                        timeout=10.0,  # Add timeout for operations
+                        prefer_grpc=False  # Use HTTP instead of gRPC for better compatibility
                     )
-                )
+                    
+                    # Initialize sentence transformer
+                    from sentence_transformers import SentenceTransformer
+                    self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                    
+                    # Create collection with a unique name since we're in memory mode
+                    self.collection_name = f"bookmarks_{instance_id}"
+                    self.vector_size = self.model.get_sentence_embedding_dimension()
+                    
+                    # Always create a new collection since we're in memory mode
+                    self.client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=models.VectorParams(
+                            size=self.vector_size,
+                            distance=models.Distance.COSINE
+                        )
+                    )
+                    
+                    logger.info(f"✅ VectorStore initialized with Qdrant in-memory backend (collection: {self.collection_name})")
+                    return  # Success, exit the retry loop
+                    
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"Attempt {retry_count+1}/{max_retries} to initialize Qdrant failed: {last_error}")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        time.sleep(2)  # Wait before retrying
             
-            logger.info("VectorStore initialized with Qdrant backend")
+            # If we get here, all retries failed
+            error_msg = f"Error initializing VectorStore: {last_error}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
             
         except Exception as e:
             logger.error(f"Error initializing VectorStore: {e}")
