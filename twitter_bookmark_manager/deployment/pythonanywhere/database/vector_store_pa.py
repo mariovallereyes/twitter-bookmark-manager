@@ -188,4 +188,82 @@ class VectorStore:
 
     def query_similar(self, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
         """Search for similar bookmarks"""
-        return self.search(query=query, n_results=n_results) 
+        return self.search(query=query, n_results=n_results)
+
+    def search_with_exclusions(self, 
+                              query_embedding: List[float] = None,
+                              query: str = None,
+                              limit: int = 100,
+                              excluded_ids: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Search that supports excluding specific bookmark IDs from results.
+        
+        Args:
+            query_embedding: Optional pre-computed embedding
+            query: Text query (will be encoded if query_embedding not provided)
+            limit: Maximum number of results to return
+            excluded_ids: List of bookmark IDs to exclude from results
+            
+        Returns:
+            List of processed search results with excluded IDs filtered out
+        """
+        try:
+            # Convert excluded_ids to a set for faster lookups
+            excluded_set = set(excluded_ids or [])
+            
+            # Handle both embedding and text-based search
+            if query_embedding is None and query is not None:
+                query_embedding = self.model.encode(query).tolist()
+            elif query_embedding is None and query is None:
+                raise ValueError("Either query_embedding or query must be provided")
+            
+            # Request more results than needed to account for exclusions
+            # For Qdrant, we'll use a multiplication factor to ensure enough results
+            buffer_size = min(limit * 3, 300)  # Triple the limit, capped at 300
+            
+            logger.info(f"Performing Qdrant search with exclusions: limit={limit}, buffer={buffer_size}, excluded={len(excluded_set)}")
+            
+            # Generate UUIDs for all excluded IDs
+            excluded_uuids = [self._generate_uuid(bookmark_id) for bookmark_id in excluded_set]
+            
+            # Perform the search with the buffer size
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=buffer_size,
+                # Qdrant doesn't support direct filtering by excluded IDs, so we'll filter after
+            )
+            
+            # Process results, excluding specified IDs
+            processed_results = []
+            for result in results:
+                try:
+                    # Get the original bookmark ID from payload
+                    bookmark_id = result.payload.get('original_id')
+                    
+                    # Skip excluded IDs
+                    if bookmark_id in excluded_set:
+                        continue
+                        
+                    processed_results.append({
+                        'bookmark_id': bookmark_id,
+                        'score': result.score,
+                        'distance': 1.0 - result.score,  # Convert score to distance for compatibility
+                        'metadata': {k: v for k, v in result.payload.items() if k not in ['text', 'original_id']},
+                        'text': result.payload.get('text')
+                    })
+                    
+                    # Stop if we have enough results after filtering
+                    if len(processed_results) >= limit:
+                        break
+                        
+                except Exception as e:
+                    logger.warning(f"Error processing result: {e}")
+                    continue
+            
+            logger.info(f"Qdrant search with exclusions found {len(processed_results)} results after filtering")
+            return processed_results
+            
+        except Exception as e:
+            logger.error(f"Search with exclusions error in VectorStore: {e}")
+            return [] 

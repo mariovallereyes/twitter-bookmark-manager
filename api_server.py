@@ -5,11 +5,12 @@ from datetime import datetime
 import json
 from werkzeug.utils import secure_filename
 import shutil
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory, url_for, redirect
 import traceback
 import logging
 from flask_cors import CORS
 import uuid
+import time
 
 # Set up the working directory to be the project root
 PA_BASE_DIR = os.getenv('PA_BASE_DIR', '/home/mariovallereyes/twitter_bookmark_manager')
@@ -61,9 +62,16 @@ if str(project_root) not in sys.path:
 os.chdir(project_root)
 logger.info(f"Changed working directory to: {os.getcwd()}")
 
-# Create the Flask app first
+# Determine if we're running on PythonAnywhere
+is_pythonanywhere = 'PYTHONANYWHERE_DOMAIN' in os.environ or 'pythonanywhere' in sys.modules
+
+# Choose appropriate template directory
+template_dir = "twitter_bookmark_manager/deployment/pythonanywhere/web_pa/templates" if is_pythonanywhere else "twitter_bookmark_manager/web/templates"
+logger.info(f"Using template directory: {template_dir}")
+
+# Create the Flask app
 app = Flask(__name__, 
-            template_folder="twitter_bookmark_manager/web/templates",
+            template_folder=template_dir,
             static_folder="twitter_bookmark_manager/web/static")
 
 # Configure CORS - Allow all origins during testing
@@ -77,11 +85,24 @@ def index():
         from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
-        # Get categories for filter options
-        categories = search.get_categories()
+        # Extract categories from request (same as search route)
+        categories = request.args.getlist('categories[]')
+        if not categories:
+            # Try alternate format (without brackets)
+            categories = request.args.getlist('categories')
+            
+        logger.info(f"Homepage with category filter: {categories}")
         
-        # Get 5 most recent bookmarks for homepage
-        latest_tweets = search.get_all_bookmarks(limit=5)
+        # Get categories for filter options
+        all_categories = search.get_categories()
+        
+        # Get latest tweets (filtered by category if specified)
+        if categories:
+            logger.info(f"Filtering latest bookmarks by categories: {categories}")
+            latest_tweets = search.search(categories=categories, limit=5)
+        else:
+            # Get 5 most recent bookmarks for homepage
+            latest_tweets = search.get_all_bookmarks(limit=5)
         
         # Format the latest tweets consistently
         formatted_latest = [{
@@ -92,9 +113,14 @@ def index():
             'created_at': tweet['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         } for tweet in latest_tweets]
         
-        return render_template('index.html', 
-                              categories=categories,
-                              latest_tweets=formatted_latest)
+        # Select the appropriate template based on environment
+        template = 'index_pa.html' if is_pythonanywhere else 'index.html'
+        logger.info(f"Using template: {template}")
+        
+        return render_template(template, 
+                              categories=all_categories,
+                              latest_tweets=formatted_latest,
+                              category_filter=categories)
     except Exception as e:
         logger.error(f"Error rendering index: {e}")
         logger.error(traceback.format_exc())
@@ -131,15 +157,38 @@ def search():
         query = request.args.get('q', '')
         user = request.args.get('user', '')
         
-        # Get categories
-        categories = search.get_categories()
+        # Extract categories from request args
+        # Handle both single category and multiple categories
+        categories = request.args.getlist('categories[]')
+        if not categories:
+            # Try alternate format (without brackets)
+            categories = request.args.getlist('categories')
         
-        # Perform search
-        if query:
-            results = search.search_bookmarks(query)
-        elif user:
-            results = search.search_by_user(user)
-        else:
+        logger.info(f"Search parameters: query='{query}', user='{user}', categories={categories}")
+        
+        # Get all available categories for UI
+        all_categories = search.get_categories()
+        
+        # Perform search with robust error handling
+        results = []
+        try:
+            if query:
+                logger.info(f"Searching for query: '{query}' with categories: {categories}")
+                results = search.search_bookmarks(query=query, categories=categories if categories else None)
+                logger.info(f"Search found {len(results)} results for '{query}'")
+            elif user:
+                logger.info(f"Searching for user: '@{user}'")
+                results = search.search_by_user(user)
+                logger.info(f"User search found {len(results)} results for '@{user}'")
+            elif categories:
+                logger.info(f"Searching by categories only: {categories}")
+                results = search.search(categories=categories)
+                logger.info(f"Category search found {len(results)} results")
+            else:
+                logger.info("No search parameters provided")
+        except Exception as search_error:
+            logger.error(f"Search operation failed: {search_error}")
+            # Return empty results but don't fail the whole request
             results = []
         
         # Format results
@@ -151,15 +200,27 @@ def search():
             'created_at': tweet['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         } for tweet in results]
         
-        return render_template('index.html',
-                              categories=categories,
+        # Select the appropriate template based on environment
+        template = 'index_pa.html' if is_pythonanywhere else 'index.html'
+        
+        # Get total tweet count with error handling
+        try:
+            total_tweets = search.get_total_tweet_count()
+        except Exception as count_error:
+            logger.error(f"Failed to get total tweet count: {count_error}")
+            total_tweets = 0
+        
+        return render_template(template,
+                              categories=all_categories,
                               results=formatted_results,
                               query=query,
+                              category_filter=categories,
                               showing_results=len(formatted_results),
                               total_results=len(formatted_results),
-                              total_tweets=search.get_total_tweet_count())
+                              total_tweets=total_tweets)
     except Exception as e:
         logger.error(f"Error in search: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route('/recent')
@@ -169,11 +230,27 @@ def recent():
         from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
-        # Get categories
-        categories = search.get_categories()
+        # Extract categories from request args (same as search route)
+        categories = request.args.getlist('categories[]')
+        if not categories:
+            # Try alternate format (without brackets)
+            categories = request.args.getlist('categories')
+            
+        logger.info(f"Recent with categories: {categories}")
         
-        # Get all recent bookmarks (no limit)
-        results = search.get_all_bookmarks(limit=None)
+        # Get all available categories for UI
+        all_categories = search.get_categories()
+        
+        # Get recent bookmarks with optional category filtering
+        if categories:
+            logger.info(f"Getting recent bookmarks filtered by categories: {categories}")
+            results = search.search(categories=categories)
+        else:
+            # Get all recent bookmarks (no limit)
+            logger.info("Getting all recent bookmarks")
+            results = search.get_all_bookmarks(limit=None)
+        
+        logger.info(f"Found {len(results)} recent bookmarks")
         
         # Format results
         formatted_results = [{
@@ -184,15 +261,27 @@ def recent():
             'created_at': tweet['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         } for tweet in results]
         
-        return render_template('index.html',
-                              categories=categories,
+        # Select the appropriate template based on environment
+        template = 'index_pa.html' if is_pythonanywhere else 'index.html'
+        
+        # Get total tweet count
+        try:
+            total_tweets = search.get_total_tweet_count()
+        except Exception as count_error:
+            logger.error(f"Failed to get total tweet count: {count_error}")
+            total_tweets = 0
+        
+        return render_template(template,
+                              categories=all_categories,
                               results=formatted_results,
+                              category_filter=categories,
                               showing_results=len(formatted_results),
                               total_results=len(formatted_results),
-                              total_tweets=search.get_total_tweet_count(),
+                              total_tweets=total_tweets,
                               is_recent=True)
     except Exception as e:
         logger.error(f"Error in recent: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 # PythonAnywhere-specific upload configuration
@@ -675,7 +764,13 @@ def category_page():
         # Sort by count (descending)
         category_stats.sort(key=lambda x: x['count'], reverse=True)
         
-        return render_template('categories.html', 
+        # Use the template based on environment
+        template_name = 'categories.html'
+        if is_pythonanywhere:
+            template_name = 'categories_pa.html'
+            logger.info(f"Using PythonAnywhere template: {template_name}")
+        
+        return render_template(template_name, 
                               categories=category_stats,
                               stats=stats)
     except Exception as e:
@@ -739,11 +834,23 @@ def view_category(category_name):
         from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
+        # Convert to a list for consistency with other routes
+        categories = [category_name]
+        
         # Get all categories for the filter UI
-        categories = search.get_categories()
+        all_categories = search.get_categories()
         
         # Search for bookmarks in the specified category
-        results = search.search_by_category(category_name)
+        logger.info(f"Searching for bookmarks in category: '{category_name}'")
+        try:
+            # Pass the categories list to search_by_category instead of just the string
+            results = search.search_by_category(categories)
+            logger.info(f"Found {len(results)} bookmarks in categories {categories}")
+        except AttributeError:
+            # Fall back to regular search if search_by_category doesn't exist
+            logger.info(f"search_by_category not found, using regular search with category filter")
+            results = search.search(categories=categories)
+            logger.info(f"Found {len(results)} bookmarks with category filter {categories}")
         
         # Format the results
         formatted_results = [{
@@ -754,13 +861,24 @@ def view_category(category_name):
             'created_at': tweet['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         } for tweet in results]
         
-        return render_template('index.html',
-                              categories=categories,
+        # Select the appropriate template based on environment
+        template = 'index_pa.html' if is_pythonanywhere else 'index.html'
+        logger.info(f"Using template: {template} for category view: {category_name}")
+        
+        # Get total tweet count with error handling
+        try:
+            total_tweets = search.get_total_tweet_count()
+        except Exception as count_error:
+            logger.error(f"Failed to get total tweet count: {count_error}")
+            total_tweets = 0
+        
+        return render_template(template,
+                              categories=all_categories,
                               results=formatted_results,
                               showing_results=len(formatted_results),
                               total_results=len(formatted_results),
-                              total_tweets=search.get_total_tweet_count(),
-                              category_filter=category_name)
+                              total_tweets=total_tweets,
+                              category_filter=categories)
     except Exception as e:
         logger.error(f"Error in category view: {e}")
         return jsonify({"error": str(e)}), 500

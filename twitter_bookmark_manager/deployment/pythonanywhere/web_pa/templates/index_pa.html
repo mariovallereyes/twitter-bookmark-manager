@@ -1,0 +1,240 @@
+{% extends "base_pa.html" %}
+
+{% block content %}
+<!-- Initialize category filter if available -->
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    // Initialize selected categories
+    if (typeof window.selectedCategories === 'undefined') {
+      window.selectedCategories = [];
+    }
+    
+    {% if category_filter %}
+    // Add category_filter to selectedCategories
+    if (!selectedCategories.includes("{{ category_filter }}")) {
+      selectedCategories.push("{{ category_filter }}");
+    }
+    {% endif %}
+    
+    // Also handle multiple categories from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const categoryParams = urlParams.getAll('categories[]');
+    
+    if (categoryParams.length > 0) {
+      // Add any categories from URL parameters that aren't already in the array
+      categoryParams.forEach(category => {
+        if (!selectedCategories.includes(category)) {
+          selectedCategories.push(category);
+        }
+      });
+    }
+    
+    // Update UI to reflect selected categories
+    if (typeof highlightSelectedCategories === 'function') {
+      highlightSelectedCategories();
+    }
+  });
+</script>
+
+<!-- Latest Bookmarks Section - Only show when no search/results -->
+{% if not results and not query %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-300 mb-3">Latest Bookmarks</h2>
+    <div class="grid gap-3">
+        {% for tweet in latest_tweets %}
+        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" 
+             data-tweet-id="{{ tweet.id }}"
+             data-username="{{ tweet.author_username }}">
+            <div class="p-3">
+                <!-- Author and Date -->
+                <div class="flex items-center justify-between mb-2">
+                    <a href="https://twitter.com/{{ tweet.author_username }}" 
+                       target="_blank"
+                       class="text-sm font-medium text-gray-300 hover:text-white">
+                        @{{ tweet.author_username }}
+                    </a>
+                    <span class="text-xs text-gray-600">
+                        {{ tweet.created_at }}
+                    </span>
+                </div>
+                
+                <!-- Tweet Content -->
+                <p class="text-sm text-gray-400 mb-3">
+                    {{ tweet.text }}
+                </p>
+                
+                <!-- Categories and Controls -->
+                <div class="flex flex-wrap gap-1.5 text-xs mt-2">
+                    {% for category in tweet.categories %}
+                    <span class="px-2 py-0.5 bg-[#222222] text-blue-400 rounded">
+                        {{ category }}
+                    </span>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <!-- Embed Control -->
+            <div class="pt-0 px-3 pb-3 flex justify-between">
+                <button class="text-xs text-gray-500 hover:text-blue-400 toggle-embed-btn"
+                        data-tweet-id="{{ tweet.id }}">
+                    <span class="show-text">Show Tweet</span>
+                    <span class="hide-text hidden">Hide Tweet</span>
+                </button>
+                <a href="https://twitter.com/user/status/{{ tweet.id }}" 
+                   target="_blank"
+                   class="text-xs text-gray-500 hover:text-blue-400">
+                    View on Twitter
+                </a>
+            </div>
+            
+            <!-- Embed Container - Hidden by default -->
+            <div class="tweet-embed hidden" data-tweet-id="{{ tweet.id }}">
+                <div class="px-3 pb-3">
+                    <div class="flex justify-center py-4">
+                        <div class="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-blue-400"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Search Results -->
+{% if results %}
+<div>
+    <!-- Results Count -->
+    <div class="mb-3 flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-gray-300">
+            {% if query %}
+            Results for "{{ query }}"
+            {% elif category_filter %}
+            Category: {{ category_filter }}
+            {% elif is_recent %}
+            Recent Bookmarks
+            {% else %}
+            Search Results
+            {% endif %}
+        </h2>
+        <span class="text-xs text-gray-500">
+            Showing {{ showing_results }} of {{ total_results }}
+        </span>
+    </div>
+    
+    <!-- Results List -->
+    <div class="grid gap-3">
+        {% for tweet in results %}
+        <div class="bg-[#1a1a1a] rounded-lg overflow-hidden tweet-card" 
+             data-tweet-id="{{ tweet.id }}"
+             data-username="{{ tweet.author_username }}">
+            <div class="p-3">
+                <!-- Author and Date -->
+                <div class="flex items-center justify-between mb-2">
+                    <a href="https://twitter.com/{{ tweet.author_username }}" 
+                       target="_blank"
+                       class="text-sm font-medium text-gray-300 hover:text-white">
+                        @{{ tweet.author_username }}
+                    </a>
+                    <span class="text-xs text-gray-600">
+                        {{ tweet.created_at }}
+                    </span>
+                </div>
+                
+                <!-- Tweet Content -->
+                <p class="text-sm text-gray-400 mb-3">
+                    {{ tweet.text }}
+                </p>
+                
+                <!-- Categories -->
+                <div class="flex flex-wrap gap-1.5 text-xs mt-2">
+                    {% for category in tweet.categories %}
+                    <span class="px-2 py-0.5 bg-[#222222] text-blue-400 rounded">
+                        {{ category }}
+                    </span>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <!-- Embed Control -->
+            <div class="pt-0 px-3 pb-3 flex justify-between">
+                <button class="text-xs text-gray-500 hover:text-blue-400 toggle-embed-btn"
+                        data-tweet-id="{{ tweet.id }}">
+                    <span class="show-text">Show Tweet</span>
+                    <span class="hide-text hidden">Hide Tweet</span>
+                </button>
+                <a href="https://twitter.com/user/status/{{ tweet.id }}" 
+                   target="_blank"
+                   class="text-xs text-gray-500 hover:text-blue-400">
+                    View on Twitter
+                </a>
+            </div>
+            
+            <!-- Embed Container - Hidden by default -->
+            <div class="tweet-embed hidden" data-tweet-id="{{ tweet.id }}">
+                <div class="px-3 pb-3">
+                    <div class="flex justify-center py-4">
+                        <div class="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-blue-400"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<script>
+// Function to toggle tweet embeds
+function toggleEmbed(tweetId) {
+    const embedContainer = document.querySelector(`.tweet-embed[data-tweet-id="${tweetId}"]`);
+    const toggleBtn = document.querySelector(`.toggle-embed-btn[data-tweet-id="${tweetId}"]`);
+    const showText = toggleBtn.querySelector('.show-text');
+    const hideText = toggleBtn.querySelector('.hide-text');
+    
+    if (embedContainer.classList.contains('hidden')) {
+        // Show embed
+        embedContainer.classList.remove('hidden');
+        showText.classList.add('hidden');
+        hideText.classList.remove('hidden');
+        
+        // If embed is empty, create it
+        if (embedContainer.querySelector('.twitter-tweet') === null && 
+            embedContainer.querySelector('.placeholder') === null) {
+            
+            // Create twitter embed
+            embedContainer.innerHTML = `
+                <div class="px-3 pb-3">
+                    <div class="placeholder">
+                        <blockquote class="twitter-tweet" data-dnt="true">
+                            <a href="https://twitter.com/user/status/${tweetId}"></a>
+                        </blockquote>
+                    </div>
+                </div>
+            `;
+            
+            // Load Twitter widget
+            if (window.twttr && window.twttr.widgets) {
+                window.twttr.widgets.load(embedContainer);
+            }
+        }
+    } else {
+        // Hide embed
+        embedContainer.classList.add('hidden');
+        showText.classList.remove('hidden');
+        hideText.classList.add('hidden');
+    }
+}
+
+// Add click handlers once DOM is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    // Add click handlers to all toggle buttons
+    document.querySelectorAll('.toggle-embed-btn').forEach(button => {
+        button.addEventListener('click', function() {
+            const tweetId = this.getAttribute('data-tweet-id');
+            toggleEmbed(tweetId);
+        });
+    });
+});
+</script>
+{% endblock %} 

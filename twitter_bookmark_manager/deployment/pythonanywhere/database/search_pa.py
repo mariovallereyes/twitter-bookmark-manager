@@ -247,18 +247,27 @@ class BookmarkSearch:
         :param username: Twitter username (with or without @)
         """
         try:
+            # Return empty list for empty username
+            if not username or username.strip() == '':
+                logger.warning("Empty username provided to search_by_user")
+                return []
+                
             with get_session() as session:
                 # Normalize username by removing @ if present
                 username = username.lower().strip('@')
                 
+                logger.info(f"🔍 Searching for bookmarks by user: @{username}")
+                
                 # Query bookmarks by author
                 bookmarks = session.query(Bookmark)\
                     .filter(Bookmark.author_username.ilike(username))\
+                    .order_by(Bookmark.created_at.desc())\
                     .all()
                 
-                logger.info(f"🔍 Found {len(bookmarks)} bookmarks from @{username}")
+                logger.info(f"✅ Found {len(bookmarks)} bookmarks from @{username}")
                 
-                return [{
+                # Transform results
+                results = [{
                     'id': b.id,
                     'text': b.text,
                     'author': f"@{b.author_username}",
@@ -266,8 +275,13 @@ class BookmarkSearch:
                     'created_at': b.created_at
                 } for b in bookmarks]
                 
+                return results
+                
         except Exception as e:
             logger.error(f"❌ User search error: {e}")
+            # Log the full error details for debugging
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return []
 
     def get_categories(self) -> List[Dict[str, Any]]:
@@ -327,4 +341,54 @@ class BookmarkSearch:
                 } for b in bookmarks]
         except Exception as e:
             logger.error(f"❌ Error getting all bookmarks: {e}")
-            raise 
+            raise
+            
+    def search_by_category(self, category_name) -> List[Dict[str, Any]]:
+        """
+        Search bookmarks by specific category or list of categories
+        :param category_name: Category name (str) or list of categories ([str]) to search for
+        """
+        try:
+            # Handle empty input
+            if not category_name:
+                logger.warning("Empty category provided to search_by_category")
+                return []
+            
+            # Convert single category to list for consistent handling
+            categories = category_name if isinstance(category_name, list) else [category_name]
+            
+            # Return empty list for empty list or list with empty strings
+            if not categories or all(not cat or cat.strip() == '' for cat in categories):
+                logger.warning("No valid categories provided to search_by_category")
+                return []
+                
+            logger.info(f"🔍 Searching for bookmarks in categories: {categories}")
+            
+            with get_session() as session:
+                # Query bookmarks by category
+                query = session.query(Bookmark)\
+                    .join(Bookmark.categories)\
+                    .filter(Category.name.in_(categories))\
+                    .order_by(Bookmark.created_at.desc())
+                
+                bookmarks = query.all()
+                
+                logger.info(f"✅ Found {len(bookmarks)} bookmarks in categories {categories}")
+                
+                # Transform results
+                results = [{
+                    'id': b.id,
+                    'text': b.text,
+                    'author': f"@{b.author_username}",
+                    'categories': [cat.name for cat in b.categories],
+                    'created_at': b.created_at
+                } for b in bookmarks]
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"❌ Category search error: {e}")
+            # Log the full error details for debugging
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return [] 
