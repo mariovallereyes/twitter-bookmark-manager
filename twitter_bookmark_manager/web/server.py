@@ -140,8 +140,13 @@ def upload_bookmarks():
         temp_path = Path(app.config['UPLOAD_FOLDER']) / secure_filename(file.filename)
         file.save(str(temp_path))
         
-        # Backup current file first
+        # Target file location
         current_file = Path('database/twitter_bookmarks.json')
+        
+        # Create database/json_history directory if it doesn't exist
+        Path('database/json_history').mkdir(exist_ok=True, parents=True)
+        
+        # Backup current file first if it exists
         if current_file.exists():
             backup_date = datetime.now().strftime("%Y%m%d")
             history_file = Path('database/json_history') / f'twitter_bookmarks_{backup_date}.json'
@@ -156,14 +161,14 @@ def upload_bookmarks():
             except Exception as e:
                 print(f"Error copying file to history: {str(e)}")
                 return jsonify({'error': 'Error backing up current database'}), 500
-            
-            # Only if backup successful, proceed with the new file
-            try:
-                shutil.move(str(temp_path), str(current_file))
-                return jsonify({'message': 'File processed successfully'})
-            except Exception as e:
-                print(f"Error moving new file: {str(e)}")
-                return jsonify({'error': 'Error updating database file'}), 500
+        
+        # Move the uploaded file to the target location
+        try:
+            shutil.move(str(temp_path), str(current_file))
+            return jsonify({'message': 'File processed successfully'})
+        except Exception as e:
+            print(f"Error moving new file: {str(e)}")
+            return jsonify({'error': 'Error updating database file'}), 500
         
     except Exception as e:
         # Log the error (you can add proper logging)
@@ -208,18 +213,45 @@ async def chat():
 def update_database():
     """Handle database update after file upload"""
     try:
+        # Check if the JSON file exists
+        json_file_path = Path('database/twitter_bookmarks.json')
+        if not json_file_path.exists():
+            return jsonify({
+                'error': 'No Twitter bookmarks JSON file found. Please upload a file first.'
+            }), 400
+        
+        # Import required modules
         from database.update_bookmarks import update_bookmarks
         from core.process_categories import CategoryProcessor
         
         # Step 1: Update SQL with any new bookmarks
-        update_bookmarks(rebuild_vectors=False)
+        try:
+            update_result = update_bookmarks(rebuild_vectors=False)
+            print(f"Update result: {update_result}")
+        except Exception as e:
+            print(f"Error updating bookmarks: {str(e)}")
+            return jsonify({
+                'error': f'Error updating SQL database: {str(e)}'
+            }), 500
         
         # Step 2: Process categories for new bookmarks
-        processor = CategoryProcessor()
-        category_results = processor.process_all_bookmarks()
+        try:
+            processor = CategoryProcessor()
+            category_results = processor.process_all_bookmarks()
+        except Exception as e:
+            print(f"Error processing categories: {str(e)}")
+            return jsonify({
+                'error': f'Error processing categories: {str(e)}'
+            }), 500
         
         # Step 3: Rebuild vector store to ensure sync
-        update_bookmarks(rebuild_vectors=True)
+        try:
+            update_bookmarks(rebuild_vectors=True)
+        except Exception as e:
+            print(f"Error rebuilding vector store: {str(e)}")
+            return jsonify({
+                'error': f'Error rebuilding vector store: {str(e)}'
+            }), 500
         
         return jsonify({
             'message': 'Database updated successfully',
@@ -235,7 +267,7 @@ def update_database():
     except Exception as e:
         print(f"Error updating database: {str(e)}")
         return jsonify({
-            'error': 'Error updating database: ' + str(e),
+            'error': f'Error updating database: {str(e)}',
             'steps': ['Error occurred during update']
         }), 500
 

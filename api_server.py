@@ -74,7 +74,7 @@ CORS(app)
 def index():
     """Serve the index.html template with basic bookmark information"""
     try:
-        from twitter_bookmark_manager.core.search import BookmarkSearch
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
         # Get categories for filter options
@@ -124,7 +124,7 @@ def chat():
 def search():
     """Search bookmarks"""
     try:
-        from twitter_bookmark_manager.core.search import BookmarkSearch
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
         # Get parameters
@@ -166,14 +166,14 @@ def search():
 def recent():
     """Get recent bookmarks"""
     try:
-        from twitter_bookmark_manager.core.search import BookmarkSearch
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
         search = BookmarkSearch()
         
         # Get categories
         categories = search.get_categories()
         
-        # Get recent bookmarks
-        results = search.get_all_bookmarks(limit=50)
+        # Get all recent bookmarks (no limit)
+        results = search.get_all_bookmarks(limit=None)
         
         # Format results
         formatted_results = [{
@@ -599,7 +599,7 @@ def api_chat():
         
         # Import chat engine
         try:
-            from twitter_bookmark_manager.core.search import BookmarkSearch
+            from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
             from twitter_bookmark_manager.core.chat.engine import BookmarkChat
             
             search = BookmarkSearch()
@@ -643,6 +643,159 @@ def api_chat():
 
 # Make the app available for WSGI
 application = app
+
+# Add category routes for the adaptive categorization system
+@app.route('/categories')
+def category_page():
+    """Serve the category management UI"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        search = BookmarkSearch()
+        processor = CategoryProcessorPA()
+        
+        # Get categories for filter options
+        categories = search.get_categories()
+        
+        # Get categorization stats
+        stats = processor.get_categorization_stats()
+        
+        # Format category stats for display
+        category_stats = []
+        distribution = stats.get('category_distribution', {})
+        for category in categories:
+            count = distribution.get(category['name'], 0)
+            category_stats.append({
+                'name': category['name'],
+                'count': count,
+                'percentage': round(count / max(stats['total_bookmarks'], 1) * 100, 1)
+            })
+        
+        # Sort by count (descending)
+        category_stats.sort(key=lambda x: x['count'], reverse=True)
+        
+        return render_template('categories.html', 
+                              categories=category_stats,
+                              stats=stats)
+    except Exception as e:
+        logger.error(f"Error rendering categories page: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/categories/status')
+def get_category_status():
+    """Get status of category processing"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        processor = CategoryProcessorPA()
+        status = processor.get_categorization_stats()
+        
+        return jsonify({
+            "status": "success",
+            "data": status
+        })
+    except Exception as e:
+        logger.error(f"Error getting category status: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/api/categories/process', methods=['POST'])
+def process_categories():
+    """Manually trigger category processing"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import process_categories_background_job
+        
+        # Process categories in the background
+        result = process_categories_background_job()
+        
+        if result.get('success'):
+            return jsonify({
+                "status": "success",
+                "message": f"Processed {result['processed']} bookmarks",
+                "data": result
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": result.get('error', 'Unknown error')
+            }), 500
+    except Exception as e:
+        logger.error(f"Error processing categories: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/category/<category_name>')
+def view_category(category_name):
+    """View all bookmarks in a specific category"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
+        search = BookmarkSearch()
+        
+        # Get all categories for the filter UI
+        categories = search.get_categories()
+        
+        # Search for bookmarks in the specified category
+        results = search.search_by_category(category_name)
+        
+        # Format the results
+        formatted_results = [{
+            'id': str(tweet['id']),
+            'text': tweet['text'],
+            'author_username': tweet['author'].replace('@', ''),
+            'categories': tweet['categories'],
+            'created_at': tweet['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+        } for tweet in results]
+        
+        return render_template('index.html',
+                              categories=categories,
+                              results=formatted_results,
+                              showing_results=len(formatted_results),
+                              total_results=len(formatted_results),
+                              total_tweets=search.get_total_tweet_count(),
+                              category_filter=category_name)
+    except Exception as e:
+        logger.error(f"Error in category view: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/categories/merge', methods=['POST'])
+def merge_similar_categories():
+    """Merge similar categories to reduce fragmentation"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        # Get threshold parameter
+        data = request.get_json() or {}
+        threshold = float(data.get('threshold', 0.85))
+        
+        processor = CategoryProcessorPA()
+        result = processor.merge_similar_categories(threshold=threshold)
+        
+        if result.get('success'):
+            return jsonify({
+                "status": "success",
+                "message": f"Merged {result['merges_performed']} similar categories",
+                "data": result
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": result.get('error', 'Unknown error')
+            }), 500
+    except Exception as e:
+        logger.error(f"Error merging categories: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))

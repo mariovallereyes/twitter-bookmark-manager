@@ -191,7 +191,12 @@ class BookmarkChat:
             
             logger.info("Configuring Gemini...")
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-pro')
+            
+            # List available models for debugging
+            self._list_available_models(genai)
+            
+            # Use the appropriate model
+            self.model = genai.GenerativeModel('gemini-2.0-flash')  # Updated model name
             logger.info("✓ Gemini chat engine initialized successfully")
             
         except ImportError as e:
@@ -204,6 +209,17 @@ class BookmarkChat:
             logger.warning("Falling back to Mistral model")
             self.model_name = 'mistral'
             self._init_mistral()
+
+    def _list_available_models(self, genai):
+        """List available Gemini models for diagnostics."""
+        try:
+            models = genai.list_models()
+            logger.info("Available Gemini models:")
+            for model in models:
+                if "generateContent" in model.supported_generation_methods:
+                    logger.info(f"- {model.name} (supports text generation)")
+        except Exception as e:
+            logger.error(f"Error listing Gemini models: {e}")
 
     def _init_mistral(self):
         """Initialize Mistral model."""
@@ -361,12 +377,30 @@ class BookmarkChat:
                     }
             
             # Handle general conversation
-            response_text = self._generate_response(message)
-            return {
-                'text': response_text,
-                'model': self.model_name,
-                'bookmarks_used': []
-            }
+            try:
+                response_text = self._generate_response(message)
+                return {
+                    'text': response_text,
+                    'model': self.model_name,
+                    'bookmarks_used': []
+                }
+            except Exception as e:
+                logger.error(f"Error generating conversation response: {e}")
+                # Provide a friendly error message
+                if 'not found' in str(e) or '404' in str(e):
+                    return {
+                        'text': "I'm having trouble connecting to my AI service right now. This might be due to API changes or configuration issues. Please try again later or contact the administrator.",
+                        'model': self.model_name,
+                        'bookmarks_used': [],
+                        'error': str(e)
+                    }
+                else:
+                    return {
+                        'text': "I encountered an issue while processing your message. Please try again or rephrase your question.",
+                        'model': self.model_name,
+                        'bookmarks_used': [],
+                        'error': str(e)
+                    }
             
         except Exception as e:
             logger.error(f"Error in process_message: {e}")
@@ -408,7 +442,18 @@ class BookmarkChat:
         try:
             # Gemini's generate_content is synchronous
             response = self.model.generate_content(prompt)
-            return response.text
+            
+            # Handle different response formats based on API version
+            if hasattr(response, 'text'):
+                # New API format
+                return response.text
+            elif hasattr(response, 'parts'):
+                # Handle parts format if present
+                return ''.join([part.text for part in response.parts])
+            else:
+                # Fallback to string representation
+                return str(response)
+                
         except Exception as e:
             logger.error(f"Gemini response error: {e}")
             raise

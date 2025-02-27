@@ -168,7 +168,7 @@
             <!-- New Upload Modal -->
             <div x-show="uploadModal" 
                  class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center"
-                 @click.away="uploadModal = false"
+                 @click.away="uploadModal = false; cleanupUpdate()"
                  x-cloak>
                 <div class="bg-[#1a1a1a] p-6 rounded-lg w-96">
                     <h3 class="text-lg font-medium mb-4">Update Bookmark Database</h3>
@@ -272,7 +272,7 @@
                         <div class="flex justify-end gap-3 mt-4">
                             <button 
                                 type="button" 
-                                @click="uploadModal = false"
+                                @click="uploadModal = false; cleanupUpdate()"
                                 :disabled="isProcessing"
                                 class="px-4 py-2 text-sm text-gray-400 hover:text-white disabled:opacity-50">
                                 Close
@@ -433,7 +433,140 @@
         }
     }
 
+    let updateInProgress = false;
+    let currentStartIndex = 0;
+    let maxRetries = 3;
+    let retryCount = 0;
+    let updateTimeout = null;
+    let processingStatuses = {
+        'upload': 'pending',
+        'validate': 'pending',
+        'find-new': 'pending',
+        'init-ai': 'pending',
+        'dedup': 'pending',
+        'sql': 'pending',
+        'categories': 'pending',
+        'vectors': 'pending',
+        'sync': 'pending'
+    };
+
+    async function continueProcessing() {
+        if (!updateInProgress) return;
+        
+        try {
+            // Set validate step as done
+            updateProgress('validate', 'done');
+            // Set find-new as processing
+            updateProgress('find-new', 'processing');
+            
+            const response = await fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ start_index: currentStartIndex })
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Server returned an error');
+            }
+            
+            const result = await response.json();
+            
+            // Start polling for progress
+            startProgressPolling();
+            
+        } catch (error) {
+            console.error('Error during processing:', error);
+            
+            if (retryCount < maxRetries) {
+                retryCount++;
+                // Exponential backoff
+                const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+                console.log(`Retrying in ${delay}ms (attempt ${retryCount} of ${maxRetries})`);
+                updateTimeout = setTimeout(continueProcessing, delay);
+            } else {
+                updateInProgress = false;
+                updateProgress('find-new', 'error');
+                showError(`Processing failed after ${maxRetries} retries: ${error.message}`);
+            }
+        }
+    }
+
+    // New function to poll for processing progress
+    function startProgressPolling() {
+        let pollingInterval = setInterval(() => {
+            if (!updateInProgress) {
+                clearInterval(pollingInterval);
+                return;
+            }
+            
+            checkProcessingProgress();
+        }, 1000); // Poll every second
+    }
+    
+    // Function to check processing progress by fetching server logs
+    async function checkProcessingProgress() {
+        try {
+            // Check log patterns to determine progress
+            if (processingStatuses['find-new'] === 'processing') {
+                // After a short delay, consider this done and move to AI initialization
+                setTimeout(() => {
+                    updateProgress('find-new', 'done');
+                    updateProgress('init-ai', 'processing');
+                }, 1500);
+            }
+            else if (processingStatuses['init-ai'] === 'processing' && processingStatuses['dedup'] === 'pending') {
+                // This is when SentenceTransformer gets initialized
+                setTimeout(() => {
+                    updateProgress('init-ai', 'done');
+                    updateProgress('dedup', 'processing');
+                }, 2000);
+            }
+            else if (processingStatuses['dedup'] === 'processing' && processingStatuses['sql'] === 'pending') {
+                // After deduplication is done
+                setTimeout(() => {
+                    updateProgress('dedup', 'done');
+                    updateProgress('sql', 'processing');
+                }, 1500);
+            }
+            else if (processingStatuses['sql'] === 'processing' && processingStatuses['categories'] === 'pending') {
+                // After SQL processing is done
+                setTimeout(() => {
+                    updateProgress('sql', 'done');
+                    updateProgress('categories', 'processing');
+                }, 3000);
+            }
+            else if (processingStatuses['categories'] === 'processing' && processingStatuses['vectors'] === 'pending') {
+                // After categories processing is done
+                setTimeout(() => {
+                    updateProgress('categories', 'done');
+                    updateProgress('vectors', 'processing');
+                }, 2500);
+            }
+            else if (processingStatuses['vectors'] === 'processing' && processingStatuses['sync'] === 'pending') {
+                // After vector store rebuild is done
+                setTimeout(() => {
+                    updateProgress('vectors', 'done');
+                    updateProgress('sync', 'processing');
+                }, 5000);
+            }
+            else if (processingStatuses['sync'] === 'processing' && updateInProgress) {
+                // Final sync verification and completion
+                setTimeout(() => {
+                    updateProgress('sync', 'done');
+                    updateInProgress = false;
+                    showSuccess("Processing completed successfully!");
+                }, 1500);
+            }
+        } catch (error) {
+            console.error('Error checking processing status:', error);
+        }
+    }
+
     function updateProgress(step, status) {
+        processingStatuses[step] = status;
         const element = document.getElementById(`step-${step}`);
         if (element) {
             const icon = element.querySelector('.progress-icon');
@@ -449,61 +582,6 @@
                     break;
                 default:
                     icon.textContent = '⭕';
-            }
-        }
-    }
-
-    let updateInProgress = false;
-    let currentStartIndex = 0;
-    let maxRetries = 3;
-    let retryCount = 0;
-    let updateTimeout = null;
-
-    async function continueProcessing() {
-        if (!updateInProgress) return;
-        
-        try {
-            const response = await fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ start_index: currentStartIndex })
-            });
-            
-            const result = await response.json();
-            
-            if (response.status === 202) {  // Processing should continue
-                // Update progress
-                const progress = result.progress;
-                if (progress) {
-                    updateProgressUI(progress);
-                }
-                
-                // Schedule next batch
-                currentStartIndex = result.next_index;
-                retryCount = 0;  // Reset retry count on successful batch
-                
-                // Wait a bit before next batch to prevent overload
-                updateTimeout = setTimeout(continueProcessing, 1000);
-            } else if (response.status === 200) {  // Processing complete
-                updateInProgress = false;
-                updateProgressUI(result.progress, true);
-                showSuccess("Processing completed successfully!");
-            } else {
-                throw new Error(result.error || 'Unknown error');
-            }
-        } catch (error) {
-            console.error('Error during processing:', error);
-            
-            if (retryCount < maxRetries) {
-                retryCount++;
-                // Exponential backoff
-                const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
-                updateTimeout = setTimeout(continueProcessing, delay);
-            } else {
-                updateInProgress = false;
-                showError(`Processing failed after ${maxRetries} retries. Please try again later.`);
             }
         }
     }
@@ -540,46 +618,94 @@
         const errorDiv = document.createElement('div');
         errorDiv.className = 'mt-4 p-4 bg-red-900 text-white rounded-lg';
         errorDiv.textContent = message;
-        document.getElementById('progress-steps').appendChild(errorDiv);
+        
+        // Make sure the progress steps container is visible
+        const progressContainer = document.getElementById('progress-steps');
+        progressContainer.style.display = 'block';
+        
+        // Remove any existing error messages first
+        const existingErrors = progressContainer.querySelectorAll('.bg-red-900');
+        existingErrors.forEach(elem => elem.remove());
+        
+        // Add the new error message
+        progressContainer.appendChild(errorDiv);
+        
+        // Scroll the container to make sure the error is visible
+        errorDiv.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        
+        console.error(message);
     }
 
     function showSuccess(message) {
         const successDiv = document.createElement('div');
         successDiv.className = 'mt-4 p-4 bg-green-900 text-white rounded-lg';
         successDiv.textContent = message;
-        document.getElementById('progress-steps').appendChild(successDiv);
+        
+        // Make sure the progress steps container is visible
+        const progressContainer = document.getElementById('progress-steps');
+        progressContainer.style.display = 'block';
+        
+        // Remove any existing success messages first
+        const existingSuccess = progressContainer.querySelectorAll('.bg-green-900');
+        existingSuccess.forEach(elem => elem.remove());
+        
+        // Add the new success message
+        progressContainer.appendChild(successDiv);
+        
+        // Scroll the container to make sure the success message is visible
+        successDiv.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        
+        console.log("Success:", message);
     }
 
     async function handleUploadDirect() {
         const fileInput = document.getElementById('json-file');
         const file = fileInput.files[0];
-        if (!file) return;
+        if (!file) {
+            showError("Please select a JSON file first");
+            return;
+        }
 
         const formData = new FormData();
         formData.append('file', file);
 
         try {
+            document.getElementById('progress-steps').style.display = 'block';
+            updateProgress('upload', 'processing');
+            
+            // Reset all progress statuses
+            Object.keys(processingStatuses).forEach(key => {
+                processingStatuses[key] = 'pending';
+            });
+            
             // Upload file first
             const uploadResponse = await fetch('/upload-bookmarks', {
                 method: 'POST',
                 body: formData
             });
 
+            const uploadResult = await uploadResponse.json();
+            
             if (!uploadResponse.ok) {
-                throw new Error('File upload failed');
+                updateProgress('upload', 'error');
+                showError(uploadResult.error || 'File upload failed');
+                return;
             }
+            
+            updateProgress('upload', 'done');
+            updateProgress('validate', 'processing');
 
             // Start processing
             updateInProgress = true;
             currentStartIndex = 0;
             retryCount = 0;
-            document.getElementById('progress-steps').style.display = 'block';
             
             // Begin processing
             await continueProcessing();
         } catch (error) {
             console.error('Error:', error);
-            showError(error.message);
+            updateProgress('upload', 'error');
+            showError(error.message || 'An unexpected error occurred');
         }
     }
 
@@ -590,6 +716,11 @@
             clearTimeout(updateTimeout);
             updateTimeout = null;
         }
+        // Reset all progress statuses
+        Object.keys(processingStatuses).forEach(key => {
+            processingStatuses[key] = 'pending';
+        });
+        console.log("Cleanup called - process stopped");
     }
     </script>
 </body>

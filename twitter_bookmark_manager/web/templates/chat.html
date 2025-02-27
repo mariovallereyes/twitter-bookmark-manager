@@ -7,6 +7,17 @@
         <!-- Error message display -->
         <div x-show="error" class="bg-red-500 bg-opacity-10 border border-red-500 text-red-500 px-4 py-2 rounded-lg mb-4">
             <p x-text="error"></p>
+            <template x-if="connectionIssue">
+                <div class="mt-2 text-sm">
+                    <p>This could be due to:</p>
+                    <ul class="list-disc pl-5 mt-1">
+                        <li>API key is invalid or expired</li>
+                        <li>The model name has changed in the Gemini API</li>
+                        <li>Network connectivity issues</li>
+                    </ul>
+                    <p class="mt-2">Administrator: Please check the server logs for details.</p>
+                </div>
+            </template>
         </div>
 
         <!-- Chat messages -->
@@ -128,6 +139,7 @@ function chatApp() {
         loading: false,
         typing: false,
         error: null,
+        connectionIssue: false,  // New flag for API connection issues
 
         initChat() {
             this.messages.push({
@@ -150,6 +162,7 @@ function chatApp() {
             
             const message = this.userInput;
             this.error = null;
+            this.connectionIssue = false;
             
             // Store reference to input element
             const inputEl = this.$refs.chatInput;
@@ -195,14 +208,27 @@ function chatApp() {
                 // Short delay to show typing indicator
                 await new Promise(resolve => setTimeout(resolve, 500));
                 
+                // Check if response contains an error
+                if (data.error) {
+                    this.connectionIssue = data.error.includes('404') || 
+                                          data.error.includes('not found') || 
+                                          data.error.includes('API');
+                }
+                
                 // Add the assistant's response
                 this.messages.push({
                     role: 'assistant',
                     content: data.response,
                     bookmarks: data.bookmarks || [],
                     model: data.model || 'gemini',
-                    timestamp: new Date()
+                    timestamp: new Date(),
+                    error: data.error || null
                 });
+                
+                // If there was an error, show it in the UI
+                if (data.error) {
+                    this.error = "There was an issue with the AI service. Try again later.";
+                }
             } catch (error) {
                 console.error('Chat error:', error);
                 this.error = 'Sorry, I encountered an error. Please try again.';
@@ -210,7 +236,8 @@ function chatApp() {
                     role: 'assistant',
                     content: 'Sorry, I encountered an error. Please try again.',
                     timestamp: new Date(),
-                    model: 'mistral'
+                    model: 'mistral',
+                    error: error.toString()
                 });
             } finally {
                 this.loading = false;

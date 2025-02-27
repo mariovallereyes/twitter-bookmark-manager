@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Create database engine
-DATABASE_URL = "sqlite:///database/twitter_bookmarks.db"
+# Get base directory (project root)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Create database engine with absolute path
+DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'database', 'twitter_bookmarks.db')}"
+logger.info(f"Using database path: {DATABASE_URL}")
 engine = create_engine(DATABASE_URL)
 
 # Create SessionLocal class
