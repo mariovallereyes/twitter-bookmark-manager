@@ -794,6 +794,24 @@ def category_page():
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/categories', methods=['GET'])
+def api_categories():
+    """API endpoint to get all categories with counts"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
+        
+        search = BookmarkSearch()
+        categories = search.get_categories()
+        
+        return jsonify({
+            'success': True,
+            'categories': categories
+        })
+    except Exception as e:
+        logger.error(f"Error retrieving categories: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/categories/status')
 def get_category_status():
     """Get status of category processing"""
@@ -935,6 +953,101 @@ def merge_similar_categories():
             "status": "error",
             "message": str(e)
         }), 500
+
+@app.route('/api/bookmark/categories', methods=['PUT'])
+def update_bookmark_categories():
+    """Update categories for a specific bookmark"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        data = request.get_json()
+        bookmark_id = data.get('bookmark_id')
+        category_names = data.get('categories', [])
+        
+        if not bookmark_id:
+            return jsonify({
+                "status": "error", 
+                "error": "Bookmark ID is required"
+            }), 400
+            
+        processor = CategoryProcessorPA()
+        result = processor.update_bookmark_categories(bookmark_id, category_names)
+        
+        # Log the result for debugging
+        logger.info(f"Successfully updated categories for bookmark {bookmark_id}: {result}")
+        
+        return jsonify({
+            "status": "success",
+            "data": result
+        })
+    except Exception as e:
+        logger.error(f"Error updating bookmark categories: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/api/categories/rename', methods=['POST'])
+def rename_category():
+    """Rename an existing category"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        data = request.get_json()
+        old_name = data.get('old_name')
+        new_name = data.get('new_name')
+        
+        if not old_name or not new_name:
+            return jsonify({'status': 'error', 'message': 'Both old and new category names are required'}), 400
+            
+        processor = CategoryProcessorPA()
+        result = processor.rename_category(old_name, new_name)
+        
+        return jsonify({
+            "status": "success",
+            "data": result
+        })
+    except Exception as e:
+        logger.error(f"Error renaming category: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/api/categories/delete', methods=['POST'])
+def delete_category():
+    """Delete a category"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import CategoryProcessorPA
+        
+        data = request.get_json()
+        category_name = data.get('category_name')
+        
+        if not category_name:
+            return jsonify({'status': 'error', 'message': 'Category name is required'}), 400
+            
+        processor = CategoryProcessorPA()
+        result = processor.delete_category(category_name)
+        
+        return jsonify({
+            "status": "success",
+            "data": result
+        })
+    except Exception as e:
+        logger.error(f"Error deleting category: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+# Add routes for category management
+@app.route('/manage/categories')
+def manage_categories():
+    """Redirect to the category management page"""
+    return redirect('/categories')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))

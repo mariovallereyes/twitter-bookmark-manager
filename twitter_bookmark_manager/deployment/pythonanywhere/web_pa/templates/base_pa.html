@@ -200,7 +200,7 @@
                 <div class="flex gap-1.5">
                     <a href="/recent"
                        class="px-3 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors">
-                        Recent
+                        All Bookmarks
                     </a>
                     
                     <button 
@@ -222,6 +222,14 @@
                         Chat
                     </a>
 
+                    <a href="/manage/categories" 
+                       class="px-3 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-blue-400 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h10m-5-5v10m-7 5h14"></path>
+                        </svg>
+                        Manage Categories
+                    </a>
+
                     <button 
                         @click="uploadModal = true"
                         class="px-3 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-blue-400 hover:bg-gray-800 transition-colors flex items-center gap-1">
@@ -233,25 +241,28 @@
                 </div>
             </div>
 
-            <!-- Categories display - PythonAnywhere specific rendering -->
-            <div id="base-categories" class="mt-3 flex flex-wrap gap-1.5">
-                {% for category in categories %}
-                    {% if category is mapping %}
-                        <button 
-                            data-category="{{ category.name }}"
-                            class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}"
-                            onclick="toggleCategory('{{ category.name }}')">
-                            {{ category.name }} {% if category.count %}({{ category.count }}){% endif %}
-                        </button>
-                    {% else %}
-                        <button 
-                            data-category="{{ category }}"
-                            class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}"
-                            onclick="toggleCategory('{{ category }}')">
-                            {{ category }}
-                        </button>
-                    {% endif %}
-                {% endfor %}
+            <!-- Categories row (below main buttons) -->
+            <div class="navbar-section mb-4">
+                <!-- Categories display - PythonAnywhere specific rendering -->
+                <div id="base-categories" class="mt-3 flex flex-wrap gap-1.5">
+                    {% for category in categories %}
+                        {% if category is mapping %}
+                            <button 
+                                data-category="{{ category.name }}"
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}"
+                                onclick="toggleCategory('{{ category.name }}')">
+                                {{ category.name }} {% if category.count %}({{ category.count }}){% endif %}
+                            </button>
+                        {% else %}
+                            <button 
+                                data-category="{{ category }}"
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}"
+                                onclick="toggleCategory('{{ category }}')">
+                                {{ category }}
+                            </button>
+                        {% endif %}
+                    {% endfor %}
+                </div>
             </div>
 
             <!-- User Search Modal -->

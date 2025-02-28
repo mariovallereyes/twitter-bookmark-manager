@@ -169,6 +169,97 @@ Provides deeper insights into database structure and connectivity, intended for 
 
 ---
 
+### **5️⃣ Bookmark Category Management Endpoints**
+
+#### **GET `/api/categories`** - Retrieve all available categories.
+##### **Response Format:**
+```json
+{
+  "categories": [
+    {"id": 1, "name": "Technology"},
+    {"id": 2, "name": "Business"},
+    {"id": 3, "name": "Health"}
+  ]
+}
+```
+
+#### **PUT `/api/bookmark/categories`** - Update categories for a specific bookmark.
+##### **Request Body:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `bookmark_id` | String | ID of the bookmark to update |
+| `categories` | Array | List of category names to assign |
+
+##### **Example Request:**
+```json
+{
+  "bookmark_id": "12345",
+  "categories": ["Technology", "Programming", "AI"]
+}
+```
+
+##### **Response Format:**
+```json
+{
+  "bookmark_id": "12345",
+  "categories": ["Technology", "Programming", "AI"],
+  "added": ["Programming", "AI"],
+  "removed": ["Business"]
+}
+```
+
+#### **POST `/api/categories/rename`** - Rename an existing category.
+##### **Request Body:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `old_name` | String | Current name of the category |
+| `new_name` | String | New name for the category |
+
+##### **Example Request:**
+```json
+{
+  "old_name": "AI",
+  "new_name": "Artificial Intelligence"
+}
+```
+
+##### **Response Format:**
+```json
+{
+  "old_name": "AI",
+  "new_name": "Artificial Intelligence",
+  "id": 5
+}
+```
+
+#### **POST `/api/categories/delete`** - Delete a category and its associations.
+##### **Request Body:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `category_name` | String | Name of the category to delete |
+
+##### **Example Request:**
+```json
+{
+  "category_name": "Outdated Category"
+}
+```
+
+##### **Response Format:**
+```json
+{
+  "category_name": "Outdated Category",
+  "id": 8,
+  "bookmark_associations_removed": 5
+}
+```
+
+#### **GET `/categories`** - Render the category management interface.
+
+#### **GET `/manage/categories`** - Redirects to the category management page.
+
+---
+
 ## **2. Backend Interactions & Dependencies**
 Each API endpoint interacts with multiple system components:
 | Endpoint | Module Interaction |

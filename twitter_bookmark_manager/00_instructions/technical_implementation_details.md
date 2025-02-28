@@ -9,6 +9,7 @@
 - [Advanced Error Handling](#advanced-error-handling)
 - [PythonAnywhere-Specific Implementation](#pythonanywhere-specific-implementation)
 - [Best Practices for Development](#best-practices-for-development)
+- [Bookmark Category Management](#bookmark-category-management)
 
 ## Introduction
 
@@ -295,4 +296,150 @@ def __init__(self):
    - Avoid hard-coding absolute imports that might break in different environments
    - Use try/except patterns for environment-specific imports
 
-By following these guidelines, developers can ensure that the Twitter Bookmark Manager remains robust across both local development and PythonAnywhere production environments. 
+By following these guidelines, developers can ensure that the Twitter Bookmark Manager remains robust across both local development and PythonAnywhere production environments.
+
+## Bookmark Category Management
+
+### Architecture Overview
+The bookmark category management system is implemented with a multi-layered architecture that enables both individual bookmark categorization and global category management. This system allows users to efficiently organize their bookmark collection through intuitive interfaces.
+
+### Category Data Model
+- **Category Table**: Stores category definitions with unique IDs and names
+- **bookmark_categories Association Table**: Many-to-many relationship between bookmarks and categories
+- **Database Schema**:
+  ```sql
+  CREATE TABLE category (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL
+  );
+  
+  CREATE TABLE bookmark_categories (
+    bookmark_id TEXT, 
+    category_id INTEGER,
+    PRIMARY KEY (bookmark_id, category_id),
+    FOREIGN KEY (bookmark_id) REFERENCES bookmark(id),
+    FOREIGN KEY (category_id) REFERENCES category(id)
+  );
+  ```
+
+### CategoryProcessor Implementation
+The core of category management functionality is implemented in the `CategoryProcessorPA` class, which provides methods for:
+
+- **get_or_create_category**: Retrieves or creates categories by name
+- **update_bookmark_categories**: Assigns categories to a specific bookmark
+- **rename_category**: Changes a category's name globally
+- **delete_category**: Removes a category and its associations
+- **get_categorization_stats**: Provides statistics about category usage
+
+```python
+# Example: update_bookmark_categories method
+def update_bookmark_categories(self, bookmark_id: str, category_names: List[str]) -> Dict[str, Any]:
+    """Update categories for a specific bookmark."""
+    session = get_session()
+    
+    try:
+        # Get the bookmark
+        bookmark = session.query(Bookmark).filter(Bookmark.id == bookmark_id).first()
+        if not bookmark:
+            raise ValueError(f"Bookmark with ID {bookmark_id} not found")
+            
+        # Get existing categories
+        existing_categories = session.query(Category).join(
+            bookmark_categories,
+            Category.id == bookmark_categories.c.category_id
+        ).filter(
+            bookmark_categories.c.bookmark_id == bookmark_id
+        ).all()
+        
+        existing_names = [c.name for c in existing_categories]
+        
+        # Process categories to add and remove
+        categories_to_add = [name for name in category_names if name not in existing_names]
+        categories_to_remove = [c for c in existing_categories if c.name not in category_names]
+        
+        # Add new category associations
+        for name in categories_to_add:
+            category = self.get_or_create_category(name, session)
+            session.execute(
+                bookmark_categories.insert().values(
+                    bookmark_id=bookmark_id,
+                    category_id=category.id
+                )
+            )
+            
+        # Remove old category associations
+        for category in categories_to_remove:
+            session.execute(
+                bookmark_categories.delete().where(
+                    (bookmark_categories.c.bookmark_id == bookmark_id) &
+                    (bookmark_categories.c.category_id == category.id)
+                )
+            )
+                
+        session.commit()
+        
+        return {
+            'bookmark_id': bookmark_id,
+            'categories': category_names,
+            'added': categories_to_add,
+            'removed': [c.name for c in categories_to_remove]
+        }
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error updating bookmark categories: {str(e)}")
+        raise e
+    finally:
+        session.close()
+```
+
+### Frontend Implementation
+
+#### Individual Bookmark Category Modal
+The individual bookmark category management is implemented through a modal interface in `index_pa.html`:
+
+- **Modal Structure**: 
+  - Bookmark preview section
+  - Currently assigned categories section with removal capability
+  - Available categories section with click-to-add functionality
+  - New category input field and add button
+  - Save changes button with status message display
+
+- **Key JavaScript Functions**:
+  - `initModal`: Initializes the modal with bookmark data and clears previous status messages
+  - `renderSelectedCategories`: Renders currently assigned categories with removal buttons
+  - `renderAvailableCategories`: Displays available categories for selection
+  - `updateBookmarkCategories`: Updates the UI after category changes are saved
+  - `showStatus`: Displays success/error messages with appropriate styling
+
+#### Global Category Management
+The global category management interface (`categories_pa.html`) provides tools for:
+
+- Viewing category usage statistics
+- Renaming categories system-wide
+- Deleting unused or redundant categories
+- Merging similar categories
+
+### API Endpoints
+The system provides several API endpoints for category management:
+
+- **GET `/api/categories`**: Lists all available categories
+- **PUT `/api/bookmark/categories`**: Updates categories for a specific bookmark
+- **POST `/api/categories/rename`**: Renames a category globally
+- **POST `/api/categories/delete`**: Deletes a category and its associations
+
+### Error Handling
+The category management system implements robust error handling:
+
+- **Frontend**: Clear visual feedback for success/failure states
+- **Backend**: Detailed error logging for API operations
+- **Database**: Transaction management to ensure data consistency
+- **User Experience**: Informative error messages that guide users toward resolution
+
+### Future Enhancements
+Planned improvements for the category management system include:
+
+- Bulk category operations for multiple bookmarks
+- Category hierarchy support for parent/child relationships
+- Category sorting and prioritization
+- Category color customization
+- Auto-categorization improvements with user feedback 

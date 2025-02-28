@@ -619,6 +619,169 @@ class CategoryProcessorPA:
             return {
                 'error': str(e)
             }
+    
+    def update_bookmark_categories(self, bookmark_id: str, category_names: List[str]) -> Dict[str, Any]:
+        """Update categories for a specific bookmark.
+        
+        Args:
+            bookmark_id: The ID of the bookmark to update
+            category_names: List of category names to assign to the bookmark
+            
+        Returns:
+            Dict containing information about the update operation
+        """
+        logger.info(f"Updating categories for bookmark {bookmark_id}: {category_names}")
+        session = get_session()
+        
+        try:
+            # Get the bookmark to ensure it exists
+            bookmark = session.query(Bookmark).filter(Bookmark.id == bookmark_id).first()
+            if not bookmark:
+                raise ValueError(f"Bookmark with ID {bookmark_id} not found")
+                
+            # Get existing categories for this bookmark
+            existing_categories = session.query(Category).join(
+                bookmark_categories, 
+                Category.id == bookmark_categories.c.category_id
+            ).filter(
+                bookmark_categories.c.bookmark_id == bookmark_id
+            ).all()
+            
+            existing_names = [c.name for c in existing_categories]
+            
+            # Process categories to add
+            categories_to_add = [name for name in category_names if name not in existing_names]
+            
+            # Process categories to remove
+            categories_to_remove = [c for c in existing_categories if c.name not in category_names]
+            
+            # Add new categories
+            for name in categories_to_add:
+                category = self.get_or_create_category(name, session)
+                # Create association
+                session.execute(
+                    bookmark_categories.insert().values(
+                        bookmark_id=bookmark_id,
+                        category_id=category.id
+                    )
+                )
+                
+            # Remove old categories
+            for category in categories_to_remove:
+                session.execute(
+                    bookmark_categories.delete().where(
+                        (bookmark_categories.c.bookmark_id == bookmark_id) &
+                        (bookmark_categories.c.category_id == category.id)
+                    )
+                )
+                
+            # Remove the check for categorized_at since it doesn't exist in the model
+            # if not bookmark.categorized_at:
+            #     bookmark.categorized_at = datetime.now()
+                
+            session.commit()
+            
+            return {
+                'bookmark_id': bookmark_id,
+                'categories': category_names,
+                'added': categories_to_add,
+                'removed': [c.name for c in categories_to_remove]
+            }
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating bookmark categories: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise e
+        finally:
+            session.close()
+    
+    def rename_category(self, old_name: str, new_name: str) -> Dict[str, Any]:
+        """Rename an existing category.
+        
+        Args:
+            old_name: The current name of the category
+            new_name: The new name for the category
+            
+        Returns:
+            Dict containing information about the rename operation
+        """
+        logger.info(f"Renaming category '{old_name}' to '{new_name}'")
+        session = get_session()
+        
+        try:
+            # Check if the old category exists
+            old_category = session.query(Category).filter(Category.name == old_name).first()
+            if not old_category:
+                raise ValueError(f"Category '{old_name}' not found")
+                
+            # Check if the new name already exists
+            existing_category = session.query(Category).filter(Category.name == new_name).first()
+            if existing_category:
+                raise ValueError(f"Category '{new_name}' already exists")
+                
+            # Rename the category
+            old_category.name = new_name
+            session.commit()
+            
+            return {
+                'old_name': old_name,
+                'new_name': new_name,
+                'id': old_category.id
+            }
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error renaming category: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise e
+        finally:
+            session.close()
+    
+    def delete_category(self, category_name: str) -> Dict[str, Any]:
+        """Delete a category and remove all its associations.
+        
+        Args:
+            category_name: The name of the category to delete
+            
+        Returns:
+            Dict containing information about the delete operation
+        """
+        logger.info(f"Deleting category '{category_name}'")
+        session = get_session()
+        
+        try:
+            # Check if the category exists
+            category = session.query(Category).filter(Category.name == category_name).first()
+            if not category:
+                raise ValueError(f"Category '{category_name}' not found")
+                
+            # Get count of bookmarks with this category
+            bookmark_count = session.query(func.count()).select_from(bookmark_categories).filter(
+                bookmark_categories.c.category_id == category.id
+            ).scalar()
+            
+            # Delete all bookmark associations
+            session.execute(
+                bookmark_categories.delete().where(
+                    bookmark_categories.c.category_id == category.id
+                )
+            )
+            
+            # Delete the category
+            session.delete(category)
+            session.commit()
+            
+            return {
+                'category_name': category_name,
+                'id': category.id,
+                'bookmark_associations_removed': bookmark_count
+            }
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error deleting category: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise e
+        finally:
+            session.close()
 
 # Function to run from PythonAnywhere scheduled task
 def process_categories_background_job():

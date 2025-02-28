@@ -476,7 +476,7 @@
             </button>
         </div>
         <div class="p-4">
-            <!-- Only show rename tab -->
+            <!-- Tab Navigation -->
             <div class="border-b border-gray-800 mb-4">
                 <h4 class="text-blue-400 border-b-2 border-blue-400 px-2 py-1 text-sm inline-block">
                     Manage Categories
@@ -484,9 +484,57 @@
             </div>
             
             <div class="py-4">
-                <p class="text-sm text-gray-400 mb-4">Category management features coming soon!</p>
-                <div class="p-3 bg-[#222222] rounded border-l-2 border-blue-500">
-                    <p class="text-sm text-gray-300">Category renaming is coming soon!</p>
+                <!-- Rename Category Section -->
+                <div class="mb-6">
+                    <h5 class="text-sm font-medium text-gray-300 mb-2">Rename Category</h5>
+                    <div class="space-y-2">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Select Category</label>
+                            <select id="rename-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
+                                <option value="">-- Select Category --</option>
+                                {% for category in categories %}
+                                <option value="{{ category.name }}">{{ category.name }} ({{ category.count }})</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">New Name</label>
+                            <input type="text" id="new-category-name" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm" placeholder="Enter new name">
+                        </div>
+                        <div class="mt-2">
+                            <button id="rename-category-btn" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors">
+                                Rename Category
+                            </button>
+                            <div id="rename-status" class="text-xs mt-2 hidden"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Delete Category Section -->
+                <div>
+                    <h5 class="text-sm font-medium text-gray-300 mb-2">Delete Category</h5>
+                    <div class="p-3 bg-[#222222] rounded border-l-2 border-red-500 mb-4">
+                        <p class="text-sm text-gray-300">
+                            <span class="text-red-400 font-medium">Warning:</span> Deleting a category will remove it from all bookmarks.
+                        </p>
+                    </div>
+                    <div class="space-y-2">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Select Category</label>
+                            <select id="delete-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
+                                <option value="">-- Select Category --</option>
+                                {% for category in categories %}
+                                <option value="{{ category.name }}">{{ category.name }} ({{ category.count }})</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mt-2">
+                            <button id="delete-category-btn" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-medium transition-colors">
+                                Delete Category
+                            </button>
+                            <div id="delete-status" class="text-xs mt-2 hidden"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -660,6 +708,127 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>`;
         });
     }
+
+    // Category Management Functions
+    function setupCategoryManagement() {
+        const renameSelect = document.getElementById('rename-category-select');
+        const newNameInput = document.getElementById('new-category-name');
+        const renameBtn = document.getElementById('rename-category-btn');
+        const renameStatus = document.getElementById('rename-status');
+        
+        const deleteSelect = document.getElementById('delete-category-select');
+        const deleteBtn = document.getElementById('delete-category-btn');
+        const deleteStatus = document.getElementById('delete-status');
+        
+        // Rename Category
+        renameBtn.addEventListener('click', function() {
+            const oldName = renameSelect.value;
+            const newName = newNameInput.value;
+            
+            if (!oldName) {
+                showStatus(renameStatus, 'Please select a category to rename.', 'error');
+                return;
+            }
+            
+            if (!newName) {
+                showStatus(renameStatus, 'Please enter a new name.', 'error');
+                return;
+            }
+            
+            // Show loading state
+            renameBtn.disabled = true;
+            renameBtn.innerText = 'Renaming...';
+            
+            // Call API to rename category
+            fetch('/api/categories/rename', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    old_name: oldName,
+                    new_name: newName
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showStatus(renameStatus, data.error, 'error');
+                } else {
+                    showStatus(renameStatus, `Category "${oldName}" renamed to "${newName}"`, 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                }
+            })
+            .catch(error => {
+                showStatus(renameStatus, 'Error: ' + error.message, 'error');
+            })
+            .finally(() => {
+                renameBtn.disabled = false;
+                renameBtn.innerText = 'Rename Category';
+            });
+        });
+        
+        // Delete Category
+        deleteBtn.addEventListener('click', function() {
+            const categoryName = deleteSelect.value;
+            
+            if (!categoryName) {
+                showStatus(deleteStatus, 'Please select a category to delete.', 'error');
+                return;
+            }
+            
+            // Confirm deletion
+            if (!confirm(`Are you sure you want to delete the category "${categoryName}"? This will remove it from all bookmarks.`)) {
+                return;
+            }
+            
+            // Show loading state
+            deleteBtn.disabled = true;
+            deleteBtn.innerText = 'Deleting...';
+            
+            // Call API to delete category
+            fetch('/api/categories/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    category_name: categoryName
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showStatus(deleteStatus, data.error, 'error');
+                } else {
+                    showStatus(deleteStatus, `Category "${categoryName}" deleted`, 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                }
+            })
+            .catch(error => {
+                showStatus(deleteStatus, 'Error: ' + error.message, 'error');
+            })
+            .finally(() => {
+                deleteBtn.disabled = false;
+                deleteBtn.innerText = 'Delete Category';
+            });
+        });
+        
+        // Helper function to show status messages
+        function showStatus(element, message, type) {
+            element.innerText = message;
+            element.classList.remove('hidden', 'text-green-400', 'text-red-400');
+            
+            if (type === 'success') {
+                element.classList.add('text-green-400');
+            } else {
+                element.classList.add('text-red-400');
+            }
+        }
+    }
+
+    // Initialize category management
+    setupCategoryManagement();
 });
 </script>
 </div> <!-- Close the category-dashboard-container -->
