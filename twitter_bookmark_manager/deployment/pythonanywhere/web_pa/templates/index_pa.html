@@ -110,7 +110,7 @@
             {% if query %}
             Results for "{{ query }}"
             {% elif category_filter %}
-            Category: {{ category_filter }}
+            {{ category_filter|join(', ') }}
             {% elif is_recent %}
             Recent Bookmarks
             {% else %}

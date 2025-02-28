@@ -365,9 +365,6 @@
                 <div class="bg-[#1a1a1a] rounded-lg overflow-hidden">
                     <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800 flex justify-between items-center">
                         <h2 class="text-sm font-semibold text-gray-300">Categories</h2>
-                        <button id="merge-similar-btn" class="px-2 py-1 bg-[#222222] text-gray-400 hover:bg-gray-800 rounded text-xs transition-colors">
-                            Merge Similar
-                        </button>
                     </div>
                     <div class="overflow-hidden">
                         {% for category in categories %}
@@ -479,37 +476,15 @@
             </button>
         </div>
         <div class="p-4">
-            <div class="border-b border-gray-800">
-                <div class="flex space-x-4 mb-4">
-                    <button id="merge-tab-btn" class="text-blue-400 border-b-2 border-blue-400 px-2 py-1 text-sm">
-                        Merge Categories
-                    </button>
-                    <button id="rename-tab-btn" class="text-gray-500 hover:text-gray-300 px-2 py-1 text-sm">
-                        Rename Categories
-                    </button>
-                </div>
+            <!-- Only show rename tab -->
+            <div class="border-b border-gray-800 mb-4">
+                <h4 class="text-blue-400 border-b-2 border-blue-400 px-2 py-1 text-sm inline-block">
+                    Manage Categories
+                </h4>
             </div>
             
-            <div id="merge-content" class="py-4">
-                <p class="text-sm text-gray-400 mb-4">Merge similar categories to reduce fragmentation and improve organization.</p>
-                
-                <div class="mb-4">
-                    <label for="merge-threshold-range" class="block text-xs text-gray-400 mb-2">Similarity Threshold</label>
-                    <div class="flex items-center space-x-3">
-                        <input type="range" id="merge-threshold-range" min="50" max="95" value="85" step="5" 
-                              class="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer">
-                        <span id="threshold-value" class="text-xs text-gray-300">85%</span>
-                    </div>
-                    <p class="text-xs text-gray-600 mt-1">Higher values require categories to be more similar before merging</p>
-                </div>
-                
-                <button id="merge-similar" class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
-                    Merge Similar Categories
-                </button>
-            </div>
-            
-            <div id="rename-content" class="py-4 hidden">
-                <p class="text-sm text-gray-400 mb-4">Rename categories to better organize your bookmarks.</p>
+            <div class="py-4">
+                <p class="text-sm text-gray-400 mb-4">Category management features coming soon!</p>
                 <div class="p-3 bg-[#222222] rounded border-l-2 border-blue-500">
                     <p class="text-sm text-gray-300">Category renaming is coming soon!</p>
                 </div>
@@ -526,7 +501,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const categorizeNowBtn = document.getElementById('categorize-now');
     const categorizeHeaderBtn = document.getElementById('categorize-now-btn');
     const manageBtn = document.getElementById('manage-categories-btn');
-    const mergeBtn = document.getElementById('merge-similar-btn');
     const processingStatus = document.getElementById('process-status');
     
     // Modals
@@ -535,17 +509,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const closeResults = document.getElementById('close-results');
     const closeManagement = document.getElementById('close-management');
     const refreshBtn = document.getElementById('refresh-after-process');
-    
-    // Category management tabs
-    const mergeTabBtn = document.getElementById('merge-tab-btn');
-    const renameTabBtn = document.getElementById('rename-tab-btn');
-    const mergeContent = document.getElementById('merge-content');
-    const renameContent = document.getElementById('rename-content');
-    
-    // Similarity threshold
-    const thresholdRange = document.getElementById('merge-threshold-range');
-    const thresholdValue = document.getElementById('threshold-value');
-    const mergeSimilarBtn = document.getElementById('merge-similar');
     
     // Sync range and input values
     batchSizeRange.addEventListener('input', function() {
@@ -556,28 +519,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (this.value < 10) this.value = 10;
         if (this.value > 200) this.value = 200;
         batchSizeRange.value = this.value;
-    });
-    
-    // Threshold range update
-    thresholdRange.addEventListener('input', function() {
-        thresholdValue.textContent = this.value + '%';
-    });
-    
-    // Tab switching
-    mergeTabBtn.addEventListener('click', function() {
-        mergeTabBtn.classList.add('text-blue-400', 'border-b-2', 'border-blue-400');
-        renameTabBtn.classList.remove('text-blue-400', 'border-b-2', 'border-blue-400');
-        renameTabBtn.classList.add('text-gray-500');
-        mergeContent.classList.remove('hidden');
-        renameContent.classList.add('hidden');
-    });
-    
-    renameTabBtn.addEventListener('click', function() {
-        renameTabBtn.classList.add('text-blue-400', 'border-b-2', 'border-blue-400');
-        mergeTabBtn.classList.remove('text-blue-400', 'border-b-2', 'border-blue-400');
-        mergeTabBtn.classList.add('text-gray-500');
-        renameContent.classList.remove('hidden');
-        mergeContent.classList.add('hidden');
     });
     
     // Button actions
@@ -592,15 +533,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     manageBtn.addEventListener('click', function() {
         categoryModal.classList.remove('hidden');
-    });
-    
-    mergeBtn.addEventListener('click', function() {
-        mergeCategories(0.85); // Default threshold
-    });
-    
-    mergeSimilarBtn.addEventListener('click', function() {
-        const threshold = thresholdRange.value / 100;
-        mergeCategories(threshold);
     });
     
     // Modal controls
@@ -722,85 +654,6 @@ document.addEventListener('DOMContentLoaded', function() {
             categorizeHeaderBtn.disabled = false;
             
             resultsModal.classList.remove('hidden');
-            document.getElementById('results-content').innerHTML = `
-            <div class="p-3 bg-red-900 bg-opacity-20 border-l-2 border-red-500 rounded">
-                <p class="text-red-400 text-sm">Network Error: ${error.message || 'Could not connect to server'}</p>
-            </div>`;
-        });
-    }
-    
-    function mergeCategories(threshold) {
-        // Show results modal with loading
-        resultsModal.classList.remove('hidden');
-        document.getElementById('results-content').innerHTML = `
-        <div class="flex flex-col items-center justify-center py-6">
-            <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mb-3"></div>
-            <p class="text-gray-400 text-sm">Merging similar categories...</p>
-        </div>`;
-        
-        fetch('/api/categories/merge', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                threshold: threshold
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'success') {
-                let content = `
-                <div class="mb-4 p-3 bg-green-900 bg-opacity-20 border-l-2 border-green-500 rounded">
-                    <p class="text-green-400 text-sm">Successfully merged ${data.data.merges_performed} categories!</p>
-                </div>`;
-                
-                if (data.data.merges_performed > 0 && data.data.merge_details && data.data.merge_details.length > 0) {
-                    content += `
-                    <div class="bg-[#222222] rounded overflow-hidden">
-                        <div class="bg-[#1f1f1f] px-3 py-2 border-b border-gray-800">
-                            <h4 class="text-xs font-semibold text-gray-300">Merge Details</h4>
-                        </div>
-                        <div class="max-h-48 overflow-y-auto">
-                            <table class="w-full text-xs">
-                                <thead class="bg-[#1f1f1f] sticky top-0">
-                                    <tr>
-                                        <th class="px-3 py-2 text-left text-gray-400">From Category</th>
-                                        <th class="px-3 py-2 text-left text-gray-400">To Category</th>
-                                        <th class="px-3 py-2 text-right text-gray-400">Similarity</th>
-                                        <th class="px-3 py-2 text-right text-gray-400">Bookmarks Updated</th>
-                                    </tr>
-                                </thead>
-                                <tbody>`;
-                    
-                    data.data.merge_details.forEach(merge => {
-                        content += `
-                        <tr class="border-b border-gray-800">
-                            <td class="px-3 py-2 text-gray-300">${merge.from_category}</td>
-                            <td class="px-3 py-2 text-gray-300">${merge.to_category}</td>
-                            <td class="px-3 py-2 text-right text-gray-300">${(merge.similarity * 100).toFixed(1)}%</td>
-                            <td class="px-3 py-2 text-right text-gray-300">${merge.bookmarks_updated}</td>
-                        </tr>`;
-                    });
-                    
-                    content += `</tbody></table></div></div>`;
-                } else if (data.data.merges_performed === 0) {
-                    content += `
-                    <div class="p-3 bg-blue-900 bg-opacity-20 border-l-2 border-blue-500 rounded mb-3">
-                        <p class="text-blue-400 text-sm">No categories were similar enough to merge with the current threshold.</p>
-                    </div>
-                    <p class="text-sm text-gray-400">Try lowering the similarity threshold to find more potential matches.</p>`;
-                }
-                
-                document.getElementById('results-content').innerHTML = content;
-            } else {
-                document.getElementById('results-content').innerHTML = `
-                <div class="p-3 bg-red-900 bg-opacity-20 border-l-2 border-red-500 rounded">
-                    <p class="text-red-400 text-sm">Error: ${data.message || 'Unknown error occurred'}</p>
-                </div>`;
-            }
-        })
-        .catch(error => {
             document.getElementById('results-content').innerHTML = `
             <div class="p-3 bg-red-900 bg-opacity-20 border-l-2 border-red-500 rounded">
                 <p class="text-red-400 text-sm">Network Error: ${error.message || 'Could not connect to server'}</p>

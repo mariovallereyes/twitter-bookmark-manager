@@ -117,6 +117,11 @@ def index():
         template = 'index_pa.html' if is_pythonanywhere else 'index.html'
         logger.info(f"Using template: {template}")
         
+        # Ensure categories are properly formatted strings
+        if categories and isinstance(categories, list):
+            # Clean up any potential HTML entities in category names
+            categories = [str(cat) for cat in categories]
+        
         return render_template(template, 
                               categories=all_categories,
                               latest_tweets=formatted_latest,
@@ -182,7 +187,8 @@ def search():
                 logger.info(f"User search found {len(results)} results for '@{user}'")
             elif categories:
                 logger.info(f"Searching by categories only: {categories}")
-                results = search.search(categories=categories)
+                # Pass explicit high limit for category searches to ensure all results are returned
+                results = search.search(categories=categories, limit=10000)
                 logger.info(f"Category search found {len(results)} results")
             else:
                 logger.info("No search parameters provided")
@@ -209,6 +215,11 @@ def search():
         except Exception as count_error:
             logger.error(f"Failed to get total tweet count: {count_error}")
             total_tweets = 0
+        
+        # Ensure categories are properly formatted strings
+        if categories and isinstance(categories, list):
+            # Clean up any potential HTML entities in category names
+            categories = [str(cat) for cat in categories]
         
         return render_template(template,
                               categories=all_categories,
@@ -271,6 +282,11 @@ def recent():
             logger.error(f"Failed to get total tweet count: {count_error}")
             total_tweets = 0
         
+        # Ensure categories are properly formatted strings
+        if categories and isinstance(categories, list):
+            # Clean up any potential HTML entities in category names
+            categories = [str(cat) for cat in categories]
+            
         return render_template(template,
                               categories=all_categories,
                               results=formatted_results,
@@ -872,6 +888,11 @@ def view_category(category_name):
             logger.error(f"Failed to get total tweet count: {count_error}")
             total_tweets = 0
         
+        # Ensure categories are properly formatted strings
+        if categories and isinstance(categories, list):
+            # Clean up any potential HTML entities in category names
+            categories = [str(cat) for cat in categories]
+            
         return render_template(template,
                               categories=all_categories,
                               results=formatted_results,

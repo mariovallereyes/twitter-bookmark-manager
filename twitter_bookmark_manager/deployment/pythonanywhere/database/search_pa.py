@@ -43,7 +43,7 @@ class BookmarkSearch:
         if max_results is None:
             max_results = self.total_tweets
             
-        max_iterations = 10
+        max_iterations = 30  # Increased from 10 to 30 to allow more search results
         
         logger.info(f"🔎 Starting batched vector search for '{query}' (max results: {max_results})")
         

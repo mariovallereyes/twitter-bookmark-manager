@@ -219,7 +219,7 @@ class VectorStore:
             
             # Request more results than needed to account for exclusions
             # For Qdrant, we'll use a multiplication factor to ensure enough results
-            buffer_size = min(limit * 3, 300)  # Triple the limit, capped at 300
+            buffer_size = min(limit * 3, 1000)  # Increased cap from 300 to 1000 to allow more search results
             
             logger.info(f"Performing Qdrant search with exclusions: limit={limit}, buffer={buffer_size}, excluded={len(excluded_set)}")
             
