@@ -385,6 +385,37 @@
                             </button>
                         </div>
 
+                        <!-- Advanced Options -->
+                        <div id="advanced-options" class="mt-4 border-t border-gray-700 pt-4">
+                            <details class="text-sm">
+                                <summary class="cursor-pointer text-gray-300 hover:text-white">Advanced Options</summary>
+                                <div class="mt-3 flex flex-col gap-3">
+                                    <div>
+                                        <button 
+                                            type="button"
+                                            onclick="rebuildVectorStore()"
+                                            class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+                                            Rebuild Vector Store
+                                        </button>
+                                        <p class="text-xs text-gray-400 mt-1">
+                                            Use this if search results are incorrect or missing. This rebuilds the search index from the database.
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <button 
+                                            type="button"
+                                            onclick="resetUpdateProgress()"
+                                            class="px-4 py-2 bg-yellow-600 text-white rounded-lg text-sm hover:bg-yellow-700">
+                                            Reset Update Progress
+                                        </button>
+                                        <p class="text-xs text-gray-400 mt-1">
+                                            Use this if database updates are stuck in a loop or not completing.
+                                        </p>
+                                    </div>
+                                </div>
+                            </details>
+                        </div>
+
                         <!-- Progress Messages -->
                         <div x-show="progressSteps.length > 0" class="mt-4 p-4 bg-[#1a1a1a] rounded-lg">
                             <template x-for="(step, index) in progressSteps" :key="index">
@@ -718,6 +749,232 @@
         if (updateTimeout) {
             clearTimeout(updateTimeout);
             updateTimeout = null;
+        }
+    }
+
+    async function rebuildVectorStore() {
+        try {
+            // Update UI
+            showProgressModal();
+            addProgressStep({
+                message: "Starting vector store rebuild...",
+                status: "processing"
+            });
+            
+            // Call the rebuild endpoint
+            const response = await fetch('/rebuild-vector-store', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                // Success case
+                const postgresCount = data.rebuild_result?.postgres_count || 0;
+                const vectorCount = data.rebuild_result?.vector_count || 0;
+                const duration = data.rebuild_result?.duration_seconds || 0;
+                
+                addProgressStep({
+                    message: `Vector store rebuild completed (${vectorCount} entries, ${duration.toFixed(1)}s)`,
+                    status: "done"
+                });
+                
+                if (data.rebuild_result?.is_in_sync) {
+                    addProgressStep({
+                        message: `Database synchronization verified (${postgresCount} records)`,
+                        status: "done"
+                    });
+                } else {
+                    addProgressStep({
+                        message: `Count mismatch: PostgreSQL has ${postgresCount} records, vector store has ${vectorCount} entries`,
+                        status: "done"
+                    });
+                }
+            } else {
+                // Error case
+                addProgressStep({
+                    message: `Error: ${data.error || "Unknown error during rebuild"}`,
+                    status: "error"
+                });
+            }
+        } catch (error) {
+            console.error("Vector store rebuild failed", error);
+            addProgressStep({
+                message: `Error: ${error.message || "Failed to rebuild vector store"}`,
+                status: "error"
+            });
+        }
+    }
+    
+    async function resetUpdateProgress() {
+        if (!confirm("Are you sure you want to reset the database update progress? This will clear any saved state.")) {
+            return;
+        }
+        
+        try {
+            // Update UI
+            showProgressModal();
+            addProgressStep({
+                message: "Resetting update progress...",
+                status: "processing"
+            });
+            
+            // Call update-database with force_rebuild=true
+            const response = await fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    start_index: 0,
+                    rebuild_vector: true,
+                    skip_database: true
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                // Success case
+                addProgressStep({
+                    message: `Progress reset and vector store rebuilt successfully`,
+                    status: "done"
+                });
+            } else {
+                // Error case
+                addProgressStep({
+                    message: `Error: ${data.error || "Failed to reset progress"}`,
+                    status: "error"
+                });
+            }
+        } catch (error) {
+            console.error("Progress reset failed", error);
+            addProgressStep({
+                message: `Error: ${error.message || "Failed to reset progress"}`,
+                status: "error"
+            });
+        }
+    }
+    
+    // Enhance the existing updateDatabase function to handle vector store rebuilding
+    async function updateDatabase(filePath, startIndex = 0) {
+        try {
+            startProgressStep('sql');
+            
+            const response = await fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    file_path: filePath,
+                    start_index: startIndex
+                })
+            });
+            
+            const result = await response.json();
+            console.log("Update result:", result);
+            
+            if (result.success) {
+                completeProgressStep('sql');
+                
+                // Add progress message
+                const total = result.progress?.total || 0;
+                const processed = result.progress?.processed || 0;
+                const percentComplete = result.progress?.percent_complete || 0;
+                
+                addProgressStep({
+                    message: `Updated ${processed}/${total} bookmarks (${percentComplete.toFixed(1)}%)`,
+                    status: "done"
+                });
+                
+                // If complete, start vector store update
+                if (result.is_complete) {
+                    startProgressStep('vectors');
+                    
+                    if (result.vector_store_updated) {
+                        // Vector store was automatically updated
+                        completeProgressStep('vectors');
+                        
+                        const vectorResult = result.vector_rebuild_result || {};
+                        addProgressStep({
+                            message: `Vector store updated with ${vectorResult.vector_count || 0} entries`,
+                            status: "done"
+                        });
+                        
+                        startProgressStep('sync');
+                        completeProgressStep('sync');
+                        
+                        if (vectorResult.is_in_sync) {
+                            addProgressStep({
+                                message: "Database synchronization verified ✓",
+                                status: "done"
+                            });
+                        } else {
+                            addProgressStep({
+                                message: `Count mismatch: Database has ${vectorResult.postgres_count || 0} records, vector store has ${vectorResult.vector_count || 0} entries`,
+                                status: "warning"
+                            });
+                        }
+                    } else {
+                        // Need to manually update vector store
+                        startProgressStep('vectors');
+                        addProgressStep({
+                            message: "Manually rebuilding vector store...",
+                            status: "processing"
+                        });
+                        
+                        // Call the rebuild endpoint
+                        await rebuildVectorStore();
+                        completeProgressStep('vectors');
+                    }
+                    
+                    addProgressStep({
+                        message: "Database update completed successfully!",
+                        status: "done"
+                    });
+                } else {
+                    // Not complete, continue processing
+                    addProgressStep({
+                        message: `Continuing with next batch (starting at index ${result.next_index})...`,
+                        status: "processing"
+                    });
+                    
+                    // Continue with next batch
+                    await updateDatabase(filePath, result.next_index);
+                }
+            } else {
+                // Handle error
+                failProgressStep('sql');
+                
+                if (result.error) {
+                    addProgressStep({
+                        message: `Error: ${result.error}`,
+                        status: "error"
+                    });
+                }
+                
+                if (result.should_continue && result.next_index) {
+                    addProgressStep({
+                        message: `Attempting to continue from index ${result.next_index}...`,
+                        status: "processing"
+                    });
+                    
+                    // Try to continue with next batch
+                    await updateDatabase(filePath, result.next_index);
+                }
+            }
+        } catch (error) {
+            console.error("Database update failed", error);
+            failProgressStep('sql');
+            
+            addProgressStep({
+                message: `Error: ${error.message || "Unknown error during database update"}`,
+                status: "error"
+            });
         }
     }
     </script>

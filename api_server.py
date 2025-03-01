@@ -517,9 +517,78 @@ def update_database():
         logger.info("="*80)
         logger.info(f"🚀 [UPDATE-{session_id}] Starting database update process at {datetime.now().isoformat()}")
         
-        # Get the start index from request or progress file
-        start_index = request.json.get('start_index', 0) if request.is_json else 0
+        # Get parameters from request
+        if request.is_json:
+            start_index = request.json.get('start_index', 0)
+            force_rebuild = request.json.get('rebuild_vector', False)
+            skip_database = request.json.get('skip_database', False)
+        else:
+            start_index = 0
+            force_rebuild = False
+            skip_database = False
+            
+        logger.info(f"📋 [UPDATE-{session_id}] Request parameters: start_index={start_index}, force_rebuild={force_rebuild}, skip_database={skip_database}")
+        
+        # Define path for progress tracking
         progress_file = os.path.join(DATABASE_DIR, 'update_progress.json')
+        
+        # Handle force rebuild request (skip database update)
+        if force_rebuild or skip_database:
+            logger.info(f"🔄 [UPDATE-{session_id}] STEP 1: Force rebuild of vector store requested")
+            # Import function here to avoid circular imports
+            from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import rebuild_vector_store_pa
+            
+            # Perform the rebuild
+            rebuild_result = rebuild_vector_store_pa(session_id)
+            logger.info(f"✅ [UPDATE-{session_id}] Rebuild completed with result: {rebuild_result}")
+            
+            return jsonify({
+                'success': rebuild_result.get('success', False),
+                'message': 'Vector store rebuild completed',
+                'rebuild_result': rebuild_result,
+                'session_id': session_id,
+                'is_complete': True
+            }), 200
+            
+        # Normal flow - first check for loop condition
+        if os.path.exists(progress_file):
+            try:
+                # Import function here to avoid circular imports
+                from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import detect_update_loop
+                
+                is_in_loop, loop_data = detect_update_loop(progress_file)
+                if is_in_loop:
+                    logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected before starting! Breaking out with forced rebuild")
+                    
+                    # Import rebuild function
+                    from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import rebuild_vector_store_pa
+                    
+                    # Force a vector rebuild to break the loop
+                    rebuild_result = rebuild_vector_store_pa(session_id)
+                    
+                    # Reset progress file
+                    try:
+                        # Backup the file first
+                        backup_file = f"{progress_file}.loop_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        shutil.copy2(progress_file, backup_file)
+                        logger.info(f"✅ [UPDATE-{session_id}] Created backup of progress file at {backup_file}")
+                        
+                        # Reset the progress file
+                        os.remove(progress_file)
+                        logger.info(f"✅ [UPDATE-{session_id}] Removed progress file to break update loop")
+                    except Exception as e:
+                        logger.error(f"❌ [UPDATE-{session_id}] Error handling progress file during loop recovery: {e}")
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': 'Update loop detected and resolved with vector store rebuild',
+                        'loop_data': loop_data,
+                        'rebuild_result': rebuild_result,
+                        'session_id': session_id,
+                        'is_complete': True
+                    }), 200
+            except Exception as e:
+                logger.error(f"❌ [UPDATE-{session_id}] Error checking for update loop: {e}")
         
         # If no start_index provided, check progress file
         if start_index == 0 and os.path.exists(progress_file):
@@ -534,6 +603,9 @@ def update_database():
         # 3. Begin database update process
         logger.info(f"📋 [UPDATE-{session_id}] STEP 3: Initiating database update with pa_update_bookmarks")
         try:
+            # Import function here to avoid circular imports
+            from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import pa_update_bookmarks
+            
             logger.info(f"⚙️ [UPDATE-{session_id}] Calling pa_update_bookmarks(session_id={session_id}, start_index={start_index})")
             result = pa_update_bookmarks(session_id=session_id, start_index=start_index)
             logger.info(f"✅ [UPDATE-{session_id}] pa_update_bookmarks completed")
@@ -557,6 +629,10 @@ def update_database():
             is_complete = result.get('is_complete', False)
             next_index = result.get('next_index', progress.get('processed', start_index))
             
+            # Extract vector store rebuild info if available
+            vector_store_updated = result.get('vector_store_updated', False)
+            vector_rebuild_result = result.get('vector_rebuild_result', None)
+            
             response = {
                 'success': True,
                 'session_id': session_id,
@@ -564,7 +640,9 @@ def update_database():
                 'is_complete': is_complete,
                 'next_index': next_index,
                 'message': 'Processing completed successfully' if is_complete else 'Processing paused - please continue',
-                'should_continue': not is_complete
+                'should_continue': not is_complete,
+                'vector_store_updated': vector_store_updated,
+                'vector_rebuild_result': vector_rebuild_result
             }
             
             status_code = 200 if is_complete else 202  # 202 Accepted means processing should continue
@@ -596,6 +674,43 @@ def update_database():
         }), 500
     finally:
         logger.info(f"🏁 [UPDATE-{session_id}] Database update process completed at {datetime.now().isoformat()}")
+        logger.info("="*80)
+
+# Add a new route specifically for vector store rebuilding
+@app.route('/rebuild-vector-store', methods=['POST'])
+def rebuild_vector_store():
+    """Rebuild the vector store from the database"""
+    session_id = str(uuid.uuid4())[:8]
+    try:
+        logger.info("="*80)
+        logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store rebuild at {datetime.now().isoformat()}")
+        
+        # Import function here to avoid circular imports
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.update_bookmarks_pa import rebuild_vector_store_pa
+        
+        # Execute the rebuild
+        rebuild_result = rebuild_vector_store_pa(session_id)
+        
+        # Return the result
+        return jsonify({
+            'success': rebuild_result.get('success', False),
+            'message': 'Vector store rebuild operation completed',
+            'session_id': session_id,
+            'rebuild_result': rebuild_result
+        }), 200
+        
+    except Exception as e:
+        error_msg = f"Error rebuilding vector store: {str(e)}"
+        logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': error_msg,
+            'session_id': session_id,
+            'traceback': traceback.format_exc()
+        }), 500
+    finally:
+        logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed at {datetime.now().isoformat()}")
         logger.info("="*80)
 
 @app.route('/debug-database', methods=['GET'])
@@ -834,7 +949,7 @@ def get_category_status():
         }), 500
 
 @app.route('/api/categories/process', methods=['POST'])
-def process_categories():
+def process_categories_api():
     """Manually trigger category processing"""
     try:
         from twitter_bookmark_manager.deployment.pythonanywhere.database.process_categories_pa import process_categories_background_job
@@ -859,6 +974,48 @@ def process_categories():
         return jsonify({
             "status": "error",
             "message": str(e)
+        }), 500
+
+@app.route('/api/categories/all', methods=['GET'])
+def get_all_categories():
+    """API endpoint to get all categories, including those with zero bookmarks"""
+    try:
+        from twitter_bookmark_manager.deployment.pythonanywhere.database.db_pa import get_session
+        from twitter_bookmark_manager.database.models import Category, bookmark_categories
+        from sqlalchemy import func
+        
+        with get_session() as session:
+            # Get all categories
+            categories = session.query(Category).all()
+            
+            # Get counts for categories that have bookmarks
+            category_counts = dict(session.query(
+                Category.id,
+                func.count(bookmark_categories.c.bookmark_id)
+            ).outerjoin(bookmark_categories).group_by(Category.id).all())
+            
+            # Format the result, including categories with zero bookmarks
+            result = []
+            for category in categories:
+                result.append({
+                    'id': category.id,
+                    'name': category.name,
+                    'count': category_counts.get(category.id, 0)
+                })
+            
+            # Sort alphabetically by name
+            result.sort(key=lambda x: x['name'])
+            
+            return jsonify({
+                'status': 'success',
+                'categories': result
+            })
+    
+    except Exception as e:
+        app.logger.error(f"Error getting all categories: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
         }), 500
 
 @app.route('/category/<category_name>')

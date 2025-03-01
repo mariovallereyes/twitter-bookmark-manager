@@ -484,6 +484,11 @@
             </div>
             
             <div class="py-4">
+                <!-- Loading Indicator -->
+                <div id="category-loading" class="flex justify-center py-4 hidden">
+                    <div class="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-blue-500"></div>
+                </div>
+            
                 <!-- Rename Category Section -->
                 <div class="mb-6">
                     <h5 class="text-sm font-medium text-gray-300 mb-2">Rename Category</h5>
@@ -492,9 +497,7 @@
                             <label class="block text-xs text-gray-500 mb-1">Select Category</label>
                             <select id="rename-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
                                 <option value="">-- Select Category --</option>
-                                {% for category in categories %}
-                                <option value="{{ category.name }}">{{ category.name }} ({{ category.count }})</option>
-                                {% endfor %}
+                                <!-- Categories will be loaded via JavaScript -->
                             </select>
                         </div>
                         <div>
@@ -523,9 +526,7 @@
                             <label class="block text-xs text-gray-500 mb-1">Select Category</label>
                             <select id="delete-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
                                 <option value="">-- Select Category --</option>
-                                {% for category in categories %}
-                                <option value="{{ category.name }}">{{ category.name }} ({{ category.count }})</option>
-                                {% endfor %}
+                                <!-- Categories will be loaded via JavaScript -->
                             </select>
                         </div>
                         <div class="mt-2">
@@ -558,6 +559,11 @@ document.addEventListener('DOMContentLoaded', function() {
     const closeManagement = document.getElementById('close-management');
     const refreshBtn = document.getElementById('refresh-after-process');
     
+    // Category Management Elements
+    const renameSelect = document.getElementById('rename-category-select');
+    const deleteSelect = document.getElementById('delete-category-select');
+    const categoryLoading = document.getElementById('category-loading');
+    
     // Sync range and input values
     batchSizeRange.addEventListener('input', function() {
         batchSizeInput.value = this.value;
@@ -581,6 +587,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     manageBtn.addEventListener('click', function() {
         categoryModal.classList.remove('hidden');
+        loadAllCategories(); // Fetch all categories when modal opens
     });
     
     // Modal controls
@@ -595,6 +602,53 @@ document.addEventListener('DOMContentLoaded', function() {
     refreshBtn.addEventListener('click', function() {
         window.location.reload();
     });
+    
+    // Function to load all categories, including those with zero bookmarks
+    function loadAllCategories() {
+        // Show loading indicator
+        categoryLoading.classList.remove('hidden');
+        
+        // Clear existing options except the first one
+        while (renameSelect.options.length > 1) {
+            renameSelect.remove(1);
+        }
+        while (deleteSelect.options.length > 1) {
+            deleteSelect.remove(1);
+        }
+        
+        // Fetch all categories from API
+        fetch('/api/categories/all')
+            .then(response => response.json())
+            .then(data => {
+                if (data.categories) {
+                    // Sort categories alphabetically
+                    data.categories.sort((a, b) => a.name.localeCompare(b.name));
+                    
+                    // Populate dropdown menus
+                    data.categories.forEach(category => {
+                        // Add to rename dropdown
+                        const renameOption = document.createElement('option');
+                        renameOption.value = category.name;
+                        renameOption.textContent = `${category.name} (${category.count || 0})`;
+                        renameSelect.appendChild(renameOption);
+                        
+                        // Add to delete dropdown
+                        const deleteOption = document.createElement('option');
+                        deleteOption.value = category.name;
+                        deleteOption.textContent = `${category.name} (${category.count || 0})`;
+                        deleteSelect.appendChild(deleteOption);
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching categories:', error);
+                showStatus(renameStatus, 'Error loading categories: ' + error.message, 'error');
+            })
+            .finally(() => {
+                // Hide loading indicator
+                categoryLoading.classList.add('hidden');
+            });
+    }
     
     // Processing functions
     function processCategories(batchSize) {
@@ -711,12 +765,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Category Management Functions
     function setupCategoryManagement() {
-        const renameSelect = document.getElementById('rename-category-select');
         const newNameInput = document.getElementById('new-category-name');
         const renameBtn = document.getElementById('rename-category-btn');
         const renameStatus = document.getElementById('rename-status');
         
-        const deleteSelect = document.getElementById('delete-category-select');
         const deleteBtn = document.getElementById('delete-category-btn');
         const deleteStatus = document.getElementById('delete-status');
         
