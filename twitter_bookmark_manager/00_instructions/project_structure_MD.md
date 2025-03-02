@@ -145,3 +145,160 @@ This document provides an overview of the project's folder structure, key files,
   - `api_server.py` provides the Flask application, configured for the PythonAnywhere environment
   - The deployment directory contains adaptations for PostgreSQL (replacing SQLite) and Qdrant (replacing ChromaDB)
   - This separation allows the codebase to run both locally and in production without code changes
+
+## Current Directory Structure as of March 02, 2025
+
+Directory structure:
+└── mariovallereyes-twitter-bookmark-manager.git/
+    ├── Documentation.txt
+    ├── Twitter_Bookmark_Manager_Documentation.docx
+    ├── api_server.py
+    ├── generate_keys.py
+    ├── god_script.py
+    ├── process_categories_task.py
+    ├── requirements.txt
+    ├── run_schema_update.py
+    ├── wsgi.py
+    └── twitter_bookmark_manager/
+        ├── __init__.py
+        ├── backup_project.py
+        ├── bookmark_launcher.py
+        ├── main.py
+        ├── project_file_structure.txt
+        ├── project_structure.txt
+        ├── requirements.txt
+        ├── run_ingestion.py
+        ├── start_bookmarks.bat
+        ├── .env.example
+        ├── .gitignore
+        ├── 00_instructions/
+        │   ├── 00_MASTER.txt
+        │   ├── 01_general_project_overview.md
+        │   ├── 02_main_components.md
+        │   ├── 03_user_flow.md
+        │   ├── 04a_bookmark_extraction.md
+        │   ├── 04b_bookmark_ingestion.md
+        │   ├── 05_search_system.md
+        │   ├── 06_chat_rag_system.md
+        │   ├── api_documentation.md
+        │   ├── project_structure_MD.md
+        │   ├── system_architecture_deployment.md
+        │   └── technical_implementation_details.md
+        ├── config/
+        │   ├── config.py
+        │   ├── constants.py
+        │   └── secrets.json
+        ├── core/
+        │   ├── __init__.py
+        │   ├── ai_categorization.py
+        │   ├── auth.py
+        │   ├── data_ingestion.py
+        │   ├── deduplication.py
+        │   ├── populate_vector_store.py
+        │   ├── process_categories.py
+        │   ├── rag.py
+        │   ├── search.py
+        │   ├── universal_bookmark_extractor.py
+        │   ├── chat/
+        │   │   ├── __init__.py
+        │   │   ├── chat_search.py
+        │   │   ├── conversation_manager.py
+        │   │   ├── engine.py
+        │   │   ├── intent_classifier.py
+        │   │   └── prompt_manager.py
+        │   └── dashboard/
+        │       ├── __init__.py
+        │       ├── author_analyzer.py
+        │       ├── category_analyzer.py
+        │       ├── dashboard_routes.py
+        │       ├── data_processor.py
+        │       ├── heatmap_analyzer.py
+        │       └── topic_analyzer.py
+        ├── database/
+        │   ├── db.py
+        │   ├── models.py
+        │   ├── twitter_bookmarks.json
+        │   ├── update_bookmarks.py
+        │   ├── vector_store.py
+        │   └── json_history/
+        │       ├── twitter_bookmarks_20250131.json
+        │       ├── twitter_bookmarks_20250201.json
+        │       ├── twitter_bookmarks_20250202.json
+        │       ├── twitter_bookmarks_20250203.json
+        │       ├── twitter_bookmarks_20250204.json
+        │       ├── twitter_bookmarks_20250206.json
+        │       ├── twitter_bookmarks_20250207.json
+        │       ├── twitter_bookmarks_20250211.json
+        │       ├── twitter_bookmarks_20250216.json
+        │       ├── twitter_bookmarks_20250220.json
+        │       └── twitter_bookmarks_20250223.json
+        ├── deployment/
+        │   ├── __init__.py
+        │   └── pythonanywhere/
+        │       ├── README.md
+        │       ├── __init__.py
+        │       ├── requirements.txt
+        │       ├── wsgi.py
+        │       ├── database/
+        │       │   ├── __init__.py
+        │       │   ├── db_pa.py
+        │       │   ├── db_schema_update.py
+        │       │   ├── process_categories_pa.py
+        │       │   ├── search_pa.py
+        │       │   ├── update_bookmarks_pa.py
+        │       │   └── vector_store_pa.py
+        │       ├── postgres/
+        │       │   ├── __init__.py
+        │       │   ├── config.py
+        │       │   ├── init_db.py
+        │       │   ├── migrate_schema.py
+        │       │   └── test_connection.py
+        │       └── web_pa/
+        │           └── templates/
+        │               ├── base_pa.html
+        │               ├── categories_pa.html
+        │               └── index_pa.html
+        ├── models/
+        │   ├── Unconfirmed 364157.crdownload
+        │   └── mistral-7b-instruct-v0.1.Q4_K_M.gguf
+        ├── test_media/
+        ├── tests/
+        │   ├── __init__.py
+        │   ├── conftest.py
+        │   ├── test_ai_categorization.py
+        │   ├── test_auth.py
+        │   ├── test_bookmark_extractor.py
+        │   ├── test_chat.py
+        │   ├── test_count_bookmarks_from_json.py
+        │   ├── test_data_ingestion.py
+        │   ├── test_db.py
+        │   ├── test_deduplication.py
+        │   ├── test_llm.py
+        │   ├── test_models.py
+        │   ├── test_rag.py
+        │   ├── test_real_query.py
+        │   ├── test_search.py
+        │   └── test_vector_store.py
+        └── web/
+            ├── server.py
+            ├── test_server.py
+            ├── database/
+            │   ├── twitter_bookmarks.json
+            │   └── json_history/
+            │       └── twitter_bookmarks_20250226.json
+            ├── static/
+            │   ├── script.js
+            │   ├── styles.css
+            │   ├── images/
+            │   └── js/
+            │       └── dashboard/
+            │           ├── authors.js
+            │           ├── categories.js
+            │           ├── heatmap.js
+            │           ├── main.js
+            │           └── topics.js
+            └── templates/
+                ├── base.html
+                ├── chat.html
+                ├── dashboard.html
+                └── index.html
