@@ -689,6 +689,8 @@
         
         if (isComplete) {
             findNewStep.querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-init-ai').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-dedup').querySelector('.progress-icon').textContent = '✅';
             document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
             document.getElementById('step-categories').querySelector('.progress-icon').textContent = '✅';
             document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '✅';

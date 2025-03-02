@@ -355,32 +355,34 @@ def pa_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False):
         # Check for update loops
         is_in_loop, loop_data = detect_update_loop(progress_file)
         if is_in_loop:
-            logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
-            # Force a vector rebuild to break the loop
-            rebuild_result = rebuild_vector_store_pa(session_id)
+            logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected at index {loop_data['current_index']}! Skipping this bookmark and continuing with next one")
             
-            # Reset progress file to start fresh
+            # Increment the start_index to skip the problematic bookmark
+            if start_index == loop_data['current_index']:
+                start_index += 1
+                logger.info(f"⏭️ [UPDATE-{session_id}] Adjusted start_index to {start_index} to skip problematic bookmark")
+            
+            # Update the loop detection data in the progress file to reset the counter for this index
             if os.path.exists(progress_file):
                 try:
-                    # Backup the file first
-                    backup_file = f"{progress_file}.loop_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    shutil.copy2(progress_file, backup_file)
-                    logger.info(f"✅ [UPDATE-{session_id}] Created backup of progress file at {backup_file}")
+                    with open(progress_file, 'r') as f:
+                        progress = json.load(f)
                     
-                    # Reset the progress file
-                    os.remove(progress_file)
-                    logger.info(f"✅ [UPDATE-{session_id}] Removed progress file to break update loop")
+                    # Reset counter for the problematic index
+                    if 'loop_detection' in progress and 'count' in progress['loop_detection']:
+                        problem_index = str(loop_data['current_index'])
+                        if problem_index in progress['loop_detection']['count']:
+                            progress['loop_detection']['count'][problem_index] = 0
+                            logger.info(f"🔄 [UPDATE-{session_id}] Reset loop counter for index {problem_index}")
+                    
+                    # Update the progress file
+                    with open(progress_file, 'w') as f:
+                        json.dump(progress, f)
                 except Exception as e:
-                    logger.error(f"❌ [UPDATE-{session_id}] Error handling progress file during loop recovery: {e}")
+                    logger.error(f"❌ [UPDATE-{session_id}] Error updating progress file during loop handling: {e}")
             
-            return {
-                'success': True,
-                'message': 'Update loop detected and resolved with vector store rebuild',
-                'loop_data': loop_data,
-                'rebuild_result': rebuild_result,
-                'session_id': session_id,
-                'is_complete': True
-            }
+            # Continue processing rather than returning
+            # Note: Removing the return statement allows processing to continue
 
         # Load progress if exists
         current_progress = {}
