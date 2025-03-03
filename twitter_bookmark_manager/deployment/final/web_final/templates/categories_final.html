@@ -1,0 +1,887 @@
+{% extends "base_pa.html" %}
+
+{% block title %}Categories | Twitter Bookmark Manager{% endblock %}
+
+{% block head %}
+<!-- Add Chart.js for better visualizations -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- Add custom CSS -->
+<style>
+    /* Utility classes for progress bars */
+    .w-0 { width: 0%; }
+    .w-10 { width: 10%; }
+    .w-20 { width: 20%; }
+    .w-30 { width: 30%; }
+    .w-40 { width: 40%; }
+    .w-50 { width: 50%; }
+    .w-60 { width: 60%; }
+    .w-70 { width: 70%; }
+    .w-80 { width: 80%; }
+    .w-90 { width: 90%; }
+    .w-100 { width: 100%; }
+    
+    .stat-card {
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        transition: transform 0.3s, box-shadow 0.3s;
+        overflow: hidden;
+    }
+    .stat-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+    }
+    .stat-value {
+        font-size: 2.5rem;
+        font-weight: 600;
+    }
+    .stat-label {
+        color: #6c757d;
+        font-weight: 500;
+    }
+    .progress {
+        height: 1.5rem;
+        border-radius: 0.75rem;
+        box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .progress-bar {
+        position: relative;
+        overflow: visible;
+        transition: width 1s ease;
+    }
+    .card-header-custom {
+        background: linear-gradient(45deg, #1da1f2, #0d8ed9);
+        color: white;
+        border-radius: 10px 10px 0 0 !important;
+        padding: 1rem 1.5rem;
+    }
+    .action-btn {
+        border-radius: 20px;
+        padding: 0.5rem 1.25rem;
+        font-weight: 500;
+        transition: all 0.3s;
+    }
+    .action-btn-primary {
+        background: linear-gradient(45deg, #1da1f2, #0d8ed9);
+        border: none;
+    }
+    .action-btn-primary:hover {
+        background: linear-gradient(45deg, #0d8ed9, #0969a2);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(29, 161, 242, 0.3);
+    }
+    .action-btn-secondary {
+        background: white;
+        color: #1da1f2;
+        border: 1px solid #1da1f2;
+    }
+    .action-btn-secondary:hover {
+        background: #f8f9fa;
+        color: #0d8ed9;
+        border-color: #0d8ed9;
+    }
+    .category-table {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .category-count {
+        font-weight: 600;
+        color: #1da1f2;
+    }
+    .batch-control {
+        max-width: 120px;
+        margin: 0 10px;
+    }
+    .processing-card {
+        border-left: 4px solid #1da1f2;
+        background-color: #f8f9fa;
+    }
+    .animate-pulse {
+        animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.6; }
+        100% { opacity: 1; }
+    }
+    .loading-spinner {
+        width: 2rem;
+        height: 2rem;
+    }
+    .category-badge {
+        background-color: #e9f5ff;
+        color: #1da1f2;
+        font-weight: 500;
+        padding: 0.4rem 0.8rem;
+        border-radius: 20px;
+        display: inline-block;
+        margin-bottom: 8px;
+    }
+    .dashboard-section {
+        margin-bottom: 2rem;
+    }
+    .chart-container {
+        position: relative;
+        height: 300px;
+        margin: 20px 0;
+    }
+</style>
+
+<!-- Improved script to hide the base.html category buttons -->
+<script>
+    // Hide the base template's category buttons
+    document.addEventListener('DOMContentLoaded', function() {
+        // This function will run once DOM is fully loaded
+        hideBaseCategoryButtons();
+    });
+
+    // Also try to hide as early as possible with this self-executing function
+    (function() {
+        // Try immediately
+        hideBaseCategoryButtons();
+        
+        // And also after a tiny delay to ensure DOM has processed
+        setTimeout(hideBaseCategoryButtons, 10);
+        
+        // And once more slightly later for good measure
+        setTimeout(hideBaseCategoryButtons, 100);
+    })();
+    
+    function hideBaseCategoryButtons() {
+        console.log('Attempting to hide base category buttons...');
+        
+        // Get the base categories element by its ID - most reliable method
+        const baseCategoriesElement = document.getElementById('base-categories');
+        if (baseCategoriesElement) {
+            baseCategoriesElement.style.display = 'none';
+            console.log('Base category buttons hidden successfully by ID');
+            return;
+        }
+        
+        // Fallback approaches if ID doesn't work
+        
+        // 1. Try using various class selectors
+        const selectors = [
+            '.content-area > div.mt-3.flex.flex-wrap.gap-1\\.5', 
+            '.content-area > div.mt-3.flex',
+            'div.mt-3.flex.flex-wrap',
+            '.content-area > .mt-3',
+            '[class*="flex flex-wrap gap"]'
+        ];
+        
+        let hidden = false;
+        for (const selector of selectors) {
+            const elements = document.querySelectorAll(selector);
+            console.log(`Found ${elements.length} elements matching selector: ${selector}`);
+            
+            if (elements.length > 0) {
+                // Try to find the one that's most likely from base.html
+                for (let i = 0; i < elements.length; i++) {
+                    const element = elements[i];
+                    // Skip the one that's in the categories content block
+                    if (element.closest('#category-dashboard-container')) {
+                        console.log('Skipping category element within dashboard container');
+                        continue;
+                    }
+                    
+                    // If we find buttons inside, it's likely our target
+                    const buttonCount = element.querySelectorAll('button').length;
+                    if (buttonCount > 0) {
+                        element.style.display = 'none';
+                        console.log(`Hidden element with ${buttonCount} buttons using selector: ${selector}`);
+                        hidden = true;
+                        break;
+                    }
+                }
+                
+                if (hidden) break;
+            }
+        }
+        
+        // 2. Last resort: look for any buttons outside our categories section
+        if (!hidden) {
+            // Get all buttons on the page
+            const allButtons = document.querySelectorAll('button');
+            const categoryContainer = document.querySelector('#category-dashboard-container');
+            
+            if (allButtons.length > 0 && categoryContainer) {
+                console.log('Trying last resort approach: hiding buttons outside category container');
+                
+                // Group similar buttons by their parent
+                const buttonGroups = {};
+                
+                allButtons.forEach(button => {
+                    // Skip buttons inside our category dashboard
+                    if (categoryContainer.contains(button)) {
+                        return;
+                    }
+                    
+                    // Group by parent element
+                    const parent = button.parentElement;
+                    if (!parent) return;
+                    
+                    const parentId = parent.id || 'unknown-' + Math.random().toString(36).substr(2, 9);
+                    if (!buttonGroups[parentId]) {
+                        buttonGroups[parentId] = {
+                            element: parent,
+                            count: 0
+                        };
+                    }
+                    buttonGroups[parentId].count++;
+                });
+                
+                // Find the parent with the most buttons - likely our categories
+                let maxButtons = 0;
+                let targetParent = null;
+                
+                for (const id in buttonGroups) {
+                    if (buttonGroups[id].count > maxButtons) {
+                        maxButtons = buttonGroups[id].count;
+                        targetParent = buttonGroups[id].element;
+                    }
+                }
+                
+                // Hide the most likely parent
+                if (targetParent && maxButtons > 2) {
+                    targetParent.style.display = 'none';
+                    console.log(`Last resort: Hidden parent with ${maxButtons} buttons`);
+                    hidden = true;
+                }
+            }
+        }
+        
+        if (!hidden) {
+            console.log('Could not hide base category buttons with any method');
+        }
+    }
+</script>
+{% endblock %}
+
+{% block content %}
+<!-- Wrap the entire content in a div with an ID to make it easy to find -->
+<div id="category-dashboard-container">
+    <!-- Category Filters -->
+    <div class="mt-3 flex flex-wrap gap-1.5 mb-6" x-data="{ selectedCategories: [] }">
+        {% for category in categories %}
+        <button 
+            @click="selectedCategories.includes('{{ category.name }}') ? 
+                    selectedCategories = selectedCategories.filter(c => c !== '{{ category.name }}') : 
+                    selectedCategories.push('{{ category.name }}')"
+            :class="selectedCategories.includes('{{ category.name }}') ? 
+                    'bg-gray-700 text-white' : 
+                    'bg-[#1a1a1a] text-gray-400'"
+            class="px-2 py-1 rounded-md text-xs font-medium hover:bg-opacity-75 transition-colors"
+        >
+            {{ category.name }} ({{ category.count }})
+        </button>
+        {% endfor %}
+        
+        <!-- Hidden inputs for categories -->
+        <template x-for="category in selectedCategories" :key="category">
+            <input type="hidden" name="categories[]" :value="category" form="search-form">
+        </template>
+    </div>
+
+    <div class="w-full">
+        <!-- Header Section -->
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6">
+            <div>
+                <h1 class="text-xl font-bold text-gray-200">Category Dashboard</h1>
+                <p class="text-sm text-gray-500">Manage and monitor your bookmark categorization</p>
+            </div>
+            <div class="flex mt-3 md:mt-0 space-x-2">
+                <button id="categorize-now-btn" class="px-3 py-1.5 bg-[#1a1a1a] text-blue-400 hover:bg-gray-800 rounded-md text-xs font-medium transition-colors flex items-center">
+                    <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                    Categorize Now
+                </button>
+                <button id="manage-categories-btn" class="px-3 py-1.5 bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 rounded-md text-xs font-medium transition-colors flex items-center">
+                    <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Manage Categories
+                </button>
+            </div>
+        </div>
+        
+        <!-- Progress Overview -->
+        <div class="bg-[#1a1a1a] rounded-lg mb-6 overflow-hidden">
+            <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-sm font-semibold text-gray-300">Categorization Progress</h2>
+                    <span class="text-xs text-gray-500">Updated {{ now }}</span>
+                </div>
+            </div>
+            <div class="p-4">
+                <!-- Progress Bar -->
+                <div class="w-full bg-gray-800 rounded-full h-2.5 mb-6">
+                    <div class="bg-blue-600 h-2.5 rounded-full" 
+                         x-data 
+                         x-init="$el.classList.add('w-' + Math.round({{ stats.completion_percentage|default(0) }}))">
+                    </div>
+                </div>
+                
+                <!-- Stats Grid -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div class="bg-[#222222] p-4 rounded-lg">
+                        <div class="text-2xl font-bold text-gray-200">{{ stats.total_bookmarks }}</div>
+                        <div class="text-xs text-gray-500">Total Bookmarks</div>
+                    </div>
+                    <div class="bg-[#222222] p-4 rounded-lg">
+                        <div class="text-2xl font-bold text-green-500">{{ stats.categorized_count }}</div>
+                        <div class="text-xs text-gray-500">Categorized</div>
+                    </div>
+                    <div class="bg-[#222222] p-4 rounded-lg">
+                        <div class="text-2xl font-bold text-gray-400">{{ stats.uncategorized_count }}</div>
+                        <div class="text-xs text-gray-500">Uncategorized</div>
+                    </div>
+                    <div class="bg-[#222222] p-4 rounded-lg">
+                        <div class="text-2xl font-bold text-blue-400">{{ stats.total_categories }}</div>
+                        <div class="text-xs text-gray-500">Categories</div>
+                    </div>
+                </div>
+                
+                <!-- Automated Processing Notice -->
+                <div class="mt-4 p-3 bg-[#222222] rounded border-l-2 border-blue-500">
+                    <div class="flex justify-between items-center">
+                        <div class="flex items-center">
+                            <svg class="w-4 h-4 text-blue-400 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span class="text-sm text-gray-300">Automated Processing</span>
+                        </div>
+                        <span class="px-2 py-0.5 bg-green-900 text-green-300 rounded text-xs">Active</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Next scheduled processing: Hourly at XX:56</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Two Column Layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Category List -->
+            <div class="lg:col-span-2">
+                <div class="bg-[#1a1a1a] rounded-lg overflow-hidden">
+                    <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800 flex justify-between items-center">
+                        <h2 class="text-sm font-semibold text-gray-300">Categories</h2>
+                    </div>
+                    <div class="overflow-hidden">
+                        {% for category in categories %}
+                        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800 hover:bg-[#222222] transition-colors">
+                            <div class="flex-1">
+                                <span class="px-2 py-1 bg-gray-800 rounded text-xs text-gray-400">
+                                    {{ category.name }}
+                                </span>
+                            </div>
+                            <div class="flex-1 pl-4">
+                                <span class="text-sm text-blue-400">{{ category.count }}</span>
+                            </div>
+                            <div class="flex-1">
+                                <div class="w-full bg-gray-800 rounded-full h-1.5">
+                                    <div class="bg-blue-600 h-1.5 rounded-full"
+                                         x-data 
+                                         x-init="$el.classList.add('w-' + Math.round({{ category.percentage|default(0) }}))">
+                                    </div>
+                                </div>
+                                <span class="text-xs text-gray-500 mt-1">{{ category.percentage }}%</span>
+                            </div>
+                            <div class="flex-none">
+                                <a href="/category/{{ category.name }}" class="px-2 py-1 bg-[#222222] text-blue-400 hover:bg-gray-800 rounded text-xs transition-colors">
+                                    View
+                                </a>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            
+            <!-- On-Demand Processing -->
+            <div class="lg:col-span-1">
+                <div class="bg-[#1a1a1a] rounded-lg overflow-hidden h-full">
+                    <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800">
+                        <h2 class="text-sm font-semibold text-gray-300">On-Demand Categorization</h2>
+                    </div>
+                    <div class="p-4">
+                        <p class="text-xs text-gray-500 mb-4">Process uncategorized bookmarks immediately without waiting for the scheduled task.</p>
+                        
+                        <div class="mb-4">
+                            <label for="batch-size-range" class="block text-xs text-gray-400 mb-2">Number of bookmarks to process:</label>
+                            <div class="flex items-center space-x-3">
+                                <input type="range" id="batch-size-range" min="10" max="200" value="50" step="10" 
+                                      class="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer">
+                                <input type="number" id="batch-size" min="10" max="200" value="50" 
+                                      class="w-16 bg-[#222222] border border-gray-800 text-gray-300 text-xs rounded focus:ring-blue-500 focus:border-blue-500 p-1.5 text-center">
+                            </div>
+                            <p class="text-xs text-gray-600 mt-1">Processing more bookmarks takes longer</p>
+                        </div>
+                        
+                        <div id="process-status" class="hidden mb-4 p-3 bg-[#222222] rounded border-l-2 border-blue-500">
+                            <div class="flex items-center">
+                                <div class="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-blue-500 mr-3"></div>
+                                <div>
+                                    <p class="text-sm text-gray-300">Processing bookmarks...</p>
+                                    <p class="text-xs text-gray-500" id="process-message">This may take a few moments</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <button id="categorize-now" class="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors flex items-center justify-center">
+                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                            </svg>
+                            Categorize Now
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results Modal -->
+<div id="results-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center hidden z-50">
+    <div class="bg-[#1a1a1a] rounded-lg max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto">
+        <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800 flex justify-between items-center">
+            <h3 class="text-sm font-semibold text-gray-300">Processing Results</h3>
+            <button id="close-results" class="text-gray-500 hover:text-gray-300">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+        <div class="p-4" id="results-content">
+            <div class="flex justify-center items-center py-8">
+                <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+            </div>
+        </div>
+        <div class="px-4 py-3 bg-[#1f1f1f] border-t border-gray-800 flex justify-end">
+            <button id="refresh-after-process" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors">
+                Refresh Page
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Category Management Modal -->
+<div id="category-management-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center hidden z-50">
+    <div class="bg-[#1a1a1a] rounded-lg max-w-lg w-full mx-4">
+        <div class="bg-[#1f1f1f] px-4 py-3 border-b border-gray-800 flex justify-between items-center">
+            <h3 class="text-sm font-semibold text-gray-300">Category Management</h3>
+            <button id="close-management" class="text-gray-500 hover:text-gray-300">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+        <div class="p-4">
+            <!-- Tab Navigation -->
+            <div class="border-b border-gray-800 mb-4">
+                <h4 class="text-blue-400 border-b-2 border-blue-400 px-2 py-1 text-sm inline-block">
+                    Manage Categories
+                </h4>
+            </div>
+            
+            <div class="py-4">
+                <!-- Loading Indicator -->
+                <div id="category-loading" class="flex justify-center py-4 hidden">
+                    <div class="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-blue-500"></div>
+                </div>
+            
+                <!-- Rename Category Section -->
+                <div class="mb-6">
+                    <h5 class="text-sm font-medium text-gray-300 mb-2">Rename Category</h5>
+                    <div class="space-y-2">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Select Category</label>
+                            <select id="rename-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
+                                <option value="">-- Select Category --</option>
+                                <!-- Categories will be loaded via JavaScript -->
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">New Name</label>
+                            <input type="text" id="new-category-name" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm" placeholder="Enter new name">
+                        </div>
+                        <div class="mt-2">
+                            <button id="rename-category-btn" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors">
+                                Rename Category
+                            </button>
+                            <div id="rename-status" class="text-xs mt-2 hidden"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Delete Category Section -->
+                <div>
+                    <h5 class="text-sm font-medium text-gray-300 mb-2">Delete Category</h5>
+                    <div class="p-3 bg-[#222222] rounded border-l-2 border-red-500 mb-4">
+                        <p class="text-sm text-gray-300">
+                            <span class="text-red-400 font-medium">Warning:</span> Deleting a category will remove it from all bookmarks.
+                        </p>
+                    </div>
+                    <div class="space-y-2">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Select Category</label>
+                            <select id="delete-category-select" class="w-full bg-[#222222] border border-gray-800 rounded p-2 text-gray-300 text-sm">
+                                <option value="">-- Select Category --</option>
+                                <!-- Categories will be loaded via JavaScript -->
+                            </select>
+                        </div>
+                        <div class="mt-2">
+                            <button id="delete-category-btn" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-medium transition-colors">
+                                Delete Category
+                            </button>
+                            <div id="delete-status" class="text-xs mt-2 hidden"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize elements
+    const batchSizeRange = document.getElementById('batch-size-range');
+    const batchSizeInput = document.getElementById('batch-size');
+    const categorizeNowBtn = document.getElementById('categorize-now');
+    const categorizeHeaderBtn = document.getElementById('categorize-now-btn');
+    const manageBtn = document.getElementById('manage-categories-btn');
+    const processingStatus = document.getElementById('process-status');
+    
+    // Modals
+    const resultsModal = document.getElementById('results-modal');
+    const categoryModal = document.getElementById('category-management-modal');
+    const closeResults = document.getElementById('close-results');
+    const closeManagement = document.getElementById('close-management');
+    const refreshBtn = document.getElementById('refresh-after-process');
+    
+    // Category Management Elements
+    const renameSelect = document.getElementById('rename-category-select');
+    const deleteSelect = document.getElementById('delete-category-select');
+    const categoryLoading = document.getElementById('category-loading');
+    
+    // Sync range and input values
+    batchSizeRange.addEventListener('input', function() {
+        batchSizeInput.value = this.value;
+    });
+    
+    batchSizeInput.addEventListener('change', function() {
+        if (this.value < 10) this.value = 10;
+        if (this.value > 200) this.value = 200;
+        batchSizeRange.value = this.value;
+    });
+    
+    // Button actions
+    categorizeNowBtn.addEventListener('click', function() {
+        const batchSize = batchSizeInput.value;
+        processCategories(batchSize);
+    });
+    
+    categorizeHeaderBtn.addEventListener('click', function() {
+        categorizeNowBtn.click();
+    });
+    
+    manageBtn.addEventListener('click', function() {
+        categoryModal.classList.remove('hidden');
+        loadAllCategories(); // Fetch all categories when modal opens
+    });
+    
+    // Modal controls
+    closeResults.addEventListener('click', function() {
+        resultsModal.classList.add('hidden');
+    });
+    
+    closeManagement.addEventListener('click', function() {
+        categoryModal.classList.add('hidden');
+    });
+    
+    refreshBtn.addEventListener('click', function() {
+        window.location.reload();
+    });
+    
+    // Function to load all categories, including those with zero bookmarks
+    function loadAllCategories() {
+        // Show loading indicator
+        categoryLoading.classList.remove('hidden');
+        
+        // Clear existing options except the first one
+        while (renameSelect.options.length > 1) {
+            renameSelect.remove(1);
+        }
+        while (deleteSelect.options.length > 1) {
+            deleteSelect.remove(1);
+        }
+        
+        // Fetch all categories from API
+        fetch('/api/categories/all')
+            .then(response => response.json())
+            .then(data => {
+                if (data.categories) {
+                    // Sort categories alphabetically
+                    data.categories.sort((a, b) => a.name.localeCompare(b.name));
+                    
+                    // Populate dropdown menus
+                    data.categories.forEach(category => {
+                        // Add to rename dropdown
+                        const renameOption = document.createElement('option');
+                        renameOption.value = category.name;
+                        renameOption.textContent = `${category.name} (${category.count || 0})`;
+                        renameSelect.appendChild(renameOption);
+                        
+                        // Add to delete dropdown
+                        const deleteOption = document.createElement('option');
+                        deleteOption.value = category.name;
+                        deleteOption.textContent = `${category.name} (${category.count || 0})`;
+                        deleteSelect.appendChild(deleteOption);
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching categories:', error);
+                showStatus(renameStatus, 'Error loading categories: ' + error.message, 'error');
+            })
+            .finally(() => {
+                // Hide loading indicator
+                categoryLoading.classList.add('hidden');
+            });
+    }
+    
+    // Processing functions
+    function processCategories(batchSize) {
+        // Show processing state
+        processingStatus.classList.remove('hidden');
+        categorizeNowBtn.disabled = true;
+        categorizeHeaderBtn.disabled = true;
+        
+        fetch('/api/categories/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                batch_size: parseInt(batchSize)
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            // Hide processing indicators
+            processingStatus.classList.add('hidden');
+            categorizeNowBtn.disabled = false;
+            categorizeHeaderBtn.disabled = false;
+            
+            // Show results modal
+            resultsModal.classList.remove('hidden');
+            
+            // Check if we have a valid response with data
+            if (data && data.status === 'success' && data.data) {
+                let content = `
+                    <div class="mb-4 p-3 bg-green-900 bg-opacity-20 border-l-2 border-green-500 rounded">
+                        <p class="text-green-400 text-sm">Successfully processed ${data.data.processed_count || data.data.processed || 0} bookmarks!</p>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                        <div class="bg-[#222222] p-3 rounded text-center">
+                            <div class="text-lg font-semibold text-green-500">${data.data.success_count || 0}</div>
+                            <div class="text-xs text-gray-500">Categorized</div>
+                        </div>
+                        <div class="bg-[#222222] p-3 rounded text-center">
+                            <div class="text-lg font-semibold text-red-500">${data.data.error_count || 0}</div>
+                            <div class="text-xs text-gray-500">Errors</div>
+                        </div>
+                        <div class="bg-[#222222] p-3 rounded text-center">
+                            <div class="text-lg font-semibold text-blue-400">${data.data.remaining_count || 0}</div>
+                            <div class="text-xs text-gray-500">Remaining</div>
+                        </div>
+                        <div class="bg-[#222222] p-3 rounded text-center">
+                            <div class="text-lg font-semibold text-gray-300">${data.data.processing_time_seconds ? data.data.processing_time_seconds.toFixed(2) : '0.00'}s</div>
+                            <div class="text-xs text-gray-500">Processing Time</div>
+                        </div>
+                    </div>`;
+                
+                // Detailed results
+                if (data.data.results && data.data.results.length > 0) {
+                    content += `
+                    <div class="bg-[#222222] rounded overflow-hidden">
+                        <div class="bg-[#1f1f1f] px-3 py-2 border-b border-gray-800">
+                            <h4 class="text-xs font-semibold text-gray-300">Category Assignments</h4>
+                        </div>
+                        <div class="max-h-48 overflow-y-auto">
+                            <table class="w-full text-xs">
+                                <thead class="bg-[#1f1f1f] sticky top-0">
+                                    <tr>
+                                        <th class="px-3 py-2 text-left text-gray-400">Bookmark ID</th>
+                                        <th class="px-3 py-2 text-left text-gray-400">Categories</th>
+                                        <th class="px-3 py-2 text-left text-gray-400">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>`;
+                    
+                    data.data.results.forEach(result => {
+                        const statusClass = result.success ? 'text-green-500' : 'text-red-500';
+                        const statusIcon = result.success ? 'check-circle' : 'x-circle';
+                        const categories = result.categories ? result.categories.join(', ') : 'None';
+                        
+                        content += `
+                        <tr class="border-b border-gray-800">
+                            <td class="px-3 py-2 text-gray-300">${result.bookmark_id}</td>
+                            <td class="px-3 py-2 text-gray-300">${categories}</td>
+                            <td class="px-3 py-2 ${statusClass} flex items-center">
+                                <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                                          d="${result.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'}"/>
+                                </svg>
+                                ${result.success ? 'Success' : 'Error: ' + result.error}
+                            </td>
+                        </tr>`;
+                    });
+                    
+                    content += `</tbody></table></div></div>`;
+                }
+                
+                document.getElementById('results-content').innerHTML = content;
+            } else {
+                document.getElementById('results-content').innerHTML = `
+                <div class="p-3 bg-red-900 bg-opacity-20 border-l-2 border-red-500 rounded">
+                    <p class="text-red-400 text-sm">Error: ${data.message || 'Unknown error occurred'}</p>
+                </div>`;
+            }
+        })
+        .catch(error => {
+            processingStatus.classList.add('hidden');
+            categorizeNowBtn.disabled = false;
+            categorizeHeaderBtn.disabled = false;
+            
+            resultsModal.classList.remove('hidden');
+            document.getElementById('results-content').innerHTML = `
+            <div class="p-3 bg-red-900 bg-opacity-20 border-l-2 border-red-500 rounded">
+                <p class="text-red-400 text-sm">Network Error: ${error.message || 'Could not connect to server'}</p>
+            </div>`;
+        });
+    }
+
+    // Category Management Functions
+    function setupCategoryManagement() {
+        const newNameInput = document.getElementById('new-category-name');
+        const renameBtn = document.getElementById('rename-category-btn');
+        const renameStatus = document.getElementById('rename-status');
+        
+        const deleteBtn = document.getElementById('delete-category-btn');
+        const deleteStatus = document.getElementById('delete-status');
+        
+        // Rename Category
+        renameBtn.addEventListener('click', function() {
+            const oldName = renameSelect.value;
+            const newName = newNameInput.value;
+            
+            if (!oldName) {
+                showStatus(renameStatus, 'Please select a category to rename.', 'error');
+                return;
+            }
+            
+            if (!newName) {
+                showStatus(renameStatus, 'Please enter a new name.', 'error');
+                return;
+            }
+            
+            // Show loading state
+            renameBtn.disabled = true;
+            renameBtn.innerText = 'Renaming...';
+            
+            // Call API to rename category
+            fetch('/api/categories/rename', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    old_name: oldName,
+                    new_name: newName
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showStatus(renameStatus, data.error, 'error');
+                } else {
+                    showStatus(renameStatus, `Category "${oldName}" renamed to "${newName}"`, 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                }
+            })
+            .catch(error => {
+                showStatus(renameStatus, 'Error: ' + error.message, 'error');
+            })
+            .finally(() => {
+                renameBtn.disabled = false;
+                renameBtn.innerText = 'Rename Category';
+            });
+        });
+        
+        // Delete Category
+        deleteBtn.addEventListener('click', function() {
+            const categoryName = deleteSelect.value;
+            
+            if (!categoryName) {
+                showStatus(deleteStatus, 'Please select a category to delete.', 'error');
+                return;
+            }
+            
+            // Confirm deletion
+            if (!confirm(`Are you sure you want to delete the category "${categoryName}"? This will remove it from all bookmarks.`)) {
+                return;
+            }
+            
+            // Show loading state
+            deleteBtn.disabled = true;
+            deleteBtn.innerText = 'Deleting...';
+            
+            // Call API to delete category
+            fetch('/api/categories/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    category_name: categoryName
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showStatus(deleteStatus, data.error, 'error');
+                } else {
+                    showStatus(deleteStatus, `Category "${categoryName}" deleted`, 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                }
+            })
+            .catch(error => {
+                showStatus(deleteStatus, 'Error: ' + error.message, 'error');
+            })
+            .finally(() => {
+                deleteBtn.disabled = false;
+                deleteBtn.innerText = 'Delete Category';
+            });
+        });
+        
+        // Helper function to show status messages
+        function showStatus(element, message, type) {
+            element.innerText = message;
+            element.classList.remove('hidden', 'text-green-400', 'text-red-400');
+            
+            if (type === 'success') {
+                element.classList.add('text-green-400');
+            } else {
+                element.classList.add('text-red-400');
+            }
+        }
+    }
+
+    // Initialize category management
+    setupCategoryManagement();
+});
+</script>
+</div> <!-- Close the category-dashboard-container -->
+{% endblock %} 
