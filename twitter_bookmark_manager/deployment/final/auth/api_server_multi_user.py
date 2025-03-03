@@ -19,14 +19,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('api_server_multi_user')
 
 # Import user authentication components
-from deployment.final.auth.auth_routes_final import auth_bp
-from deployment.final.auth.user_api_final import user_api_bp
-from deployment.final.auth.user_context_final import UserContextMiddleware, UserContext
-from deployment.final.database.multi_user_db.user_model_final import get_user_by_id
+from auth_routes_final import auth_bp
+from user_api_final import user_api_bp
+from user_context_final import UserContextMiddleware, UserContext
+from ..database.multi_user_db.user_model_final import get_user_by_id
 
 # Import database modules
-from deployment.final.database.db_final import get_db_connection, create_tables
-from deployment.final.database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+from ..database.db_final import get_db_connection, create_tables
+from ..database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 
 # Create Flask app
 app = Flask(__name__, 
