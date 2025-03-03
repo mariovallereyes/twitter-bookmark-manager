@@ -31,4 +31,4 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
 # Run the application with the correct Python path
-CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8000", "wsgi:app"] 
+CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8000", "wsgi_final:application"] 
