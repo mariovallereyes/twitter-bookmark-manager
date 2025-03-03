@@ -24,11 +24,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set environment variables
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:$PYTHONPATH
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
 EXPOSE 8000
 
-# Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "wsgi:app"] 
+# Run the application with the correct Python path
+CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8000", "wsgi:app"] 
