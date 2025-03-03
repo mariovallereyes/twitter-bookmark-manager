@@ -79,13 +79,8 @@ def setup_database():
         # Import VectorStore
         try:
             # Try to import using relative import first
-            try:
-                from .vector_store_pa import VectorStore
-                logger.info("✅ Successfully imported VectorStore using relative import")
-            except ImportError:
-                # Fallback to absolute import
-                from deployment.final.database.multi_user_db.vector_store_final import VectorStore
-                logger.info("✅ Successfully imported VectorStore using absolute import")
+            from .vector_store_final import VectorStore
+            logger.info("✅ Successfully imported VectorStore")
             
             # For compatibility with original code expecting ChromaStore
             ChromaStore = VectorStore
@@ -136,7 +131,7 @@ def get_vector_store():
     """Get the vector store singleton for embeddings"""
     global _vector_store
     if _vector_store is None:
-        from deployment.final.database.multi_user_db.vector_store_final import VectorStore
+        from .vector_store_final import VectorStore
         _vector_store = VectorStore()
     return _vector_store
 
@@ -234,7 +229,7 @@ def get_db_connection_with_vector_store():
     conn = get_db_connection()
     
     # Initialize vector store if needed 
-    from deployment.final.database.multi_user_db.vector_store_final import VectorStore
+    from .vector_store_final import VectorStore
     get_vector_store()
     
     return conn 
