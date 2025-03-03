@@ -9,9 +9,9 @@ from flask import Blueprint, request, redirect, url_for, session, render_templat
 from urllib.parse import urlparse, urljoin
 
 # Import custom modules
-from deployment.final.auth.oauth_final import OAuthManager
-from deployment.final.auth.user_context_final import UserContext
-from deployment.final.database.multi_user_db.user_model_final import (
+from oauth_final import OAuthManager
+from user_context_final import UserContext
+from ..database.multi_user_db.user_model_final import (
     get_user_by_provider_id, 
     create_user, 
     update_last_login
