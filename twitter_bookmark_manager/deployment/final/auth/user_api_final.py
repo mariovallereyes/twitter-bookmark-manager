@@ -6,7 +6,7 @@ Provides endpoints for user-specific data and actions.
 import logging
 from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, current_app, request
-from user_context_final import UserContext, login_required
+from .user_context_final import UserContext, login_required
 
 # Set up logging
 logger = logging.getLogger('user_api_final')
