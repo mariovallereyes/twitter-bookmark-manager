@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("search_pa_multi_user")
 
 # Import user context
-from deployment.final.auth.user_context_final import with_user_context
+from auth.user_context_final import with_user_context
 
 class BookmarkSearchMultiUser:
     """
