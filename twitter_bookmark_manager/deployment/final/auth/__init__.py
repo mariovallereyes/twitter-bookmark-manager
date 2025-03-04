@@ -1,3 +1,3 @@
 """
-Authentication package
+Auth package initialization.
 """ 

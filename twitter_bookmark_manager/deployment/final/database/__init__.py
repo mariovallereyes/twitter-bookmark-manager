@@ -1,3 +1,3 @@
 """
-Database package
+Database package initialization.
 """ 

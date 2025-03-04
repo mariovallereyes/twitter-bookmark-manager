@@ -1,3 +1,3 @@
 """
-Multi-user database package
+Multi-user database package initialization.
 """ 

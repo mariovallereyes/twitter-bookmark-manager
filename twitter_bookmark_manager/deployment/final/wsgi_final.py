@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 logger.info("="*50)
 logger.info("Initializing WSGI Application for Railway")
 
-# Add the current directory to Python path
+# Add the parent directory to Python path to make packages importable
 current_dir = Path(__file__).parent.resolve()
+parent_dir = current_dir.parent
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
     logger.info(f"Added {current_dir} to Python path")
