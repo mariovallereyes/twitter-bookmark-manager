@@ -17,6 +17,7 @@ import uuid
 import traceback
 import shutil
 from werkzeug.utils import secure_filename
+import glob
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -235,39 +236,27 @@ def api_categories():
 # Upload bookmarks endpoint
 @app.route('/upload-bookmarks', methods=['POST'])
 def upload_bookmarks():
-    """Handle bookmark JSON file upload - multi-user aware"""
-    # Get current user
-    user = UserContext.get_current_user()
-    
-    # Redirect to login if not authenticated
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    
+    """Handle bookmark JSON file upload for multi-user environment"""
     temp_path = None
     # Generate a unique ID for this upload session to track through logs
     session_id = str(uuid.uuid4())[:8]
     try:
         logger.info("="*80)
-        logger.info(f"🚀 [UPLOAD-{session_id}] User {user.id} starting upload handler at {datetime.now().isoformat()}")
-        logger.info(f"🔍 [UPLOAD-{session_id}] Request method: {request.method}")
-        logger.info(f"🔍 [UPLOAD-{session_id}] Request headers: {dict(request.headers)}")
-        logger.info(f"🔍 [UPLOAD-{session_id}] Request files: {list(request.files.keys()) if request.files else 'No files'}")
+        logger.info(f"🚀 [UPLOAD-{session_id}] Starting upload handler at {datetime.now().isoformat()}")
+        
+        # Check if user is authenticated
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error(f"❌ [UPLOAD-{session_id}] User not authenticated")
+            return redirect(url_for('auth.login'))
+        
+        logger.info(f"👤 [UPLOAD-{session_id}] User ID: {user.id}")
         
         # 1. Check if file exists in request
         logger.info(f"📋 [UPLOAD-{session_id}] STEP 1: Checking if file exists in request")
         if 'file' not in request.files:
             logger.error(f"❌ [UPLOAD-{session_id}] No file part in request")
-            logger.info(f"🔍 [UPLOAD-{session_id}] Form data: {request.form}")
-            logger.info(f"🔍 [UPLOAD-{session_id}] Raw data: {request.get_data()}")
-            return jsonify({
-                'error': 'No file provided',
-                'details': {
-                    'request_method': request.method,
-                    'content_type': request.content_type,
-                    'has_files': bool(request.files),
-                    'form_keys': list(request.form.keys()) if request.form else None
-                }
-            }), 400
+            return jsonify({'error': 'No file provided'}), 400
         
         file = request.files['file']
         logger.info(f"✅ [UPLOAD-{session_id}] Received file object: {file}")
@@ -289,8 +278,16 @@ def upload_bookmarks():
             file_content = file.read()
             file.seek(0)
             json_data = json.loads(file_content)
-            logger.info(f"✅ [UPLOAD-{session_id}] JSON validation successful")
-            logger.info(f"📊 [UPLOAD-{session_id}] JSON content size: {len(file_content)} bytes")
+            
+            # Check file size for resource management
+            content_size = len(file_content)
+            logger.info(f"📊 [UPLOAD-{session_id}] JSON content size: {content_size} bytes")
+            
+            # Limit file size to 10MB per user (adjust as needed)
+            max_size = 10 * 1024 * 1024  # 10MB
+            if content_size > max_size:
+                logger.error(f"❌ [UPLOAD-{session_id}] File too large: {content_size} bytes (max {max_size})")
+                return jsonify({'error': f'File too large. Maximum size is {max_size/1024/1024}MB'}), 400
             
             # Log some basic statistics about the JSON data
             if isinstance(json_data, list):
@@ -299,38 +296,45 @@ def upload_bookmarks():
                 logger.info(f"📊 [UPLOAD-{session_id}] JSON contains a dictionary with {len(json_data.keys())} keys")
                 if 'bookmarks' in json_data:
                     logger.info(f"📊 [UPLOAD-{session_id}] JSON contains {len(json_data['bookmarks'])} bookmarks")
+                    
+            logger.info(f"✅ [UPLOAD-{session_id}] JSON validation successful")
+            
         except json.JSONDecodeError as e:
             logger.error(f"❌ [UPLOAD-{session_id}] Invalid JSON file: {str(e)}")
             return jsonify({'error': 'Invalid JSON file'}), 400
         
-        # 4. Create user-specific directories
-        # Define user-specific paths
+        # 4. Set up directory paths
+        logger.info(f"📋 [UPLOAD-{session_id}] STEP 4: Setting up directories")
         base_dir = Path(app.root_path).parent.parent
         upload_folder = base_dir / "uploads" / f"user_{user.id}"
         database_dir = base_dir / "database" / f"user_{user.id}"
         history_dir = database_dir / "json_history"
         
-        # Create directories if they don't exist
+        # Ensure all directories exist
         upload_folder.mkdir(parents=True, exist_ok=True)
         database_dir.mkdir(parents=True, exist_ok=True)
         history_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"📁 [UPLOAD-{session_id}] User-specific directories created/confirmed")
         logger.info(f"📁 [UPLOAD-{session_id}] Upload folder: {upload_folder}")
-        logger.info(f"📁 [UPLOAD-{session_id}] Database directory: {database_dir}")
-        logger.info(f"📁 [UPLOAD-{session_id}] History directory: {history_dir}")
+        logger.info(f"📁 [UPLOAD-{session_id}] Database dir: {database_dir}")
+        logger.info(f"📁 [UPLOAD-{session_id}] History dir: {history_dir}")
         
         # 5. Save uploaded file to temporary location
         logger.info(f"📋 [UPLOAD-{session_id}] STEP 5: Saving file to temporary location")
         temp_path = upload_folder / f"{session_id}_{secure_filename(file.filename)}"
-        logger.info(f"💾 [UPLOAD-{session_id}] Saving file to: {temp_path}")
+        logger.info(f"💾 [UPLOAD-{session_id}] Saving file to temp location: {temp_path}")
         
         try:
-            # Save the file
+            # Save the file to temporary location
             file.save(temp_path)
             logger.info(f"✅ [UPLOAD-{session_id}] File saved successfully to temporary location")
-            logger.info(f"🔍 [UPLOAD-{session_id}] File exists: {os.path.exists(temp_path)}")
-            logger.info(f"📊 [UPLOAD-{session_id}] File size: {os.path.getsize(temp_path)} bytes")
+            
+            # Verify the file was saved successfully
+            if not temp_path.exists():
+                logger.error(f"❌ [UPLOAD-{session_id}] Failed to save file to {temp_path}")
+                return jsonify({'error': 'Failed to save uploaded file'}), 500
+                
+            logger.info(f"📊 [UPLOAD-{session_id}] Temp file size: {temp_path.stat().st_size} bytes")
         except Exception as e:
             logger.error(f"❌ [UPLOAD-{session_id}] Failed to save file: {str(e)}")
             logger.error(traceback.format_exc())
@@ -340,38 +344,49 @@ def upload_bookmarks():
         logger.info(f"📋 [UPLOAD-{session_id}] STEP 6: Creating backup and moving file to final location")
         current_file = database_dir / 'twitter_bookmarks.json'
         logger.info(f"🎯 [UPLOAD-{session_id}] Target file path: {current_file}")
-        logger.info(f"🔍 [UPLOAD-{session_id}] Target exists: {os.path.exists(current_file)}")
         
-        if os.path.exists(current_file):
-            # Use timestamp format that includes hours and minutes
+        # Backup current file if it exists
+        if current_file.exists():
             backup_date = datetime.now().strftime("%Y%m%d_%H%M")
             history_file = history_dir / f'twitter_bookmarks_{backup_date}.json'
             logger.info(f"💾 [UPLOAD-{session_id}] Backup file path: {history_file}")
             
-            # Backup current file
             try:
+                # Create backup
                 shutil.copy2(current_file, history_file)
-                logger.info(f"✅ [UPLOAD-{session_id}] Backup created successfully")
-                logger.info(f"🔍 [UPLOAD-{session_id}] Backup exists: {os.path.exists(history_file)}")
-                logger.info(f"📊 [UPLOAD-{session_id}] Backup size: {os.path.getsize(history_file)} bytes")
+                logger.info(f"✅ [UPLOAD-{session_id}] Backup created successfully: {history_file}")
+                
+                # Check for old backups and remove them if there are too many (keep last 5)
+                old_backups = sorted(history_dir.glob('twitter_bookmarks_*.json'), key=lambda x: x.stat().st_mtime)
+                if len(old_backups) > 5:
+                    # Remove all but the 5 most recent backups
+                    for old_backup in old_backups[:-5]:
+                        old_backup.unlink()
+                        logger.info(f"🧹 [UPLOAD-{session_id}] Removed old backup: {old_backup}")
+                        
             except Exception as e:
                 logger.error(f"❌ [UPLOAD-{session_id}] Backup failed: {str(e)}")
                 logger.error(traceback.format_exc())
-                return jsonify({'error': 'Failed to create backup'}), 500
+                # Continue anyway, since missing a backup is not fatal
         
         # 7. Move new file to final location
         logger.info(f"📋 [UPLOAD-{session_id}] STEP 7: Moving file to final location")
         try:
             # Remove existing file if it exists
-            if os.path.exists(current_file):
-                os.remove(current_file)
+            if current_file.exists():
+                current_file.unlink()
                 logger.info(f"🗑️ [UPLOAD-{session_id}] Removed existing file")
             
             # Move temp file to final location
-            shutil.move(temp_path, current_file)
-            logger.info(f"✅ [UPLOAD-{session_id}] File moved to final location: {current_file}")
-            logger.info(f"🔍 [UPLOAD-{session_id}] Final file exists: {os.path.exists(current_file)}")
-            logger.info(f"📊 [UPLOAD-{session_id}] Final file size: {os.path.getsize(current_file)} bytes")
+            shutil.move(str(temp_path), str(current_file))
+            logger.info(f"✅ [UPLOAD-{session_id}] File moved successfully to: {current_file}")
+            
+            # Double check the file exists
+            if not current_file.exists():
+                logger.error(f"❌ [UPLOAD-{session_id}] File move seemed to succeed, but file not found at: {current_file}")
+                return jsonify({'error': 'Failed to move file to final location'}), 500
+                
+            logger.info(f"📊 [UPLOAD-{session_id}] Final file size: {current_file.stat().st_size} bytes")
             
             # 8. Return success response
             logger.info(f"🎉 [UPLOAD-{session_id}] Upload process completed successfully")
@@ -381,14 +396,14 @@ def upload_bookmarks():
                 'details': {
                     'original_name': file.filename,
                     'final_path': str(current_file),
-                    'backup_created': os.path.exists(history_file) if 'history_file' in locals() else False,
+                    'backup_created': history_file.exists() if 'history_file' in locals() else False,
                     'user_id': user.id
                 }
             })
         except Exception as e:
             logger.error(f"❌ [UPLOAD-{session_id}] Failed to move file: {str(e)}")
             logger.error(traceback.format_exc())
-            return jsonify({'error': 'Failed to move file to final location'}), 500
+            return jsonify({'error': f'Failed to move file to final location: {str(e)}'}), 500
         
     except Exception as e:
         logger.error(f"❌ [UPLOAD-{session_id}] Upload error: {str(e)}")
@@ -396,17 +411,18 @@ def upload_bookmarks():
         return jsonify({
             'error': 'Upload failed',
             'session_id': session_id,
-            'details': str(e),
-            'traceback': traceback.format_exc()
+            'details': str(e)
         }), 500
     finally:
-        # 9. Cleanup
-        if temp_path and os.path.exists(temp_path):
+        # 9. Cleanup temporary files
+        logger.info(f"📋 [UPLOAD-{session_id}] STEP 9: Cleanup")
+        if temp_path and isinstance(temp_path, Path) and temp_path.exists():
             try:
-                os.remove(temp_path)
+                temp_path.unlink()
                 logger.info(f"🧹 [UPLOAD-{session_id}] Temporary file cleaned up")
             except Exception as e:
                 logger.error(f"⚠️ [UPLOAD-{session_id}] Failed to cleanup temporary file: {str(e)}")
+        
         logger.info(f"🏁 [UPLOAD-{session_id}] Upload handler completed at {datetime.now().isoformat()}")
         logger.info("="*80)
 
