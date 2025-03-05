@@ -45,30 +45,40 @@ def setup_database():
         
         if not env_loaded:
             logger.error("❌ No .env.final file found in any expected location")
+        
+        # First check if DATABASE_URL is provided (Railway recommends this approach)
+        DATABASE_URL = os.getenv("DATABASE_URL")
+        if DATABASE_URL:
+            logger.info("Using DATABASE_URL for connection")
+            DATABASE_URI = DATABASE_URL
+        else:
+            # Fall back to individual components
+            logger.info("DATABASE_URL not found, using individual connection parameters")
+            # Get database connection settings with fallbacks
+            DB_USER = os.getenv("DB_USER")
+            DB_PASSWORD = os.getenv("DB_PASSWORD")
+            DB_HOST = os.getenv("DB_HOST")
+            DB_NAME = os.getenv("DB_NAME")
             
-        # Get database connection settings with fallbacks
-        DB_USER = os.getenv("DB_USER")
-        DB_PASSWORD = os.getenv("DB_PASSWORD")
-        DB_HOST = os.getenv("DB_HOST")
-        DB_NAME = os.getenv("DB_NAME")
-        
-        # Log database connection settings (without password)
-        logger.info(f"Database settings: USER={DB_USER}, HOST={DB_HOST}, NAME={DB_NAME}")
-        
-        # Check if we have all required environment variables
-        if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
-            missing = []
-            if not DB_USER: missing.append("DB_USER")
-            if not DB_PASSWORD: missing.append("DB_PASSWORD")
-            if not DB_HOST: missing.append("DB_HOST")
-            if not DB_NAME: missing.append("DB_NAME")
-            error_msg = f"Missing required environment variables: {', '.join(missing)}"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
+            # Log database connection settings (without password)
+            logger.info(f"Database settings: USER={DB_USER}, HOST={DB_HOST}, NAME={DB_NAME}")
+            
+            # Check if we have all required environment variables
+            if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
+                missing = []
+                if not DB_USER: missing.append("DB_USER")
+                if not DB_PASSWORD: missing.append("DB_PASSWORD")
+                if not DB_HOST: missing.append("DB_HOST")
+                if not DB_NAME: missing.append("DB_NAME")
+                error_msg = f"Missing required environment variables: {', '.join(missing)}"
+                logger.error(f"❌ {error_msg}")
+                raise ValueError(error_msg)
+            
+            # Create connection string from individual components
+            DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:14374/{DB_NAME}?sslmode=prefer"
         
         # Create database engine with PostgreSQL
         logger.info(f"Creating PostgreSQL engine")
-        DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:14374/{DB_NAME}?sslmode=prefer"
         _engine = create_engine(DATABASE_URI)
         logger.info(f"✅ Created PostgreSQL engine successfully")
         
@@ -194,13 +204,19 @@ def check_database_status():
         # Close session
         session.close()
         
+        # Check which method is being used
+        db_url = os.getenv("DATABASE_URL")
+        connection_method = "DATABASE_URL" if db_url else "Individual components"
+        
         return {
             "database_connection": "success",
+            "connection_method": connection_method,
             "categories_count": categories_count,
             "bookmarks_count": bookmarks_count,
             "bookmark_categories_count": bookmark_categories_count,
             "category_names": category_names,
             "environment_check": {
+                "DATABASE_URL": "Present (masked)" if db_url else "Not set",
                 "DB_HOST": os.getenv("DB_HOST", "Not set"),
                 "DB_NAME": os.getenv("DB_NAME", "Not set"),
                 "DB_USER": os.getenv("DB_USER", "Not set"),
@@ -210,10 +226,17 @@ def check_database_status():
     except Exception as e:
         logger.error(f"Error checking database status: {e}")
         logger.error(traceback.format_exc())
+        
+        # Check which method is being used
+        db_url = os.getenv("DATABASE_URL")
+        connection_method = "DATABASE_URL" if db_url else "Individual components"
+        
         return {
             "database_connection": "error",
+            "connection_method": connection_method,
             "error_message": str(e),
             "environment_check": {
+                "DATABASE_URL": "Present (masked)" if db_url else "Not set",
                 "DB_HOST": os.getenv("DB_HOST", "Not set"),
                 "DB_NAME": os.getenv("DB_NAME", "Not set"),
                 "DB_USER": os.getenv("DB_USER", "Not set"),
