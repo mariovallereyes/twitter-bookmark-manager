@@ -18,7 +18,6 @@ import traceback
 import shutil
 from werkzeug.utils import secure_filename
 import glob
-from flask_cors import CORS
 import requests
 import hashlib
 import psutil
