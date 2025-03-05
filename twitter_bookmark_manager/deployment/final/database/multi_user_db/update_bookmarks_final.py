@@ -110,7 +110,7 @@ def map_bookmark_data(data):
         logger.error(f"Error mapping bookmark data: {e}")
         return None
 
-def rebuild_vector_store_final(session_id=None, user_id=None):
+def rebuild_vector_store(session_id=None, user_id=None):
     """Rebuild the vector store from the database
     
     This function rebuilds the vector store by adding all bookmarks from the 
@@ -395,7 +395,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
     # If rebuild_vector is True, only rebuild vector store and return
     if rebuild_vector:
         logger.info("Rebuild vector flag is set, rebuilding vector store")
-        rebuild_result = rebuild_vector_store_final(session_id, user_id)
+        rebuild_result = rebuild_vector_store(session_id, user_id)
         return {
             'success': rebuild_result[0],
             'message': 'Vector store rebuild complete',
@@ -409,7 +409,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
     if is_in_loop:
         logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
         # Force a vector rebuild to break the loop
-        rebuild_result = rebuild_vector_store_final(session_id, user_id)
+        rebuild_result = rebuild_vector_store(session_id, user_id)
         
         # Reset progress file to start fresh
         if os.path.exists(progress_file):
@@ -575,7 +575,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             if is_complete:
                 # If update is complete, update the vector store too
                 logger.info("Performing final vector store rebuild")
-                rebuild_result = rebuild_vector_store_final(session_id, user_id)
+                rebuild_result = rebuild_vector_store(session_id, user_id)
                 if not rebuild_result[0]:
                     logger.warning(f"Vector rebuild warning: {rebuild_result[1]}")
                 else:
