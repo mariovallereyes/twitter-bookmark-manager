@@ -1,11 +1,11 @@
 {% extends "base_final.html" %}
 
-{% block title %}Login - Twitter Bookmark Manager{% endblock %}
+{% block title %}Login - Bookmarks Manager{% endblock %}
 
 {% block content %}
 <div class="container mx-auto max-w-md py-12">
-    <div class="bg-white shadow rounded-lg p-8">
-        <h1 class="text-2xl font-bold mb-6 text-center">Sign in to Twitter Bookmark Manager</h1>
+    <div class="bg-[#121212] shadow rounded-lg p-8 border border-gray-800">
+        <h1 class="text-2xl font-bold mb-6 text-center text-white">Sign in to Bookmark Manager</h1>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -19,29 +19,14 @@
         {% endwith %}
         
         <div class="space-y-4">
-            <p class="text-center text-gray-600 mb-6">
-                Choose a service to sign in with:
-            </p>
-            
-            <!-- Twitter Login Button -->
+            <!-- X Login Button (Formerly Twitter) -->
             <a href="{{ url_for('auth.oauth_login', provider='twitter') }}" 
-               class="flex items-center justify-center w-full px-4 py-2 space-x-3 text-white bg-blue-400 rounded-md hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+               class="flex items-center justify-center w-full px-4 py-3 space-x-3 text-white bg-black rounded-md hover:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 border border-gray-700">
+                <!-- X Logo SVG -->
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 fill-current" viewBox="0 0 24 24">
-                    <path d="M23.953 4.57a10 10 0 01-2.825.775 4.958 4.958 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 003.946 4.827 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"></path>
+                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                 </svg>
-                <span>Sign in with Twitter</span>
-            </a>
-            
-            <!-- Google Login Button -->
-            <a href="{{ url_for('auth.oauth_login', provider='google') }}" 
-               class="flex items-center justify-center w-full px-4 py-2 space-x-3 text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24">
-                    <path d="M12.545,10.239v3.821h5.445c-0.712,2.315-2.647,3.972-5.445,3.972c-3.332,0-6.033-2.701-6.033-6.032 s2.701-6.032,6.033-6.032c1.498,0,2.866,0.549,3.921,1.453l2.814-2.814C17.503,2.988,15.139,2,12.545,2 C7.021,2,2.543,6.477,2.543,12s4.478,10,10.002,10c8.396,0,10.249-7.85,9.426-11.748L12.545,10.239z" fill="#4285F4"/>
-                    <path d="M7.174,12c0-0.638,0.128-1.252,0.371-1.818l-3.098-2.392C3.585,9.104,3.068,10.506,3.068,12 c0,1.494,0.516,2.894,1.377,4.209l3.101-2.393C7.302,13.252,7.174,12.638,7.174,12z" fill="#EA4335"/>
-                    <path d="M12.545,6.698c1.827,0,3.457,0.627,4.751,1.654l2.814-2.814C17.951,3.859,15.417,2,12.545,2 c-2.594,0-4.958,0.988-6.735,2.607l3.099,2.394C9.841,7.371,11.203,6.698,12.545,6.698z" fill="#FBBC05"/>
-                    <path d="M12.545,17.304c-1.341,0-2.704-0.671-3.637-1.295l-3.101,2.393C7.587,20.004,9.951,22,12.545,22 c2.871,0,5.312-1.619,6.426-4.318l-3.046-2.35C15.377,16.54,14.103,17.304,12.545,17.304z" fill="#34A853"/>
-                </svg>
-                <span>Sign in with Google</span>
+                <span>Sign in with X</span>
             </a>
         </div>
         
