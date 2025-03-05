@@ -305,9 +305,28 @@ def upload_bookmarks():
         
         # 4. Set up directory paths
         logger.info(f"📋 [UPLOAD-{session_id}] STEP 4: Setting up directories")
-        base_dir = Path(app.root_path).parent.parent
+        
+        # Use consistent paths that will work with the update process
+        # In Railway/production, files need to be in /app/database/user_X
+        app_prefix = '/app'
+        
+        # Try both with and without app prefix to ensure compatibility
+        base_dir_with_prefix = Path(os.path.join(app_prefix, "database"))
+        base_dir_no_prefix = Path("database")
+        
+        # Determine which base directory actually exists and is writable
+        if os.path.exists(app_prefix) and os.access(app_prefix, os.W_OK):
+            # Use path with /app prefix (Railway production)
+            base_dir = base_dir_with_prefix
+            logger.info(f"📁 [UPLOAD-{session_id}] Using production path with app prefix: {base_dir}")
+        else:
+            # Use path without /app prefix (local development)
+            base_dir = base_dir_no_prefix
+            logger.info(f"📁 [UPLOAD-{session_id}] Using path without app prefix: {base_dir}")
+        
+        # Set up user-specific paths
         upload_folder = base_dir / "uploads" / f"user_{user.id}"
-        database_dir = base_dir / "database" / f"user_{user.id}"
+        database_dir = base_dir / f"user_{user.id}"
         history_dir = database_dir / "json_history"
         
         # Ensure all directories exist
@@ -815,6 +834,52 @@ def system_status():
             'error': str(e),
             'timestamp': datetime.now().isoformat()
         }), 500
+
+def get_system_paths_info():
+    """Helper function to get system path information for debugging"""
+    info = {
+        "current_dir": os.getcwd(),
+        "app_dir_exists": os.path.exists("/app"),
+        "database_dirs": []
+    }
+    
+    # Check various database directory combinations
+    possible_dirs = [
+        "/app/database",
+        "/database",
+        "database",
+        "./database"
+    ]
+    
+    for dir_path in possible_dirs:
+        dir_info = {
+            "path": dir_path,
+            "exists": os.path.exists(dir_path),
+            "is_dir": os.path.isdir(dir_path) if os.path.exists(dir_path) else False,
+            "writable": os.access(dir_path, os.W_OK) if os.path.exists(dir_path) else False
+        }
+        
+        # If directory exists, list its contents
+        if dir_info["exists"] and dir_info["is_dir"]:
+            try:
+                dir_info["contents"] = os.listdir(dir_path)
+            except Exception as e:
+                dir_info["error"] = str(e)
+        
+        info["database_dirs"].append(dir_info)
+    
+    return info
+
+@app.route('/api/diagnostics', methods=['GET'])
+@with_user_context
+def path_diagnostics():
+    """Endpoint to help diagnose path issues in production"""
+    # Only allow admins to access this endpoint
+    user = UserContext.get_current_user()
+    if not user or not getattr(user, 'is_admin', False):
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    return jsonify(get_system_paths_info())
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

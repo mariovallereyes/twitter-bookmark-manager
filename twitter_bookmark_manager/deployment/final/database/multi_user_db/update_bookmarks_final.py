@@ -472,9 +472,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         from pathlib import Path
         user_dir = f"user_{user_id}"
         
-        # Use relative paths from the current directory
-        # Railway deployment has file paths without /app prefix when using the Path object
-        base_dir = Path(DATABASE_DIR)
+        # Use absolute paths for Railway deployment
+        # There appears to be a path inconsistency where upload uses /database/user_X but update looks in /app/database/user_X
+        app_prefix = '/app'
+        
+        # First try with app prefix (Railway production environment)
+        base_dir = Path(os.path.join(app_prefix, DATABASE_DIR.lstrip('/')))
         database_dir = base_dir / user_dir
         
         # Ensure directories exist
@@ -483,6 +486,20 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         # Set up user-specific files with Path objects
         progress_file = database_dir / 'update_progress.json'
         bookmarks_file = database_dir / 'twitter_bookmarks.json'
+        
+        # Check if file exists
+        if not bookmarks_file.exists():
+            # If not found with app prefix, try without app prefix
+            base_dir_no_prefix = Path(DATABASE_DIR)
+            database_dir_no_prefix = base_dir_no_prefix / user_dir
+            bookmarks_file_no_prefix = database_dir_no_prefix / 'twitter_bookmarks.json'
+            
+            if bookmarks_file_no_prefix.exists():
+                # Use the path without prefix if file exists there
+                logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file without app prefix: {bookmarks_file_no_prefix}")
+                bookmarks_file = bookmarks_file_no_prefix
+                progress_file = database_dir_no_prefix / 'update_progress.json'
+                database_dir = database_dir_no_prefix
     else:
         # Use default paths
         progress_file = os.path.join(LOG_DIR, f'update_progress_{session_id}.json')
@@ -491,29 +508,59 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
     logger.info(f"Starting final environment bookmark update process for session {session_id} from index {start_index}")
     logger.info(f"Using bookmarks file: {bookmarks_file}")
     
-    # Check if file exists using both relative and absolute paths
+    # Check if file exists - final check
     if isinstance(bookmarks_file, Path):
         file_exists = bookmarks_file.exists()
     else:
         file_exists = os.path.exists(bookmarks_file)
         
     if not file_exists:
-        # Try an alternative path with /app prefix for Railway deployment
-        absolute_path = os.path.join('/app', str(bookmarks_file))
-        if os.path.exists(absolute_path):
-            logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file using absolute path: {absolute_path}")
-            bookmarks_file = absolute_path
-        else:
-            logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
-            # Log additional debugging info
-            logger.error(f"❌ [UPDATE-{session_id}] Alternative path not found: {absolute_path}")
-            logger.error(f"❌ [UPDATE-{session_id}] DATABASE_DIR setting: {DATABASE_DIR}")
-            return {
-                'success': False,
-                'error': f'Bookmarks file not found: {bookmarks_file}',
-                'session_id': session_id,
-                'user_id': user_id
-            }
+        # Try a few more path combinations as a last resort
+        possible_paths = [
+            os.path.join('/app', DATABASE_DIR.lstrip('/'), user_dir, 'twitter_bookmarks.json'),
+            os.path.join('/app/database', user_dir, 'twitter_bookmarks.json'),
+            os.path.join(DATABASE_DIR, user_dir, 'twitter_bookmarks.json'),
+            os.path.join('/database', user_dir, 'twitter_bookmarks.json')
+        ]
+        
+        for alt_path in possible_paths:
+            if os.path.exists(alt_path):
+                logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file at alternative path: {alt_path}")
+                bookmarks_file = alt_path
+                file_exists = True
+                break
+                
+    if not file_exists:
+        logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
+        # Log additional debugging info
+        logger.error(f"❌ [UPDATE-{session_id}] DATABASE_DIR setting: {DATABASE_DIR}")
+        logger.error(f"❌ [UPDATE-{session_id}] Tried multiple path combinations but none worked")
+        
+        # List files in potential directories to help debug
+        for dir_to_check in ['/app/database', '/database', DATABASE_DIR]:
+            if os.path.exists(dir_to_check):
+                logger.info(f"📁 [UPDATE-{session_id}] Contents of {dir_to_check}:")
+                try:
+                    for item in os.listdir(dir_to_check):
+                        logger.info(f"   - {item}")
+                except Exception as e:
+                    logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {dir_to_check}: {str(e)}")
+                    
+            user_specific_dir = os.path.join(dir_to_check, user_dir)
+            if os.path.exists(user_specific_dir):
+                logger.info(f"📁 [UPDATE-{session_id}] Contents of {user_specific_dir}:")
+                try:
+                    for item in os.listdir(user_specific_dir):
+                        logger.info(f"   - {item}")
+                except Exception as e:
+                    logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {user_specific_dir}: {str(e)}")
+        
+        return {
+            'success': False,
+            'error': f'Bookmarks file not found: {bookmarks_file}',
+            'session_id': session_id,
+            'user_id': user_id
+        }
     
     # If rebuild_vector is True, only rebuild vector store and return
     if rebuild_vector:
