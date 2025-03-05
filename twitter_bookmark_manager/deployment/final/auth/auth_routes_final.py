@@ -38,6 +38,10 @@ def get_oauth_manager():
     # Construct the callback URL
     twitter_callback_url = url_for('auth.oauth_callback', provider='twitter', _external=True)
     
+    # Ensure the URL uses HTTPS
+    if twitter_callback_url.startswith('http://'):
+        twitter_callback_url = twitter_callback_url.replace('http://', 'https://', 1)
+    
     # Log the constructed URL for debugging
     logger.info(f"Constructed Twitter callback URL: {twitter_callback_url}")
     

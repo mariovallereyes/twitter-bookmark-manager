@@ -40,7 +40,9 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-    get_db_connection=get_db_connection
+    get_db_connection=get_db_connection,
+    # Force HTTPS for all URL generation
+    PREFERRED_URL_SCHEME='https'
 )
 
 # Set session to be permanent by default
