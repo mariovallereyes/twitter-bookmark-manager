@@ -52,6 +52,11 @@ class TwitterOAuth(OAuthProvider):
         
     def get_authorize_url(self):
         """Get the Twitter authorization URL"""
+        # Log credentials availability (not the actual values)
+        logger.info(f"TwitterOAuth: consumer_key is {'present' if self.consumer_key else 'MISSING'}")
+        logger.info(f"TwitterOAuth: consumer_secret is {'present' if self.consumer_secret else 'MISSING'}")
+        logger.info(f"TwitterOAuth: callback_url is {'present' if self.callback_url else 'MISSING'}")
+        
         # Create OAuth1 session
         oauth = OAuth1Session(
             client_key=self.consumer_key,
@@ -70,6 +75,12 @@ class TwitterOAuth(OAuthProvider):
             return authorization_url
         except Exception as e:
             logger.error(f"Error getting Twitter authorization URL: {e}")
+            logger.error(f"Error type: {type(e)}")
+            logger.error(f"Request token URL: {TWITTER_REQUEST_TOKEN_URL}")
+            # Log more details about the OAuth session (without exposing secrets)
+            logger.error(f"OAuth session has client_key: {'yes' if oauth._client.client.client_key else 'no'}")
+            logger.error(f"OAuth session has client_secret: {'yes' if oauth._client.client.client_secret else 'no'}")
+            logger.error(f"OAuth session has callback_uri: {'yes' if oauth._client.client.callback_uri else 'no'}")
             return None
     
     def get_user_info(self, callback_data):
