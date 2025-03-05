@@ -17,21 +17,21 @@ import shutil
 
 # Import the Bookmark model and db_session
 from .db_final import db_session, get_db_session
-from twitter_bookmark_manager.database.models import Bookmark
+from .models_final import Bookmark
 from .vector_store_final import VectorStore  # Add import for the vector store
 
-# Set up base directory
-BASE_DIR = '/home/mariovallereyes/twitter_bookmark_manager'
-DATABASE_DIR = os.path.join(BASE_DIR, 'database')
-MEDIA_DIR = os.path.join(BASE_DIR, 'media')
-VECTOR_DB_DIR = os.path.join(DATABASE_DIR, 'vector_db')
+# Set up base directory using environment variables or relative paths
+BASE_DIR = os.environ.get('APP_BASE_DIR', '/app')
+DATABASE_DIR = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database'))
+MEDIA_DIR = os.environ.get('MEDIA_DIR', os.path.join(BASE_DIR, 'media'))
+VECTOR_DB_DIR = os.environ.get('VECTOR_DB_DIR', os.path.join(DATABASE_DIR, 'vector_db'))
 
 # Add application directory to Python path if not already there
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 # Set up logging with absolute paths
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
+LOG_DIR = os.environ.get('LOG_DIR', os.path.join(BASE_DIR, 'logs'))
 LOG_FILE = os.path.join(LOG_DIR, 'final_update_log.txt')
 
 # Ensure log directory exists

@@ -23,9 +23,18 @@ if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
     logger.info(f"Added {parent_dir} to Python path")
 
+# Add grandparent directory to Python path to find twitter_bookmark_manager module
+grandparent_dir = parent_dir.parent.resolve()
+if str(grandparent_dir) not in sys.path:
+    sys.path.insert(0, str(grandparent_dir))
+    logger.info(f"Added {grandparent_dir} to Python path")
+
 # Change working directory
 os.chdir(current_dir)
 logger.info(f"Changed working directory to: {os.getcwd()}")
+
+# Store the import error for later use
+import_error = None
 
 # Import the existing Flask app instead of creating a new one
 try:
@@ -33,7 +42,8 @@ try:
     from auth.api_server_multi_user import app as application
     logger.info("✅ Successfully imported application from api_server_multi_user")
 except Exception as e:
-    logger.error(f"Error importing application: {e}")
+    import_error = str(e)
+    logger.error(f"Error importing application: {import_error}")
     # Create a fallback application
     from flask import Flask
     application = Flask(__name__, 
@@ -43,7 +53,7 @@ except Exception as e:
     # Root route for testing
     @application.route('/')
     def index():
-        return f"<h1>Twitter Bookmark Manager</h1><p>Error loading application: {str(e)}</p>"
+        return f"<h1>Twitter Bookmark Manager</h1><p>Error loading application: {import_error}</p>"
     
     logger.error("⚠️ Using fallback application due to import error")
 
