@@ -384,7 +384,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
     logger.info(f"Using progress file: {progress_file}")
     
     # Check if bookmarks file exists
-    if not os.path.exists(bookmarks_file):
+    if not bookmarks_file.exists():
         logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
         return {
             'success': False,

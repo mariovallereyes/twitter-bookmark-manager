@@ -11,6 +11,7 @@ from datetime import datetime
 import random
 import json
 import time
+from sqlalchemy import text
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -187,26 +188,21 @@ class BookmarkSearchMultiUser:
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        cursor = self.conn.cursor()
         categories = []
         
         try:
-            cursor.execute("""
+            # Use SQLAlchemy for the query instead of cursor
+            query = """
             SELECT c.id, c.name, COUNT(bc.bookmark_id) as count
             FROM categories c
             LEFT JOIN bookmark_categories bc ON c.id = bc.category_id
-            WHERE c.user_id = %s
+            WHERE c.user_id = :user_id
             GROUP BY c.id, c.name
             ORDER BY count DESC, c.name
-            """, (self.user_id,))
+            """
+            result = self.conn.execute(text(query), {"user_id": self.user_id})
+            categories = [{"id": row[0], "name": row[1], "count": row[2]} for row in result]
             
-            for row in cursor.fetchall():
-                categories.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'count': row[2]
-                })
-                
             return categories
             
         except Exception as e:
@@ -222,49 +218,44 @@ class BookmarkSearchMultiUser:
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        cursor = self.conn.cursor()
         try:
             # First verify this bookmark belongs to the user
-            cursor.execute(
-                "SELECT COUNT(*) FROM bookmarks WHERE id = %s AND user_id = %s", 
-                (bookmark_id, self.user_id)
-            )
+            query = "SELECT COUNT(*) FROM bookmarks WHERE id = :bookmark_id AND user_id = :user_id"
+            result = self.conn.execute(text(query), {"bookmark_id": bookmark_id, "user_id": self.user_id})
+            count = result.scalar()
             
-            if cursor.fetchone()[0] == 0:
+            if count == 0:
                 logger.warning(f"Attempted to update categories for bookmark {bookmark_id} that doesn't belong to user {self.user_id}")
                 return False
             
             # Delete existing categories
-            cursor.execute(
-                "DELETE FROM bookmark_categories WHERE bookmark_id = %s", 
-                (bookmark_id,)
-            )
+            delete_query = "DELETE FROM bookmark_categories WHERE bookmark_id = :bookmark_id"
+            self.conn.execute(text(delete_query), {"bookmark_id": bookmark_id})
             
             # Add new categories
             if category_ids and len(category_ids) > 0:
                 # Verify all categories belong to this user
-                placeholder = ','.join(['%s'] * len(category_ids))
-                cursor.execute(
-                    f"SELECT COUNT(*) FROM categories WHERE id IN ({placeholder}) AND user_id = %s",
-                    category_ids + [self.user_id]
-                )
+                placeholder = ','.join([':cat_' + str(i) for i in range(len(category_ids))])
+                params = {f'cat_{i}': category_id for i, category_id in enumerate(category_ids)}
+                params['user_id'] = self.user_id
                 
-                if cursor.fetchone()[0] != len(category_ids):
+                query = f"SELECT COUNT(*) FROM categories WHERE id IN ({placeholder}) AND user_id = :user_id"
+                result = self.conn.execute(text(query), params)
+                count = result.scalar()
+                
+                if count != len(category_ids):
                     logger.warning(f"Attempted to use categories that don't belong to user {self.user_id}")
-                    self.conn.rollback()
                     return False
                 
                 # Insert new categories
                 for category_id in category_ids:
-                    cursor.execute(
-                        "INSERT INTO bookmark_categories (bookmark_id, category_id) VALUES (%s, %s)",
-                        (bookmark_id, category_id)
-                    )
+                    insert_query = "INSERT INTO bookmark_categories (bookmark_id, category_id) VALUES (:bookmark_id, :category_id)"
+                    self.conn.execute(text(insert_query), {"bookmark_id": bookmark_id, "category_id": category_id})
             
-            self.conn.commit()
+            # For SQLAlchemy sessions, the commit is handled by the session
             return True
             
         except Exception as e:
             logger.error(f"Error in update_bookmark_categories: {e}")
-            self.conn.rollback()
+            # For SQLAlchemy sessions, the rollback is handled by the session
             return False 
