@@ -339,14 +339,12 @@ def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
 
 # Enhance the update_bookmarks function with better debugging and vector store updates
 def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
-    """Function to update bookmarks from JSON file
-    
-    This version has enhanced debugging, error handling, and vector store updates.
-    It supports resumable operations through session tracking and progress files.
+    """
+    Update bookmarks database from the JSON file
     
     Args:
-        session_id: Optional identifier for this update session (for resumable operations)
-        start_index: Index to start processing from (for resumable operations)
+        session_id: Optional session identifier for tracking
+        start_index: Optional starting index for batch processing
         rebuild_vector: Whether to rebuild the vector store after updating
         user_id: Optional user ID for multi-user support
         
@@ -364,13 +362,16 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         # Define user-specific directories
         from pathlib import Path
         user_dir = f"user_{user_id}"
-        base_dir = Path(app.root_path).parent.parent if 'app' in globals() else Path(DATABASE_DIR).parent
-        database_dir = base_dir / "database" / user_dir
+        
+        # Use relative paths from the current directory
+        # Railway deployment has file paths without /app prefix when using the Path object
+        base_dir = Path(DATABASE_DIR)
+        database_dir = base_dir / user_dir
         
         # Ensure directories exist
         database_dir.mkdir(parents=True, exist_ok=True)
         
-        # Set up user-specific progress file
+        # Set up user-specific files with Path objects
         progress_file = database_dir / 'update_progress.json'
         bookmarks_file = database_dir / 'twitter_bookmarks.json'
     else:
