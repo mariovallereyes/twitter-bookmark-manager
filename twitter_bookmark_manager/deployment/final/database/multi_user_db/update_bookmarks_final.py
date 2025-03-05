@@ -527,24 +527,41 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         with get_db_session() as session:
             # Get existing bookmarks once using raw SQL instead of ORM
             existing_bookmarks = {}
-            # Query all bookmarks for the specific user_id if provided
-            bookmark_query = """
-                SELECT id, text, created_at, author_name, author_username, media_files, raw_data, user_id
-                FROM bookmarks
-            """
-            params = {}
             
-            # Add user_id filter if provided
-            if user_id:
-                bookmark_query += " WHERE user_id = :user_id"
-                params["user_id"] = user_id
+            try:
+                # First attempt to get just id and raw_data, which are the minimum we need
+                bookmark_query = """
+                    SELECT id, raw_data, user_id
+                    FROM bookmarks
+                """
+                params = {}
                 
-            # Execute the query and create Bookmark objects
-            result = session.execute(text(bookmark_query), params)
-            for row in result:
-                bookmark = Bookmark.from_row(row)
-                if bookmark and bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
-                    existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
+                # Add user_id filter if provided
+                if user_id:
+                    bookmark_query += " WHERE user_id = :user_id"
+                    params["user_id"] = user_id
+                    
+                # Execute the query and create Bookmark objects
+                result = session.execute(text(bookmark_query), params)
+                for row in result:
+                    # Create simplified bookmark object with minimal data
+                    bookmark_data = {
+                        'id': row[0],
+                        'raw_data': json.loads(row[1]) if row[1] else {}
+                    }
+                    
+                    # Only add user_id if it's available
+                    if len(row) > 2:
+                        bookmark_data['user_id'] = row[2]
+                    
+                    bookmark = Bookmark(**bookmark_data)
+                    if bookmark and bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
+                        existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
+            
+                logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
+            except Exception as e:
+                logger.warning(f"Error querying bookmarks table: {e}")
+                logger.info("Proceeding with empty existing bookmarks")
             
             # Process each bookmark
             for i, bookmark_data in enumerate(new_bookmarks, start_index):
@@ -570,17 +587,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     # Use raw SQL to insert new bookmark instead of session.add()
                                     insert_query = """
                                         INSERT INTO bookmarks 
-                                        (id, text, created_at, author_name, author_username, media_files, raw_data, user_id)
-                                        VALUES (:id, :text, :created_at, :author_name, :author_username, :media_files, :raw_data, :user_id)
+                                        (id, raw_data, user_id)
+                                        VALUES (:id, :raw_data, :user_id)
                                     """
                                     # Convert Python data types to SQL-compatible types
                                     insert_params = {
                                         'id': data.get('id'),
-                                        'text': data.get('text'),
-                                        'created_at': data.get('created_at'),
-                                        'author_name': data.get('author_name'),
-                                        'author_username': data.get('author_username'),
-                                        'media_files': json.dumps(data.get('media_files', {})),
                                         'raw_data': json.dumps(data.get('raw_data', {})),
                                         'user_id': data.get('user_id')
                                     }
@@ -591,21 +603,11 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     existing = existing_bookmarks[url]
                                     update_query = """
                                         UPDATE bookmarks
-                                        SET text = :text,
-                                            created_at = :created_at,
-                                            author_name = :author_name,
-                                            author_username = :author_username,
-                                            media_files = :media_files,
-                                            raw_data = :raw_data
+                                        SET raw_data = :raw_data
                                         WHERE id = :id
                                     """
                                     update_params = {
                                         'id': existing.id,
-                                        'text': data.get('text'),
-                                        'created_at': data.get('created_at'),
-                                        'author_name': data.get('author_name'),
-                                        'author_username': data.get('author_username'),
-                                        'media_files': json.dumps(data.get('media_files', {})),
                                         'raw_data': json.dumps(data.get('raw_data', {}))
                                     }
                                     session.execute(text(update_query), update_params)
