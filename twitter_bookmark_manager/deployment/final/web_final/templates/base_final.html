@@ -18,6 +18,40 @@
             height: 64px;
             border-radius: 50%;
         }
+        .error-details {
+            background-color: #fdf2f2;
+            border-left: 4px solid #f56565;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0.25rem;
+            font-family: monospace;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .error-header {
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            color: #c53030;
+        }
+
+        .memory-warning {
+            background-color: #fffaf0;
+            border-left: 4px solid #ed8936;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0.25rem;
+        }
+
+        .timeout-info {
+            background-color: #ebf8ff;
+            border-left: 4px solid #4299e1;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0.25rem;
+        }
     </style>
     
     {% block head %}
@@ -221,6 +255,16 @@
                         </svg>
                         Chat
                     </a>
+
+                    {% if current_user.is_admin %}
+                    <a href="/admin/monitor" 
+                       class="px-3 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-blue-400 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                        </svg>
+                        Monitor
+                    </a>
+                    {% endif %}
 
                     <a href="/manage/categories" 
                        class="px-3 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-blue-400 hover:bg-gray-800 transition-colors flex items-center gap-1">
@@ -648,10 +692,21 @@
                 updateTimeout = setTimeout(continueProcessing, 1000);
             } else if (response.status === 200) {  // Processing complete
                 updateInProgress = false;
-                updateProgressUI(result.progress, true);
-                showSuccess("Processing completed successfully!");
+                
+                // Handle timeout cases
+                if (result.is_timeout) {
+                    const details = `Processing timed out after ${result.duration_seconds?.toFixed(1) || '?'} seconds. ${result.processed_this_session || '?'} bookmarks were processed. You can continue later.`;
+                    showSuccess("Processing partially completed due to timeout", details);
+                } else {
+                    updateProgressUI(result.progress, true);
+                    const details = result.message || `Processed ${result.processed_this_session || '?'} bookmarks in ${result.duration_seconds?.toFixed(1) || '?'} seconds.`;
+                    showSuccess("Processing completed successfully!", details);
+                }
             } else {
-                throw new Error(result.error || 'Unknown error');
+                // Handle error cases with more details
+                const errorMessage = result.error || 'Unknown error';
+                const errorDetails = result.traceback || result.message || 'No additional details available';
+                throw new Error(`${errorMessage}\n${errorDetails}`);
             }
         } catch (error) {
             console.error('Error during processing:', error);
@@ -660,10 +715,11 @@
                 retryCount++;
                 // Exponential backoff
                 const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+                console.log(`Retrying in ${delay}ms (retry ${retryCount}/${maxRetries})`);
                 updateTimeout = setTimeout(continueProcessing, delay);
             } else {
                 updateInProgress = false;
-                showError(`Processing failed after ${maxRetries} retries. Please try again later.`);
+                showError(`Processing failed after ${maxRetries} retries`, error.toString());
             }
         }
     }
@@ -696,17 +752,67 @@
         }
     }
 
-    function showError(message) {
+    function showError(message, details = null) {
         const errorDiv = document.createElement('div');
         errorDiv.className = 'mt-4 p-4 bg-red-900 text-white rounded-lg';
-        errorDiv.textContent = message;
+        
+        // Create a header div with important message
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'font-bold mb-2';
+        headerDiv.textContent = message;
+        errorDiv.appendChild(headerDiv);
+        
+        // Add details in smaller text if provided
+        if (details) {
+            const detailsDiv = document.createElement('div');
+            detailsDiv.className = 'text-sm text-red-200 mb-3';
+            detailsDiv.textContent = details;
+            errorDiv.appendChild(detailsDiv);
+        }
+        
+        // Add retry button
+        const retryButton = document.createElement('button');
+        retryButton.className = 'mt-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg mr-2';
+        retryButton.textContent = 'Retry';
+        retryButton.onclick = function() {
+            document.getElementById('progress-steps').removeChild(errorDiv);
+            updateInProgress = true;
+            currentStartIndex = 0;
+            retryCount = 0;
+            continueProcessing();
+        };
+        errorDiv.appendChild(retryButton);
+        
+        // Add cancel button
+        const cancelButton = document.createElement('button');
+        cancelButton.className = 'mt-2 px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg';
+        cancelButton.textContent = 'Cancel';
+        cancelButton.onclick = function() {
+            document.getElementById('progress-steps').removeChild(errorDiv);
+        };
+        errorDiv.appendChild(cancelButton);
+        
         document.getElementById('progress-steps').appendChild(errorDiv);
     }
 
-    function showSuccess(message) {
+    function showSuccess(message, details = null) {
         const successDiv = document.createElement('div');
         successDiv.className = 'mt-4 p-4 bg-green-900 text-white rounded-lg';
-        successDiv.textContent = message;
+        
+        // Create a header div with important message
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'font-bold mb-2';
+        headerDiv.textContent = message;
+        successDiv.appendChild(headerDiv);
+        
+        // Add details in smaller text if provided
+        if (details) {
+            const detailsDiv = document.createElement('div');
+            detailsDiv.className = 'text-sm text-green-200';
+            detailsDiv.textContent = details;
+            successDiv.appendChild(detailsDiv);
+        }
+        
         document.getElementById('progress-steps').appendChild(successDiv);
     }
 

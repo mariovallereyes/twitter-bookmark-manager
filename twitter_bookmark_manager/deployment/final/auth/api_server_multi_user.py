@@ -602,6 +602,21 @@ def update_database():
 # Other API endpoints would be similarly updated with user_id filtering
 # Including upload-bookmarks, update-database, etc.
 
+@app.route('/admin/monitor', methods=['GET'])
+@login_required
+def monitoring_dashboard():
+    """Render the monitoring dashboard page"""
+    # Only allow admin users or set a flag for when the user is an admin
+    user = UserContext.get_current_user()
+    is_admin = getattr(user, 'is_admin', False)
+    
+    # You might want to add an admin check here in a production environment
+    # if not is_admin:
+    #     flash('Admin access required')
+    #     return redirect(url_for('index'))
+    
+    return render_template('monitoring_final.html')
+
 # Error handlers
 @app.errorhandler(404)
 def not_found_error(error):
@@ -613,6 +628,141 @@ def internal_error(error):
     """500 error handler"""
     logger.error(f"Server error: {error}")
     return render_template('error_final.html', error='Server error'), 500
+
+@app.route('/api/status', methods=['GET'])
+@login_required
+def system_status():
+    """Get system status information including memory usage and running processes"""
+    try:
+        # Import monitoring functions
+        from ..database.multi_user_db.update_bookmarks_final import get_memory_usage
+
+        # Get current memory usage
+        memory_usage = get_memory_usage()
+        
+        # Check for active processes
+        active_processes = []
+        
+        # Check for active update processes by looking for progress files
+        import os
+        import glob
+        import json
+        from datetime import datetime
+        
+        # Path to log directory
+        log_dir = os.path.join(app.config.get('DATABASE_DIR', 'database'), 'logs')
+        
+        # Look for update progress files
+        update_progress_files = glob.glob(os.path.join(log_dir, 'update_progress_*.json'))
+        for file_path in update_progress_files:
+            try:
+                with open(file_path, 'r') as f:
+                    progress = json.load(f)
+                    
+                # Extract session ID from filename
+                import re
+                match = re.search(r'update_progress_([^\.]+)\.json', os.path.basename(file_path))
+                session_id = match.group(1) if match else "unknown"
+                
+                # Calculate age of progress file
+                last_update = progress.get('last_update', '')
+                if last_update:
+                    try:
+                        last_update_time = datetime.fromisoformat(last_update)
+                        age_seconds = (datetime.now() - last_update_time).total_seconds()
+                        age = f"{int(age_seconds / 60)} minutes ago" if age_seconds > 60 else f"{int(age_seconds)} seconds ago"
+                    except:
+                        age = "unknown"
+                else:
+                    age = "unknown"
+                
+                # Prepare process info
+                process_info = {
+                    'type': 'database_update',
+                    'session_id': session_id,
+                    'progress': progress.get('last_processed_index', 0),
+                    'total': progress.get('total', 0),
+                    'success_count': progress.get('stats', {}).get('new_count', 0) + progress.get('stats', {}).get('updated_count', 0),
+                    'error_count': progress.get('stats', {}).get('errors', 0),
+                    'last_update': last_update,
+                    'age': age,
+                    'user_id': progress.get('user_id')
+                }
+                
+                active_processes.append(process_info)
+            except Exception as e:
+                app.logger.error(f"Error reading progress file {file_path}: {e}")
+        
+        # Look for vector rebuild progress files
+        rebuild_progress_files = glob.glob(os.path.join(log_dir, 'rebuild_progress_*.json'))
+        for file_path in rebuild_progress_files:
+            try:
+                with open(file_path, 'r') as f:
+                    progress = json.load(f)
+                    
+                # Extract session ID from filename
+                import re
+                match = re.search(r'rebuild_progress_([^\.]+)\.json', os.path.basename(file_path))
+                session_id = match.group(1) if match else "unknown"
+                
+                # Calculate age of progress file
+                last_update = progress.get('last_update', '')
+                if last_update:
+                    try:
+                        last_update_time = datetime.fromisoformat(last_update)
+                        age_seconds = (datetime.now() - last_update_time).total_seconds()
+                        age = f"{int(age_seconds / 60)} minutes ago" if age_seconds > 60 else f"{int(age_seconds)} seconds ago"
+                    except:
+                        age = "unknown"
+                else:
+                    age = "unknown"
+                
+                # Prepare process info
+                process_info = {
+                    'type': 'vector_rebuild',
+                    'session_id': session_id,
+                    'last_processed_index': progress.get('last_processed_index', 0),
+                    'success_count': progress.get('success_count', 0),
+                    'error_count': progress.get('error_count', 0),
+                    'last_update': last_update,
+                    'age': age,
+                    'user_id': progress.get('user_id')
+                }
+                
+                active_processes.append(process_info)
+            except Exception as e:
+                app.logger.error(f"Error reading rebuild progress file {file_path}: {e}")
+        
+        # Get system info
+        import platform
+        import psutil
+        
+        system_info = {
+            'os': platform.system(),
+            'python_version': platform.python_version(),
+            'cpu_count': psutil.cpu_count(),
+            'total_memory': f"{psutil.virtual_memory().total / (1024*1024*1024):.1f} GB",
+            'available_memory': f"{psutil.virtual_memory().available / (1024*1024*1024):.1f} GB",
+            'memory_percent': f"{psutil.virtual_memory().percent}%"
+        }
+        
+        # Build response
+        response = {
+            'status': 'ok',
+            'timestamp': datetime.now().isoformat(),
+            'memory_usage': memory_usage,
+            'active_processes': active_processes,
+            'system_info': system_info
+        }
+        
+        return jsonify(response)
+    except Exception as e:
+        app.logger.error(f"Error getting system status: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

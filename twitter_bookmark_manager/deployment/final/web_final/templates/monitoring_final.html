@@ -1,0 +1,217 @@
+{% extends 'base_final.html' %}
+
+{% block title %}System Monitoring - Twitter Bookmark Manager{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <h1 class="text-3xl font-bold mb-8 text-blue-600">System Monitoring Dashboard</h1>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <!-- System Information Card -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-blue-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3.293 1.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L7.586 10 5.293 7.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                </svg>
+                System Information
+            </h2>
+            <div id="system-info" class="text-gray-600 dark:text-gray-300">
+                <p class="py-1 border-b border-gray-200 dark:border-gray-700">Loading system information...</p>
+            </div>
+        </div>
+        
+        <!-- Memory Usage Card -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-green-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
+                </svg>
+                Memory Usage
+            </h2>
+            <div id="memory-usage" class="text-gray-600 dark:text-gray-300">
+                <p class="py-1 border-b border-gray-200 dark:border-gray-700">Loading memory information...</p>
+            </div>
+            <div class="mt-4">
+                <div class="w-full bg-gray-200 rounded-full h-4 dark:bg-gray-700">
+                    <div id="memory-bar" class="bg-blue-600 h-4 rounded-full" style="width: 0%"></div>
+                </div>
+                <p id="memory-percentage" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Loading...</p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Active Processes Card -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-8">
+        <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200 flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-yellow-500" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd" />
+            </svg>
+            Active Processes
+        </h2>
+        <div id="active-processes" class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Type</th>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Session ID</th>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">User</th>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Progress</th>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Update</th>
+                        <th class="px-6 py-3 bg-gray-50 dark:bg-gray-700 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Success/Error</th>
+                    </tr>
+                </thead>
+                <tbody id="process-table-body" class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    <tr>
+                        <td colspan="6" class="px-6 py-4 text-center text-gray-500 dark:text-gray-400">Loading active processes...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- Last Refresh Time -->
+    <div class="text-right text-sm text-gray-500 dark:text-gray-400">
+        <p>Last refreshed: <span id="last-refresh">Never</span></p>
+        <p>Auto-refreshes every 30 seconds. <button id="refresh-button" class="text-blue-500 hover:text-blue-700 underline">Refresh Now</button></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let refreshTimer;
+    
+    // Format date for display
+    function formatDate(dateString) {
+        const date = new Date(dateString);
+        return date.toLocaleString();
+    }
+    
+    // Format relative time (e.g., "2 minutes ago")
+    function formatRelativeTime(dateString) {
+        if (!dateString) return 'Unknown';
+        
+        const date = new Date(dateString);
+        const now = new Date();
+        const diffSeconds = Math.floor((now - date) / 1000);
+        
+        if (diffSeconds < 60) return `${diffSeconds} seconds ago`;
+        if (diffSeconds < 3600) return `${Math.floor(diffSeconds / 60)} minutes ago`;
+        if (diffSeconds < 86400) return `${Math.floor(diffSeconds / 3600)} hours ago`;
+        return `${Math.floor(diffSeconds / 86400)} days ago`;
+    }
+    
+    // Update the dashboard with fresh data
+    async function updateDashboard() {
+        try {
+            const response = await fetch('/api/status');
+            const data = await response.json();
+            
+            if (data.status === 'ok') {
+                // Update system info
+                const systemInfo = data.system_info;
+                let systemInfoHtml = '';
+                if (systemInfo) {
+                    systemInfoHtml = `
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">OS:</span> ${systemInfo.os}</p>
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Python Version:</span> ${systemInfo.python_version}</p>
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">CPU Count:</span> ${systemInfo.cpu_count}</p>
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Total Memory:</span> ${systemInfo.total_memory}</p>
+                        <p class="py-1"><span class="font-medium">Available Memory:</span> ${systemInfo.available_memory}</p>
+                    `;
+                }
+                document.getElementById('system-info').innerHTML = systemInfoHtml;
+                
+                // Update memory usage
+                const memoryUsage = data.memory_usage;
+                let memoryHtml = '';
+                if (memoryUsage) {
+                    memoryHtml = `
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Current Usage:</span> ${memoryUsage.current_mb.toFixed(2)} MB</p>
+                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Peak Usage:</span> ${memoryUsage.peak_mb.toFixed(2)} MB</p>
+                    `;
+                    
+                    // Memory percentage (using system_info if available, otherwise estimate)
+                    let memoryPercent = 0;
+                    if (systemInfo && systemInfo.memory_percent) {
+                        memoryPercent = parseFloat(systemInfo.memory_percent);
+                    } else if (systemInfo && systemInfo.total_memory) {
+                        const totalMB = parseFloat(systemInfo.total_memory) * 1024;
+                        memoryPercent = (memoryUsage.current_mb / totalMB) * 100;
+                    }
+                    
+                    document.getElementById('memory-bar').style.width = `${memoryPercent}%`;
+                    document.getElementById('memory-percentage').textContent = `Memory usage: ${memoryPercent.toFixed(1)}%`;
+                }
+                document.getElementById('memory-usage').innerHTML = memoryHtml;
+                
+                // Update active processes
+                const activeProcesses = data.active_processes || [];
+                let processesHtml = '';
+                
+                if (activeProcesses.length === 0) {
+                    processesHtml = `
+                        <tr>
+                            <td colspan="6" class="px-6 py-4 text-center text-gray-500 dark:text-gray-400">No active processes</td>
+                        </tr>
+                    `;
+                } else {
+                    activeProcesses.forEach(process => {
+                        // Calculate progress percentage
+                        let progressStr = 'N/A';
+                        if (process.total && process.total > 0) {
+                            const progress = (process.progress / process.total) * 100;
+                            progressStr = `${process.progress}/${process.total} (${progress.toFixed(1)}%)`;
+                        } else if (process.last_processed_index) {
+                            progressStr = `Index: ${process.last_processed_index}`;
+                        }
+                        
+                        // Format success/error counts
+                        let statusStr = 'N/A';
+                        if (process.success_count !== undefined || process.error_count !== undefined) {
+                            const success = process.success_count || 0;
+                            const errors = process.error_count || 0;
+                            statusStr = `${success} success / ${errors} errors`;
+                        }
+                        
+                        processesHtml += `
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.type}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.session_id}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.user_id || 'N/A'}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${progressStr}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
+                                    ${process.last_update ? formatRelativeTime(process.last_update) : 'N/A'}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${statusStr}</td>
+                            </tr>
+                        `;
+                    });
+                }
+                document.getElementById('process-table-body').innerHTML = processesHtml;
+                
+                // Update last refresh time
+                document.getElementById('last-refresh').textContent = new Date().toLocaleString();
+            } else {
+                console.error('Error fetching status:', data.error);
+            }
+        } catch (error) {
+            console.error('Error updating dashboard:', error);
+        }
+    }
+    
+    // Initial update
+    updateDashboard();
+    
+    // Setup auto-refresh
+    refreshTimer = setInterval(updateDashboard, 30000);
+    
+    // Manual refresh button
+    document.getElementById('refresh-button').addEventListener('click', updateDashboard);
+    
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+        clearInterval(refreshTimer);
+    });
+</script>
+{% endblock %} 

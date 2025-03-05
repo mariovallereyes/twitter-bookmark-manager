@@ -7,7 +7,7 @@ import json
 import logging
 import traceback
 import uuid  # Added for session_id generation
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy import String, cast, create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -115,7 +115,7 @@ def map_bookmark_data(data, user_id=None):
         logger.error(f"Error mapping bookmark data: {e}")
         return None
 
-def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_full_rebuild=False):
+def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_full_rebuild=False, max_duration_minutes=30):
     """Rebuild the vector store from the database
     
     This function rebuilds the vector store by adding all bookmarks from the 
@@ -126,6 +126,7 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
         user_id: Optional user ID for multi-user support
         batch_size: Number of bookmarks to process in a batch (smaller = less memory)
         force_full_rebuild: Force a full rebuild even if incremental is possible
+        max_duration_minutes: Maximum duration in minutes before timing out
         
     Returns:
         Dict with rebuild results and status
@@ -199,8 +200,32 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
             error_count = 0
             processed_this_session = 0
             
+            # Calculate timeout time
+            timeout_time = start_time + timedelta(minutes=max_duration_minutes)
+            
             # Use batched query to reduce memory pressure
             for i in range(last_processed_index, total_count, BATCH_SIZE):
+                # Check if we've exceeded the maximum allowed time
+                current_time = datetime.now()
+                if current_time > timeout_time:
+                    logger.warning(f"⚠️ [REBUILD-{session_id}] Reached maximum allowed time ({max_duration_minutes} minutes). Stopping with progress saved.")
+                    # Save progress and return partial success
+                    duration = (current_time - start_time).total_seconds()
+                    return {
+                        "success": True,
+                        "message": f"Timeout after {duration:.1f} seconds, progress saved",
+                        "postgres_count": total_count,
+                        "vector_count": success_count,
+                        "successful_additions": success_count,
+                        "processed_this_session": processed_this_session,
+                        "errors": error_count,
+                        "duration_seconds": duration,
+                        "is_complete": False,
+                        "is_timeout": True,
+                        "next_index": i,
+                        "user_id": user_id
+                    }
+                
                 # Clear any previous batch data from memory
                 import gc
                 gc.collect()
@@ -321,6 +346,8 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
                 "processed_this_session": processed_this_session,
                 "errors": error_count,
                 "duration_seconds": duration,
+                "is_complete": True,
+                "is_timeout": False,
                 "is_in_sync": success_count == vector_count,
                 "user_id": user_id
             }
