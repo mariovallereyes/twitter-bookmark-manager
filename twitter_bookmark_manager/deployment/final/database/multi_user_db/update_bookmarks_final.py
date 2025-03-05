@@ -379,19 +379,36 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         progress_file = os.path.join(LOG_DIR, f'update_progress_{session_id}.json')
         bookmarks_file = os.path.join(DATABASE_DIR, 'twitter_bookmarks.json')
     
+    # Convert to absolute system paths for consistent file operations
+    if isinstance(bookmarks_file, Path):
+        # For Railway deployment, also check the path without /app prefix
+        alt_bookmarks_file = Path('/database') / f"user_{user_id}" / 'twitter_bookmarks.json'
+        if alt_bookmarks_file.exists():
+            bookmarks_file = alt_bookmarks_file
+            logger.info(f"✅ Using alternative path for bookmarks: {bookmarks_file}")
+    
     logger.info(f"Starting final environment bookmark update process for session {session_id} from index {start_index}")
     logger.info(f"Using bookmarks file: {bookmarks_file}")
     logger.info(f"Using progress file: {progress_file}")
     
     # Check if bookmarks file exists
     if not bookmarks_file.exists():
-        logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
-        return {
-            'success': False,
-            'error': f'Bookmarks file not found: {bookmarks_file}',
-            'session_id': session_id,
-            'user_id': user_id
-        }
+        # Try with the absolute path as a fallback
+        absolute_path = Path('/app') / 'database' / f"user_{user_id}" / 'twitter_bookmarks.json'
+        if absolute_path.exists():
+            logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file using absolute path: {absolute_path}")
+            bookmarks_file = absolute_path
+        else:
+            logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
+            # Log additional debugging info
+            logger.error(f"❌ [UPDATE-{session_id}] Alternative path not found: {absolute_path}")
+            logger.error(f"❌ [UPDATE-{session_id}] DATABASE_DIR setting: {DATABASE_DIR}")
+            return {
+                'success': False,
+                'error': f'Bookmarks file not found: {bookmarks_file}',
+                'session_id': session_id,
+                'user_id': user_id
+            }
     
     # If rebuild_vector is True, only rebuild vector store and return
     if rebuild_vector:
@@ -413,7 +430,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         rebuild_result = rebuild_vector_store(session_id, user_id)
         
         # Reset progress file to start fresh
-        if os.path.exists(progress_file):
+        if isinstance(progress_file, Path):
+            exists = progress_file.exists()
+        else:
+            exists = os.path.exists(progress_file)
+        
+        if exists:
             try:
                 # Backup the file first
                 backup_file = f"{progress_file}.loop_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -438,7 +460,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
 
     # Load progress if exists
     current_progress = {}
-    if os.path.exists(progress_file):
+    if isinstance(progress_file, Path):
+        exists = progress_file.exists()
+    else:
+        exists = os.path.exists(progress_file)
+        
+    if exists:
         try:
             with open(progress_file, 'r') as f:
                 current_progress = json.load(f)
@@ -474,9 +501,9 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
     })
     
     # Load and parse JSON
-    logger.info(f"Reading bookmarks from {progress_file}")
+    logger.info(f"Reading bookmarks from {bookmarks_file}")
     try:
-        with open(progress_file, 'r', encoding='utf-8') as f:
+        with open(bookmarks_file, 'r', encoding='utf-8') as f:
             new_bookmarks = json.load(f)
         total_bookmarks = len(new_bookmarks)
         logger.info(f"Successfully loaded {total_bookmarks} bookmarks from JSON")
