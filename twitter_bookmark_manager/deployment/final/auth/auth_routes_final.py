@@ -35,10 +35,16 @@ def get_db_connection():
 
 def get_oauth_manager():
     """Get the OAuth manager with configuration from the app"""
+    # Construct the callback URL
+    twitter_callback_url = url_for('auth.oauth_callback', provider='twitter', _external=True)
+    
+    # Log the constructed URL for debugging
+    logger.info(f"Constructed Twitter callback URL: {twitter_callback_url}")
+    
     config = {
         'TWITTER_CONSUMER_KEY': os.environ.get('TWITTER_API_KEY'),
         'TWITTER_CONSUMER_SECRET': os.environ.get('TWITTER_API_SECRET', os.environ.get('TWITTER_CLIENT_SECRET')),
-        'TWITTER_CALLBACK_URL': url_for('auth.oauth_callback', provider='twitter', _external=True),
+        'TWITTER_CALLBACK_URL': twitter_callback_url,
         'GOOGLE_CLIENT_ID': os.environ.get('GOOGLE_CLIENT_ID'),
         'GOOGLE_CLIENT_SECRET': os.environ.get('GOOGLE_CLIENT_SECRET'),
         'GOOGLE_REDIRECT_URI': url_for('auth.oauth_callback', provider='google', _external=True)

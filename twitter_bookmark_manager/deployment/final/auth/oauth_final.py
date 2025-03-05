@@ -56,6 +56,8 @@ class TwitterOAuth(OAuthProvider):
         logger.info(f"TwitterOAuth: consumer_key is {'present' if self.consumer_key else 'MISSING'}")
         logger.info(f"TwitterOAuth: consumer_secret is {'present' if self.consumer_secret else 'MISSING'}")
         logger.info(f"TwitterOAuth: callback_url is {'present' if self.callback_url else 'MISSING'}")
+        # Log the exact callback URL being used (for debugging)
+        logger.info(f"TwitterOAuth: actual callback_url value: {self.callback_url}")
         
         # Create OAuth1 session
         oauth = OAuth1Session(
