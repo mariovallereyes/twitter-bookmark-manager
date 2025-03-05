@@ -180,43 +180,21 @@ def init_database():
         return False
 
 def check_database_status():
-    """Check database status and return counts of records"""
+    """Check database connection status and configuration"""
     try:
-        session = get_session()
-        
-        # First just test connection
-        session.execute(text("SELECT 1"))
-        logger.info("✅ Database connection test successful")
-        
-        # Check categories
-        categories_count = session.execute(text("SELECT COUNT(*) FROM categories")).scalar()
-        
-        # Check bookmarks
-        bookmarks_count = session.execute(text("SELECT COUNT(*) FROM bookmarks")).scalar()
-        
-        # Check bookmark categories
-        bookmark_categories_count = session.execute(text("SELECT COUNT(*) FROM bookmark_categories")).scalar()
-        
-        # Get list of category names
-        category_names = session.execute(text("SELECT name FROM categories")).fetchall()
-        category_names = [row[0] for row in category_names]
-        
-        # Close session
-        session.close()
-        
-        # Check which method is being used
-        db_url = os.getenv("DATABASE_URL")
-        connection_method = "DATABASE_URL" if db_url else "Individual components"
-        
+        # Testing the database connection
+        engine = get_engine()
+        with engine.connect() as connection:
+            result = connection.execute(text("SELECT 1"))
+            connection_ok = result.scalar() == 1
+            logger.info("✅ Database connection test: SUCCESS")
+            
         return {
-            "database_connection": "success",
-            "connection_method": connection_method,
-            "categories_count": categories_count,
-            "bookmarks_count": bookmarks_count,
-            "bookmark_categories_count": bookmark_categories_count,
-            "category_names": category_names,
-            "environment_check": {
-                "DATABASE_URL": "Present (masked)" if db_url else "Not set",
+            "database_connection": "ok" if connection_ok else "error",
+            "database_type": "PostgreSQL",
+            "database_url": "Using DATABASE_URL environment variable" if os.getenv("DATABASE_URL") else "Not using DATABASE_URL",
+            "connection_string": "Configured" if _engine else "Not configured",
+            "environment_variables": {
                 "DB_HOST": os.getenv("DB_HOST", "Not set"),
                 "DB_NAME": os.getenv("DB_NAME", "Not set"),
                 "DB_USER": os.getenv("DB_USER", "Not set"),
@@ -224,25 +202,28 @@ def check_database_status():
             }
         }
     except Exception as e:
-        logger.error(f"Error checking database status: {e}")
+        logger.error(f"❌ Database connection test failed: {str(e)}")
         logger.error(traceback.format_exc())
-        
-        # Check which method is being used
-        db_url = os.getenv("DATABASE_URL")
-        connection_method = "DATABASE_URL" if db_url else "Individual components"
-        
         return {
             "database_connection": "error",
-            "connection_method": connection_method,
             "error_message": str(e),
-            "environment_check": {
-                "DATABASE_URL": "Present (masked)" if db_url else "Not set",
+            "environment_variables": {
                 "DB_HOST": os.getenv("DB_HOST", "Not set"),
                 "DB_NAME": os.getenv("DB_NAME", "Not set"),
                 "DB_USER": os.getenv("DB_USER", "Not set"),
                 "DB_PASSWORD": "***" if os.getenv("DB_PASSWORD") else "Not set"
             }
         }
+
+def get_db_connection():
+    """
+    Get a PostgreSQL database connection.
+    This function is used by api_server_multi_user.py and other modules.
+    
+    Returns:
+        A database session that should be closed when done.
+    """
+    return get_session()
 
 def get_db_connection_with_vector_store():
     """
@@ -256,3 +237,28 @@ def get_db_connection_with_vector_store():
     get_vector_store()
     
     return conn 
+
+def create_tables():
+    """
+    Create all database tables using SQLAlchemy models.
+    This is a wrapper around Base.metadata.create_all() that ensures
+    all models are imported and available.
+    """
+    logger.info("Creating all database tables using SQLAlchemy...")
+    
+    # Import models to ensure they're registered with the Base
+    try:
+        from database.multi_user_db.models_final import Base
+        from database.multi_user_db.user_model_final import User
+        
+        # Get the engine
+        engine = get_engine()
+        
+        # Create all tables
+        Base.metadata.create_all(engine)
+        logger.info("✅ All tables created successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error creating tables: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False 
