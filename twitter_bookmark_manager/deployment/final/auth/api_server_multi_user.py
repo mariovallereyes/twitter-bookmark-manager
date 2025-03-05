@@ -74,7 +74,8 @@ def index():
     conn = get_db_connection()
     try:
         searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-        categories = searcher.get_categories(user.id if user else 1)
+        # Don't pass user_id again, it's already in the searcher instance
+        categories = searcher.get_categories()
         
         return render_template(template, categories=categories, user=user)
     finally:
@@ -105,15 +106,16 @@ def search():
         category_ids = [int(c) for c in categories if c.isdigit()]
         
         # Perform search
+        # Don't pass user_id again, it's already in the searcher instance
         results = searcher.search(
             query=query, 
             user=author, 
-            category_ids=category_ids,
-            user_id=user.id
+            category_ids=category_ids
         )
         
         # Get all categories for display
-        all_categories = searcher.get_categories(user.id)
+        # Don't pass user_id again, it's already in the searcher instance
+        all_categories = searcher.get_categories()
         
         return render_template(
             'search_results_final.html',
@@ -142,10 +144,12 @@ def recent():
     conn = get_db_connection()
     try:
         searcher = BookmarkSearchMultiUser(conn, user.id)
-        results = searcher.get_recent(user_id=user.id)
+        # Don't pass user_id again, it's already in the searcher instance
+        results = searcher.get_recent()
         
         # Get all categories for display
-        categories = searcher.get_categories(user_id=user.id)
+        # Don't pass user_id again, it's already in the searcher instance
+        categories = searcher.get_categories()
         
         return render_template(
             'recent_final.html',
@@ -171,7 +175,8 @@ def categories():
     conn = get_db_connection()
     try:
         searcher = BookmarkSearchMultiUser(conn, user.id)
-        categories = searcher.get_categories(user_id=user.id)
+        # Don't pass user_id again, it's already in the searcher instance
+        categories = searcher.get_categories()
         
         return render_template(
             'categories_final.html',
@@ -196,7 +201,8 @@ def api_categories():
     conn = get_db_connection()
     try:
         searcher = BookmarkSearchMultiUser(conn, user.id)
-        categories = searcher.get_categories(user_id=user.id)
+        # Don't pass user_id again, it's already in the searcher instance
+        categories = searcher.get_categories()
         
         return jsonify(categories)
     finally:
