@@ -249,7 +249,10 @@ def create_tables():
     # Import models to ensure they're registered with the Base
     try:
         from database.multi_user_db.models_final import Base
-        from database.multi_user_db.user_model_final import User
+        from database.multi_user_db.user_model_final import (
+            User, create_user_table, create_system_user_if_needed, 
+            reset_user_id_sequence
+        )
         
         # Get the engine
         engine = get_engine()
@@ -257,6 +260,25 @@ def create_tables():
         # Create all tables
         Base.metadata.create_all(engine)
         logger.info("✅ All tables created successfully")
+        
+        # Initialize the users table and system user
+        conn = get_db_connection()
+        try:
+            # Create user table if it doesn't exist
+            create_user_table(conn)
+            
+            # Create system user (id=1) if needed
+            create_system_user_if_needed(conn)
+            
+            # Explicitly reset the users_id_seq sequence
+            reset_user_id_sequence(conn)
+            
+            logger.info("✅ User tables and system user initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Error initializing user table: {str(e)}")
+        finally:
+            conn.close()
+            
         return True
     except Exception as e:
         logger.error(f"❌ Error creating tables: {str(e)}")

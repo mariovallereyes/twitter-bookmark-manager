@@ -188,7 +188,55 @@ def get_user_by_id(conn, user_id):
 
 def create_user(conn, username, email, auth_provider, provider_user_id, 
                 display_name=None, profile_image_url=None):
-    """Create a new user in the database"""
+    """Create a new user in the database or update if the provider_user_id already exists"""
+    # First check if user already exists with this provider ID
+    existing_user = get_user_by_provider_id(conn, auth_provider, provider_user_id)
+    
+    # If user exists, update their information
+    if existing_user:
+        import datetime
+        now = datetime.datetime.now()
+        
+        # Check if this is a SQLAlchemy Session or a database connection
+        if hasattr(conn, 'execute'):
+            # It's a SQLAlchemy Session
+            result = conn.execute(text('''
+            UPDATE users 
+            SET username = :username,
+                email = :email,
+                display_name = :display_name,
+                profile_image_url = :profile_image_url,
+                last_login = :now
+            WHERE auth_provider = :auth_provider AND provider_user_id = :provider_user_id
+            RETURNING id, username, email, auth_provider, provider_user_id, display_name, profile_image_url, created_at, last_login
+            '''), {
+                'username': username,
+                'email': email,
+                'display_name': display_name,
+                'profile_image_url': profile_image_url,
+                'now': now,
+                'auth_provider': auth_provider,
+                'provider_user_id': provider_user_id
+            })
+            conn.commit()
+            return User.from_row(result.fetchone())
+        else:
+            # It's a database connection with cursor
+            cursor = conn.cursor()
+            cursor.execute('''
+            UPDATE users 
+            SET username = %s,
+                email = %s,
+                display_name = %s,
+                profile_image_url = %s,
+                last_login = NOW()
+            WHERE auth_provider = %s AND provider_user_id = %s
+            RETURNING id, username, email, auth_provider, provider_user_id, display_name, profile_image_url, created_at, last_login
+            ''', (username, email, display_name, profile_image_url, auth_provider, provider_user_id))
+            conn.commit()
+            return User.from_row(cursor.fetchone())
+            
+    # Otherwise create new user
     # Check if this is a SQLAlchemy Session or a database connection
     if hasattr(conn, 'execute'):
         # It's a SQLAlchemy Session
@@ -277,3 +325,23 @@ def create_system_user_if_needed(conn):
             ON CONFLICT (id) DO NOTHING
             ''')
             conn.commit() 
+    
+    # After ensuring system user exists, reset the sequence
+    reset_user_id_sequence(conn)
+
+def reset_user_id_sequence(conn):
+    """Reset the PostgreSQL sequence for users_id_seq to the max id value + 1"""
+    # Check if this is a SQLAlchemy Session or a database connection
+    if hasattr(conn, 'execute'):
+        # It's a SQLAlchemy Session
+        conn.execute(text('''
+        SELECT setval('users_id_seq', (SELECT MAX(id) FROM users), true);
+        '''))
+        conn.commit()
+    else:
+        # It's a database connection with cursor
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT setval('users_id_seq', (SELECT MAX(id) FROM users), true);
+        ''')
+        conn.commit() 
