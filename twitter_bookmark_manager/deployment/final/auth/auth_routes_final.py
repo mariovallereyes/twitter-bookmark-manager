@@ -180,4 +180,4 @@ def profile():
     is_admin = getattr(user, 'is_admin', False)
     
     # Render profile template
-    return render_template('profile_pa.html', user=user, is_admin=is_admin) 
+    return render_template('profile_final.html', user=user, is_admin=is_admin) 

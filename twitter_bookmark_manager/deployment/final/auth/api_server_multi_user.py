@@ -661,6 +661,14 @@ def system_status():
             "message": "Authentication required"
         }), 401
     
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    if not is_admin:
+        return jsonify({
+            "status": "error",
+            "message": "Admin access required"
+        }), 403
+    
     try:
         # Import monitoring functions
         from ..database.multi_user_db.update_bookmarks_final import get_memory_usage
