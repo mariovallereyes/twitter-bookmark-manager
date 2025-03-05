@@ -244,7 +244,7 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
                 for j, bookmark in enumerate(batch):
                     try:
                         # Extract the tweet URL and ID
-                        tweet_url = bookmark.data.get('tweet_url', 'unknown') if bookmark.data else 'unknown'
+                        tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
                         tweet_id = tweet_url.split('/')[-1] if tweet_url else None
                         
                         # Skip if already processed (for incremental rebuilds)
@@ -677,7 +677,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             with get_db_session() as session:
                 # First attempt to get just id and data, which are the minimum we need
                 bookmark_query = """
-                    SELECT id, data, user_id
+                    SELECT id, raw_data, user_id
                     FROM bookmarks
                 """
                 params = {}
@@ -693,7 +693,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                     # Create simplified bookmark object with minimal data
                     bookmark_data = {
                         'id': row[0],
-                        'data': json.loads(row[1]) if row[1] else {}
+                        'raw_data': json.loads(row[1]) if row[1] else {}
                     }
                     
                     # Only add user_id if it's available
@@ -701,8 +701,8 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         bookmark_data['user_id'] = row[2]
                     
                     bookmark = Bookmark(**bookmark_data)
-                    if bookmark and bookmark.data and 'tweet_url' in bookmark.data:
-                        existing_bookmarks[bookmark.data['tweet_url']] = bookmark
+                    if bookmark and bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
+                        existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
                 
                 logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
                 monitor_memory("after loading existing bookmarks")
@@ -745,13 +745,13 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     # Use raw SQL to insert new bookmark
                                     insert_query = """
                                         INSERT INTO bookmarks 
-                                        (id, data, user_id)
-                                        VALUES (:id, :data, :user_id)
+                                        (id, raw_data, user_id)
+                                        VALUES (:id, :raw_data, :user_id)
                                     """
                                     # Convert Python data types to SQL-compatible types
                                     insert_params = {
                                         'id': data.get('id'),
-                                        'data': json.dumps(data.get('data', {})),
+                                        'raw_data': json.dumps(raw),
                                         'user_id': data.get('user_id')
                                     }
                                     item_session.execute(text(insert_query), insert_params)
@@ -761,12 +761,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     existing = existing_bookmarks[url]
                                     update_query = """
                                         UPDATE bookmarks
-                                        SET data = :data
+                                        SET raw_data = :raw_data
                                         WHERE id = :id
                                     """
                                     update_params = {
                                         'id': existing.id,
-                                        'data': json.dumps(data.get('data', {}))
+                                        'raw_data': json.dumps(raw)
                                     }
                                     item_session.execute(text(update_query), update_params)
                                     stats['updated_count'] += 1

@@ -40,6 +40,97 @@
         </div>
     </div>
     
+    <!-- Database Diagnostics Card -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <h5>
+                    <i class="fas fa-database me-2"></i> Database Diagnostics
+                    <span id="dbConnectionStatus" class="badge rounded-pill bg-secondary ms-2">Checking...</span>
+                </h5>
+                <button class="btn btn-sm btn-outline-primary" onclick="updateDatabaseInfo()">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header">
+                            <h6 class="mb-0">Connection Pool</h6>
+                        </div>
+                        <div class="card-body">
+                            <div id="poolStats" class="d-flex justify-content-around">
+                                <div class="text-center">
+                                    <h3 id="totalConnections">-</h3>
+                                    <small>Total</small>
+                                </div>
+                                <div class="text-center">
+                                    <h3 id="checkedInConnections">-</h3>
+                                    <small>Available</small>
+                                </div>
+                                <div class="text-center">
+                                    <h3 id="checkedOutConnections">-</h3>
+                                    <small>In Use</small>
+                                </div>
+                                <div class="text-center">
+                                    <h3 id="poolSize">-</h3>
+                                    <small>Pool Size</small>
+                                </div>
+                            </div>
+                            <div class="progress mt-3">
+                                <div id="connectionUsageBar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                            </div>
+                            <div class="text-center mt-2">
+                                <small id="lastUpdated">Last updated: Never</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header">
+                            <h6 class="mb-0">Health Status</h6>
+                        </div>
+                        <div class="card-body text-center">
+                            <div id="dbHealthIndicator" class="mb-3">
+                                <i class="fas fa-circle-notch fa-spin fa-3x"></i>
+                            </div>
+                            <div>
+                                <p id="dbHealthStatus">Checking database health...</p>
+                                <p id="dbHealthTime" class="text-muted"></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h6 class="mb-0">Bookmarks Table Schema</h6>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Column Name</th>
+                                    <th scope="col">Data Type</th>
+                                </tr>
+                            </thead>
+                            <tbody id="schemaTable">
+                                <tr>
+                                    <td colspan="2" class="text-center">Loading schema information...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
     <!-- Active Processes Card -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-8">
         <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200 flex items-center">
@@ -87,131 +178,293 @@
         return date.toLocaleString();
     }
     
-    // Format relative time (e.g., "2 minutes ago")
-    function formatRelativeTime(dateString) {
-        if (!dateString) return 'Unknown';
-        
-        const date = new Date(dateString);
+    // Helper function for formatting relative time
+    function formatRelativeTime(timestamp) {
+        const date = new Date(timestamp);
         const now = new Date();
         const diffSeconds = Math.floor((now - date) / 1000);
         
-        if (diffSeconds < 60) return `${diffSeconds} seconds ago`;
-        if (diffSeconds < 3600) return `${Math.floor(diffSeconds / 60)} minutes ago`;
-        if (diffSeconds < 86400) return `${Math.floor(diffSeconds / 3600)} hours ago`;
-        return `${Math.floor(diffSeconds / 86400)} days ago`;
-    }
-    
-    // Update the dashboard with fresh data
-    async function updateDashboard() {
-        try {
-            const response = await fetch('/api/status');
-            const data = await response.json();
-            
-            if (data.status === 'ok') {
-                // Update system info
-                const systemInfo = data.system_info;
-                let systemInfoHtml = '';
-                if (systemInfo) {
-                    systemInfoHtml = `
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">OS:</span> ${systemInfo.os}</p>
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Python Version:</span> ${systemInfo.python_version}</p>
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">CPU Count:</span> ${systemInfo.cpu_count}</p>
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Total Memory:</span> ${systemInfo.total_memory}</p>
-                        <p class="py-1"><span class="font-medium">Available Memory:</span> ${systemInfo.available_memory}</p>
-                    `;
-                }
-                document.getElementById('system-info').innerHTML = systemInfoHtml;
-                
-                // Update memory usage
-                const memoryUsage = data.memory_usage;
-                let memoryHtml = '';
-                if (memoryUsage) {
-                    memoryHtml = `
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Current Usage:</span> ${memoryUsage.current_mb.toFixed(2)} MB</p>
-                        <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Peak Usage:</span> ${memoryUsage.peak_mb.toFixed(2)} MB</p>
-                    `;
-                    
-                    // Memory percentage (using system_info if available, otherwise estimate)
-                    let memoryPercent = 0;
-                    if (systemInfo && systemInfo.memory_percent) {
-                        memoryPercent = parseFloat(systemInfo.memory_percent);
-                    } else if (systemInfo && systemInfo.total_memory) {
-                        const totalMB = parseFloat(systemInfo.total_memory) * 1024;
-                        memoryPercent = (memoryUsage.current_mb / totalMB) * 100;
-                    }
-                    
-                    document.getElementById('memory-bar').style.width = `${memoryPercent}%`;
-                    document.getElementById('memory-percentage').textContent = `Memory usage: ${memoryPercent.toFixed(1)}%`;
-                }
-                document.getElementById('memory-usage').innerHTML = memoryHtml;
-                
-                // Update active processes
-                const activeProcesses = data.active_processes || [];
-                let processesHtml = '';
-                
-                if (activeProcesses.length === 0) {
-                    processesHtml = `
-                        <tr>
-                            <td colspan="6" class="px-6 py-4 text-center text-gray-500 dark:text-gray-400">No active processes</td>
-                        </tr>
-                    `;
-                } else {
-                    activeProcesses.forEach(process => {
-                        // Calculate progress percentage
-                        let progressStr = 'N/A';
-                        if (process.total && process.total > 0) {
-                            const progress = (process.progress / process.total) * 100;
-                            progressStr = `${process.progress}/${process.total} (${progress.toFixed(1)}%)`;
-                        } else if (process.last_processed_index) {
-                            progressStr = `Index: ${process.last_processed_index}`;
-                        }
-                        
-                        // Format success/error counts
-                        let statusStr = 'N/A';
-                        if (process.success_count !== undefined || process.error_count !== undefined) {
-                            const success = process.success_count || 0;
-                            const errors = process.error_count || 0;
-                            statusStr = `${success} success / ${errors} errors`;
-                        }
-                        
-                        processesHtml += `
-                            <tr>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.type}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.session_id}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.user_id || 'N/A'}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${progressStr}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
-                                    ${process.last_update ? formatRelativeTime(process.last_update) : 'N/A'}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${statusStr}</td>
-                            </tr>
-                        `;
-                    });
-                }
-                document.getElementById('process-table-body').innerHTML = processesHtml;
-                
-                // Update last refresh time
-                document.getElementById('last-refresh').textContent = new Date().toLocaleString();
-            } else {
-                console.error('Error fetching status:', data.error);
-            }
-        } catch (error) {
-            console.error('Error updating dashboard:', error);
+        if (diffSeconds < 60) {
+            return `${diffSeconds} seconds ago`;
+        } else if (diffSeconds < 3600) {
+            return `${Math.floor(diffSeconds / 60)} minutes ago`;
+        } else if (diffSeconds < 86400) {
+            return `${Math.floor(diffSeconds / 3600)} hours ago`;
+        } else {
+            return date.toLocaleString();
         }
     }
     
-    // Initial update
-    updateDashboard();
+    // Update the database schema information
+    function updateDatabaseInfo() {
+        // Update schema information
+        fetch('/api/db-schema')
+            .then(response => response.json())
+            .then(data => {
+                // Update connection status
+                const connectionStatus = document.getElementById('dbConnectionStatus');
+                if (data.status === 'ok') {
+                    connectionStatus.innerText = 'Connected';
+                    connectionStatus.className = 'badge rounded-pill bg-success ms-2';
+                    
+                    // Update pool stats
+                    if (data.pool_stats) {
+                        document.getElementById('totalConnections').innerText = data.pool_stats.total_connections || '-';
+                        document.getElementById('checkedInConnections').innerText = data.pool_stats.checkedin || '-';
+                        document.getElementById('checkedOutConnections').innerText = data.pool_stats.checkedout || '-';
+                        document.getElementById('poolSize').innerText = data.pool_stats.size || '-';
+                        
+                        // Calculate and update progress bar
+                        if (data.pool_stats.total_connections > 0) {
+                            const usagePercent = Math.round((data.pool_stats.checkedout / data.pool_stats.total_connections) * 100);
+                            const progressBar = document.getElementById('connectionUsageBar');
+                            progressBar.style.width = `${usagePercent}%`;
+                            progressBar.innerText = `${usagePercent}%`;
+                            progressBar.setAttribute('aria-valuenow', usagePercent);
+                            
+                            // Change color based on usage
+                            if (usagePercent > 80) {
+                                progressBar.className = 'progress-bar bg-danger';
+                            } else if (usagePercent > 50) {
+                                progressBar.className = 'progress-bar bg-warning';
+                            } else {
+                                progressBar.className = 'progress-bar bg-success';
+                            }
+                        }
+                        
+                        // Update last updated time
+                        document.getElementById('lastUpdated').innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
+                    }
+                    
+                    // Update schema table
+                    const schemaTable = document.getElementById('schemaTable');
+                    schemaTable.innerHTML = '';
+                    
+                    data.columns.forEach(column => {
+                        const row = document.createElement('tr');
+                        
+                        const nameCell = document.createElement('td');
+                        nameCell.innerText = column.column_name;
+                        row.appendChild(nameCell);
+                        
+                        const typeCell = document.createElement('td');
+                        typeCell.innerText = column.data_type;
+                        row.appendChild(typeCell);
+                        
+                        schemaTable.appendChild(row);
+                    });
+                } else {
+                    connectionStatus.innerText = 'Disconnected';
+                    connectionStatus.className = 'badge rounded-pill bg-danger ms-2';
+                    document.getElementById('schemaTable').innerHTML = `<tr><td colspan="2" class="text-center text-danger">Failed to load schema: ${data.error || 'Unknown error'}</td></tr>`;
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching schema:', error);
+                const connectionStatus = document.getElementById('dbConnectionStatus');
+                connectionStatus.innerText = 'Error';
+                connectionStatus.className = 'badge rounded-pill bg-danger ms-2';
+                document.getElementById('schemaTable').innerHTML = `<tr><td colspan="2" class="text-center text-danger">Connection error: ${error.message}</td></tr>`;
+            });
+            
+        // Check database health separately
+        fetch('/api/db-health')
+            .then(response => response.json())
+            .then(data => {
+                const healthIndicator = document.getElementById('dbHealthIndicator');
+                const healthStatus = document.getElementById('dbHealthStatus');
+                const healthTime = document.getElementById('dbHealthTime');
+                
+                // Clear loading spinner
+                healthIndicator.innerHTML = '';
+                
+                // Update health indicator
+                const icon = document.createElement('i');
+                icon.className = 'fas fa-3x';
+                
+                if (data.status === 'healthy') {
+                    icon.className += ' fa-check-circle text-success';
+                    healthStatus.innerText = 'Database connection is healthy';
+                    healthStatus.className = 'text-success';
+                } else if (data.status === 'degraded') {
+                    icon.className += ' fa-exclamation-triangle text-warning';
+                    healthStatus.innerText = 'Database connection is degraded';
+                    healthStatus.className = 'text-warning';
+                } else {
+                    icon.className += ' fa-times-circle text-danger';
+                    healthStatus.innerText = `Database connection is unhealthy: ${data.error || 'Unknown issue'}`;
+                    healthStatus.className = 'text-danger';
+                }
+                
+                healthIndicator.appendChild(icon);
+                
+                // Update timestamp
+                if (data.timestamp) {
+                    const timestamp = new Date(data.timestamp);
+                    healthTime.innerText = `Last checked: ${timestamp.toLocaleTimeString()} on ${timestamp.toLocaleDateString()}`;
+                }
+            })
+            .catch(error => {
+                console.error('Error checking health:', error);
+                const healthIndicator = document.getElementById('dbHealthIndicator');
+                const healthStatus = document.getElementById('dbHealthStatus');
+                
+                healthIndicator.innerHTML = '<i class="fas fa-times-circle fa-3x text-danger"></i>';
+                healthStatus.innerText = `Failed to check database health: ${error.message}`;
+                healthStatus.className = 'text-danger';
+            });
+    }
     
-    // Setup auto-refresh
-    refreshTimer = setInterval(updateDashboard, 30000);
+    // Modify existing refresh functionality
+    function refreshDashboard() {
+        updateSystemInfo();
+        updateProcesses(); 
+        updateDatabaseInfo(); // Add database refresh
+    }
     
-    // Manual refresh button
-    document.getElementById('refresh-button').addEventListener('click', updateDashboard);
+    // Initialize dashboard on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        refreshDashboard();
+        setInterval(refreshDashboard, 30000); // Refresh every 30 seconds
+        
+        // Setup manual refresh button if it exists
+        const refreshButton = document.getElementById('refresh-button');
+        if (refreshButton) {
+            refreshButton.addEventListener('click', function() {
+                refreshDashboard();
+            });
+        }
+    });
     
     // Cleanup on page unload
     window.addEventListener('beforeunload', function() {
         clearInterval(refreshTimer);
     });
+
+    // Add these missing functions
+    function updateSystemInfo() {
+        fetch('/api/status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    // Update system info
+                    const systemInfo = data.system_info;
+                    if (systemInfo) {
+                        const systemInfoElement = document.getElementById('system-info');
+                        if (systemInfoElement) {
+                            systemInfoElement.innerHTML = `
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">OS:</span> ${systemInfo.os}</p>
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Python Version:</span> ${systemInfo.python_version}</p>
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">CPU Count:</span> ${systemInfo.cpu_count}</p>
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Total Memory:</span> ${systemInfo.total_memory}</p>
+                                <p class="py-1"><span class="font-medium">Available Memory:</span> ${systemInfo.available_memory}</p>
+                            `;
+                        }
+                    }
+                    
+                    // Update memory usage
+                    const memoryUsage = data.memory_usage;
+                    if (memoryUsage) {
+                        const memoryUsageElement = document.getElementById('memory-usage');
+                        if (memoryUsageElement) {
+                            memoryUsageElement.innerHTML = `
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Current Usage:</span> ${memoryUsage.current_mb.toFixed(2)} MB</p>
+                                <p class="py-1 border-b border-gray-200 dark:border-gray-700"><span class="font-medium">Peak Usage:</span> ${memoryUsage.peak_mb.toFixed(2)} MB</p>
+                            `;
+                        }
+                        
+                        // Memory percentage
+                        let memoryPercent = 0;
+                        if (systemInfo && systemInfo.memory_percent) {
+                            memoryPercent = parseFloat(systemInfo.memory_percent);
+                        } else if (systemInfo && systemInfo.total_memory) {
+                            const totalMB = parseFloat(systemInfo.total_memory) * 1024;
+                            memoryPercent = (memoryUsage.current_mb / totalMB) * 100;
+                        }
+                        
+                        const memoryBar = document.getElementById('memory-bar');
+                        const memoryPercentage = document.getElementById('memory-percentage');
+                        
+                        if (memoryBar) {
+                            memoryBar.style.width = `${memoryPercent}%`;
+                        }
+                        
+                        if (memoryPercentage) {
+                            memoryPercentage.textContent = `Memory usage: ${memoryPercent.toFixed(1)}%`;
+                        }
+                    }
+                    
+                    // Update last refresh time
+                    const lastRefresh = document.getElementById('last-refresh');
+                    if (lastRefresh) {
+                        lastRefresh.textContent = new Date().toLocaleString();
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error updating system info:', error);
+            });
+    }
+
+    function updateProcesses() {
+        fetch('/api/status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    // Update active processes
+                    const activeProcesses = data.active_processes || [];
+                    const processTableBody = document.getElementById('process-table-body');
+                    
+                    if (processTableBody) {
+                        let processesHtml = '';
+                        
+                        if (activeProcesses.length === 0) {
+                            processesHtml = `
+                                <tr>
+                                    <td colspan="6" class="px-6 py-4 text-center text-gray-500 dark:text-gray-400">No active processes</td>
+                                </tr>
+                            `;
+                        } else {
+                            activeProcesses.forEach(process => {
+                                // Calculate progress percentage
+                                let progressStr = 'N/A';
+                                if (process.total && process.total > 0) {
+                                    const progress = (process.progress / process.total) * 100;
+                                    progressStr = `${process.progress}/${process.total} (${progress.toFixed(1)}%)`;
+                                } else if (process.last_processed_index) {
+                                    progressStr = `Index: ${process.last_processed_index}`;
+                                }
+                                
+                                // Format success/error counts
+                                let statusStr = 'N/A';
+                                if (process.success_count !== undefined || process.error_count !== undefined) {
+                                    const success = process.success_count || 0;
+                                    const errors = process.error_count || 0;
+                                    statusStr = `${success} success / ${errors} errors`;
+                                }
+                                
+                                processesHtml += `
+                                    <tr>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.type}</td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.session_id}</td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${process.user_id || 'N/A'}</td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${progressStr}</td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
+                                            ${process.last_update ? formatRelativeTime(process.last_update) : 'N/A'}
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">${statusStr}</td>
+                                    </tr>
+                                `;
+                            });
+                        }
+                        
+                        processTableBody.innerHTML = processesHtml;
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error updating processes:', error);
+            });
+    }
 </script>
 {% endblock %} 

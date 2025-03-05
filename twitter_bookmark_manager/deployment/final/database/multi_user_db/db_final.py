@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 from pathlib import Path
 import importlib.util
 import traceback
+import threading
+import time
+from sqlalchemy.pool import QueuePool
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -21,9 +24,10 @@ logger = logging.getLogger(__name__)
 _engine = None
 _session_factory = None
 _vector_store = None
+_connection_monitor = None
 
 def setup_database():
-    """Set up PostgreSQL database connection for PythonAnywhere"""
+    """Set up the database connection."""
     global _engine, _session_factory, _vector_store
     
     try:
@@ -31,6 +35,7 @@ def setup_database():
         
         # Load environment variables - try multiple possible locations
         env_paths = [
+            Path(os.path.join(os.path.dirname(__file__), ".env.final")).resolve(),
             Path('/home/mariovallereyes/twitter_bookmark_manager/.env.final').resolve(),
             Path(__file__).parents[3] / '.env.final'
         ]
@@ -44,13 +49,25 @@ def setup_database():
                 break
         
         if not env_loaded:
-            logger.error("❌ No .env.final file found in any expected location")
+            logger.warning("No .env.final file found in any expected location, using environment variables only")
         
         # First check if DATABASE_URL is provided (Railway recommends this approach)
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL:
             logger.info("Using DATABASE_URL for connection")
-            DATABASE_URI = DATABASE_URL
+            _engine = create_engine(
+                DATABASE_URL,
+                poolclass=QueuePool,
+                pool_size=5,           # Starting pool size
+                max_overflow=10,       # Allow up to 10 connections beyond pool_size
+                pool_timeout=30,       # Seconds to wait before giving up on getting a connection
+                pool_recycle=600,      # Recycle connections after 10 minutes to prevent stale connections
+                pool_pre_ping=True,    # Verify connections before using them
+                connect_args={
+                    "connect_timeout": 10,         # Connection timeout in seconds
+                    "application_name": "TwitterBookmarkManager"  # Helps identify connections in pg_stat_activity
+                }
+            )
         else:
             # Fall back to individual components
             logger.info("DATABASE_URL not found, using individual connection parameters")
@@ -59,9 +76,10 @@ def setup_database():
             DB_PASSWORD = os.getenv("DB_PASSWORD")
             DB_HOST = os.getenv("DB_HOST")
             DB_NAME = os.getenv("DB_NAME")
+            DB_PORT = os.getenv("DB_PORT", "14374")  # Default PostgreSQL port for Railway
             
             # Log database connection settings (without password)
-            logger.info(f"Database settings: USER={DB_USER}, HOST={DB_HOST}, NAME={DB_NAME}")
+            logger.info(f"Database settings: USER={DB_USER}, HOST={DB_HOST}, NAME={DB_NAME}, PORT={DB_PORT}")
             
             # Check if we have all required environment variables
             if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
@@ -75,16 +93,38 @@ def setup_database():
                 raise ValueError(error_msg)
             
             # Create connection string from individual components
-            DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:14374/{DB_NAME}?sslmode=prefer"
+            DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=prefer"
+            
+            # Create database engine with PostgreSQL and connection pooling
+            logger.info(f"Creating PostgreSQL engine with connection pooling")
+            _engine = create_engine(
+                DATABASE_URI,
+                poolclass=QueuePool,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=600,
+                pool_pre_ping=True,
+                connect_args={
+                    "connect_timeout": 10,
+                    "application_name": "TwitterBookmarkManager"
+                }
+            )
         
-        # Create database engine with PostgreSQL
-        logger.info(f"Creating PostgreSQL engine")
-        _engine = create_engine(DATABASE_URI)
-        logger.info(f"✅ Created PostgreSQL engine successfully")
+        logger.info("✅ Created PostgreSQL engine successfully")
+        
+        # Test the connection
+        with _engine.connect() as connection:
+            result = connection.execute(text("SELECT 1"))
+            assert result.scalar() == 1
+            logger.info("✅ Database connection test successful")
         
         # Create session factory
         _session_factory = scoped_session(sessionmaker(bind=_engine))
         logger.info("✅ Created session factory")
+        
+        # Start connection monitor
+        start_connection_monitor()
         
         # Import VectorStore
         try:
@@ -110,6 +150,42 @@ def setup_database():
         logger.error(f"❌ Error setting up database: {e}")
         logger.error(traceback.format_exc())
         raise
+
+def connection_monitor_thread():
+    """
+    Background thread that periodically checks database connection
+    and keeps the connection pool active.
+    """
+    logger.info("Starting database connection monitor thread")
+    while True:
+        try:
+            with _engine.connect() as connection:
+                result = connection.execute(text("SELECT 1"))
+                is_healthy = result.scalar() == 1
+                if is_healthy:
+                    logger.debug("Database connection monitor: Connection healthy")
+                else:
+                    logger.warning("Database connection monitor: Connection test returned unexpected result")
+        except Exception as e:
+            logger.error(f"Database connection monitor: Connection test failed: {e}")
+        
+        # Sleep for 5 minutes before next check
+        time.sleep(300)
+
+def start_connection_monitor():
+    """Start the background connection monitoring thread"""
+    global _connection_monitor
+    
+    if _connection_monitor is None or not _connection_monitor.is_alive():
+        _connection_monitor = threading.Thread(
+            target=connection_monitor_thread,
+            daemon=True,
+            name="DBConnectionMonitor"
+        )
+        _connection_monitor.start()
+        logger.info("Started database connection monitor thread")
+    else:
+        logger.debug("Connection monitor thread already running")
 
 # Initialize database connection on module import
 if _engine is None:
@@ -214,6 +290,37 @@ def check_database_status():
                 "DB_PASSWORD": "***" if os.getenv("DB_PASSWORD") else "Not set"
             }
         }
+
+def get_db_url():
+    """
+    Get the database URL for direct connection.
+    This is used by diagnostic tools to inspect the database.
+    
+    Returns:
+        str: The database connection URL
+    """
+    # First check if DATABASE_URL is provided (Railway recommends this approach)
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if DATABASE_URL:
+        return DATABASE_URL
+    else:
+        # Fall back to individual components
+        DB_USER = os.getenv("DB_USER")
+        DB_PASSWORD = os.getenv("DB_PASSWORD")
+        DB_HOST = os.getenv("DB_HOST")
+        DB_NAME = os.getenv("DB_NAME")
+        
+        if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
+            missing = []
+            if not DB_USER: missing.append("DB_USER")
+            if not DB_PASSWORD: missing.append("DB_PASSWORD")
+            if not DB_HOST: missing.append("DB_HOST")
+            if not DB_NAME: missing.append("DB_NAME")
+            error_msg = f"Missing required environment variables: {', '.join(missing)}"
+            logger.error(f"❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        return f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:14374/{DB_NAME}?sslmode=prefer"
 
 def get_db_connection():
     """

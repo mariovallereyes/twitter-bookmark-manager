@@ -11,13 +11,20 @@ import time
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g
 from flask.sessions import SecureCookieSessionInterface
 import uuid
 import traceback
 import shutil
 from werkzeug.utils import secure_filename
 import glob
+from flask_cors import CORS
+import requests
+import hashlib
+import psutil
+import platform
+import threading
+from sqlalchemy import text, create_engine
 
 # Import user context features
 from auth.user_context_final import UserContext, with_user_context
@@ -884,9 +891,102 @@ def path_diagnostics():
         
     return jsonify(get_system_paths_info())
 
+@app.route('/api/db-health', methods=['GET'])
+def db_health_check():
+    """
+    Simple database health check that tests the connection
+    and returns the status. This can be used by monitoring services.
+    """
+    try:
+        from database.multi_user_db.db_final import _engine
+        if _engine is None:
+            raise ValueError("Database engine not initialized")
+            
+        # Test direct connection
+        with _engine.connect() as connection:
+            result = connection.execute(text("SELECT 1"))
+            connection_ok = result.scalar() == 1
+            
+        # Get pool status
+        pool_status = {
+            "overflow": _engine.pool.overflow(),
+            "checkedin": _engine.pool.checkedin(),
+            "checkedout": _engine.pool.checkedout(),
+            "size": _engine.pool.size()
+        }
+            
+        return jsonify({
+            "status": "healthy" if connection_ok else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "connection_ok": connection_ok,
+            "pool_status": pool_status
+        }), 200 if connection_ok else 503
+        
+    except Exception as e:
+        app.logger.error(f"Database health check failed: {str(e)}")
+        return jsonify({
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }), 503
+
 @app.route('/api/db-schema', methods=['GET'])
 def db_schema_diagnostics():
-    """Endpoint to check database schema"""
+    """Check the database schema."""
+    try:
+        # Establish a connection to the database
+        from sqlalchemy import create_engine, text
+        from database.multi_user_db.db_final import get_db_url, _engine
+        
+        # Get schema information
+        engine = _engine
+        with engine.connect() as connection:
+            # Query schema information for the bookmarks table
+            result = connection.execute(
+                text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'bookmarks'")
+            )
+            
+            columns = [{"column_name": row[0], "data_type": row[1]} for row in result]
+            
+            # Get connection pool statistics if available
+            pool_stats = {}
+            if hasattr(engine, 'pool'):
+                pool_stats = {
+                    "overflow": engine.pool.overflow(),
+                    "checkedin": engine.pool.checkedin(),
+                    "checkedout": engine.pool.checkedout(),
+                    "size": engine.pool.size(),
+                    "total_connections": engine.pool.checkedin() + engine.pool.checkedout()
+                }
+            
+            # Return results
+            return jsonify({
+                "status": "ok",
+                "database_connection": "established",
+                "table_name": "bookmarks",
+                "columns": columns,
+                "pool_stats": pool_stats,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+    except Exception as e:
+        app.logger.error(f"Error getting database schema: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "database_connection": "failed",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/admin/database-diagnostics', methods=['GET'])
+@with_user_context
+def database_diagnostics_page():
+    """Admin page for database diagnostics"""
+    user = UserContext.get_current_user()
+    if not user or not getattr(user, 'is_admin', False):
+        return redirect(url_for('auth.login'))
+    
+    # Get schema information
     try:
         from sqlalchemy import create_engine, text
         from database.multi_user_db.db_final import get_db_url
@@ -901,16 +1001,55 @@ def db_schema_diagnostics():
                 SELECT column_name, data_type 
                 FROM information_schema.columns 
                 WHERE table_name = 'bookmarks'
+                ORDER BY ordinal_position
             """))
             
             columns = [{"column_name": row[0], "data_type": row[1]} for row in result]
             
-            return jsonify({
-                "table": "bookmarks",
-                "columns": columns
-            })
+            # Get sample data
+            result = conn.execute(text("""
+                SELECT id, user_id, created_at 
+                FROM bookmarks
+                LIMIT 5
+            """))
+            
+            sample_data = [{"id": row[0], "user_id": row[1], "created_at": row[2]} for row in result]
+            
+            # Test query with the correct column names
+            test_query = """
+            SELECT id, 
+                   text, 
+                   created_at, 
+                   author_name, 
+                   author_username, 
+                   media_files, 
+                   raw_data, 
+                   user_id
+            FROM bookmarks
+            LIMIT 1
+            """
+            try:
+                result = conn.execute(text(test_query))
+                test_result = "Success! Query executed without errors."
+            except Exception as e:
+                test_result = f"Error: {str(e)}"
+                
+            return render_template(
+                'admin/database_diagnostics.html',
+                schema=columns,
+                sample_data=sample_data,
+                test_result=test_result,
+                user=user,
+                is_admin=True
+            )
     except Exception as e:
-        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+        error_message = str(e)
+        return render_template(
+            'admin/database_diagnostics.html',
+            error=error_message,
+            user=user,
+            is_admin=True
+        )
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
