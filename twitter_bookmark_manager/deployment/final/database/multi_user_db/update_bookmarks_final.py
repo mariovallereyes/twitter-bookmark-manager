@@ -244,11 +244,11 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
                 for j, bookmark in enumerate(batch):
                     try:
                         # Extract the tweet URL and ID
-                        bookmark_id = str(bookmark.id)
-                        tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
+                        tweet_url = bookmark.data.get('tweet_url', 'unknown') if bookmark.data else 'unknown'
+                        tweet_id = tweet_url.split('/')[-1] if tweet_url else None
                         
                         # Skip if already processed (for incremental rebuilds)
-                        if bookmark_id in processed_ids or tweet_url in processed_ids:
+                        if tweet_id in processed_ids or tweet_url in processed_ids:
                             batch_skipped += 1
                             continue
                         
@@ -262,24 +262,24 @@ def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_ful
                         
                         # Skip empty text
                         if not bookmark.text or len(bookmark.text.strip()) == 0:
-                            logger.warning(f"⚠️ [REBUILD-{session_id}] Skipping bookmark {bookmark_id} with empty text")
+                            logger.warning(f"⚠️ [REBUILD-{session_id}] Skipping bookmark {tweet_id} with empty text")
                             continue
                         
                         # Add bookmark to vector store using its ID
                         vector_store.add_bookmark(
-                            bookmark_id=bookmark_id,
+                            bookmark_id=tweet_id,
                             text=bookmark.text or '',
                             metadata=metadata
                         )
                         
-                        processed_ids.add(bookmark_id)
+                        processed_ids.add(tweet_id)
                         processed_ids.add(tweet_url) 
                         success_count += 1
                         batch_success += 1
                         processed_this_session += 1
                         
                     except Exception as e:
-                        error_msg = f"Error adding bookmark {bookmark.id} to vector store: {str(e)}"
+                        error_msg = f"Error adding bookmark {tweet_id} to vector store: {str(e)}"
                         logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
                         error_count += 1
                         batch_errors += 1
@@ -675,9 +675,9 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         
         try:
             with get_db_session() as session:
-                # First attempt to get just id and raw_data, which are the minimum we need
+                # First attempt to get just id and data, which are the minimum we need
                 bookmark_query = """
-                    SELECT id, raw_data, user_id
+                    SELECT id, data, user_id
                     FROM bookmarks
                 """
                 params = {}
@@ -693,7 +693,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                     # Create simplified bookmark object with minimal data
                     bookmark_data = {
                         'id': row[0],
-                        'raw_data': json.loads(row[1]) if row[1] else {}
+                        'data': json.loads(row[1]) if row[1] else {}
                     }
                     
                     # Only add user_id if it's available
@@ -701,8 +701,8 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         bookmark_data['user_id'] = row[2]
                     
                     bookmark = Bookmark(**bookmark_data)
-                    if bookmark and bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
-                        existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
+                    if bookmark and bookmark.data and 'tweet_url' in bookmark.data:
+                        existing_bookmarks[bookmark.data['tweet_url']] = bookmark
                 
                 logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
                 monitor_memory("after loading existing bookmarks")
@@ -745,13 +745,13 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     # Use raw SQL to insert new bookmark
                                     insert_query = """
                                         INSERT INTO bookmarks 
-                                        (id, raw_data, user_id)
-                                        VALUES (:id, :raw_data, :user_id)
+                                        (id, data, user_id)
+                                        VALUES (:id, :data, :user_id)
                                     """
                                     # Convert Python data types to SQL-compatible types
                                     insert_params = {
                                         'id': data.get('id'),
-                                        'raw_data': json.dumps(data.get('raw_data', {})),
+                                        'data': json.dumps(data.get('data', {})),
                                         'user_id': data.get('user_id')
                                     }
                                     item_session.execute(text(insert_query), insert_params)
@@ -761,12 +761,12 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     existing = existing_bookmarks[url]
                                     update_query = """
                                         UPDATE bookmarks
-                                        SET raw_data = :raw_data
+                                        SET data = :data
                                         WHERE id = :id
                                     """
                                     update_params = {
                                         'id': existing.id,
-                                        'raw_data': json.dumps(data.get('raw_data', {}))
+                                        'data': json.dumps(data.get('data', {}))
                                     }
                                     item_session.execute(text(update_query), update_params)
                                     stats['updated_count'] += 1
