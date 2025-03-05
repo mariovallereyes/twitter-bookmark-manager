@@ -71,8 +71,16 @@ class TwitterOAuth(OAuthProvider):
             oauth.fetch_request_token(TWITTER_REQUEST_TOKEN_URL)
             authorization_url = oauth.authorization_url(TWITTER_AUTHORIZATION_URL)
             
-            # Save oauth session state
-            session['oauth_state'] = oauth.__dict__.get('_client').__dict__
+            # Save only serializable parts of the OAuth state
+            client_dict = oauth.__dict__.get('_client').__dict__
+            serializable_state = {
+                # Extract only the primitive data we need
+                'resource_owner_key': client_dict.get('resource_owner_key'),
+                'resource_owner_secret': client_dict.get('resource_owner_secret'),
+                'verifier': client_dict.get('verifier'),
+                'callback_uri': client_dict.get('callback_uri')
+            }
+            session['oauth_state'] = serializable_state
             
             return authorization_url
         except Exception as e:
@@ -95,10 +103,12 @@ class TwitterOAuth(OAuthProvider):
             
         oauth = OAuth1Session(
             client_key=self.consumer_key,
-            client_secret=self.consumer_secret
+            client_secret=self.consumer_secret,
+            resource_owner_key=oauth_state.get('resource_owner_key'),
+            resource_owner_secret=oauth_state.get('resource_owner_secret'),
+            verifier=oauth_state.get('verifier'),
+            callback_uri=oauth_state.get('callback_uri')
         )
-        # Restore state
-        oauth.__dict__.get('_client').__dict__.update(oauth_state)
         
         # Get access token
         oauth_response = oauth.parse_authorization_response(callback_data)
