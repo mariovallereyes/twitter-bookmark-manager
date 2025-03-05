@@ -932,27 +932,16 @@ def test_resumable_update():
 def get_memory_usage():
     """Get current memory usage of the process in MB"""
     try:
-        import psutil
-        import os
-        
-        # Get current process
-        process = psutil.Process(os.getpid())
-        
-        # Get memory info in bytes
-        memory_info = process.memory_info()
-        
-        # Convert to MB and return as formatted string
-        memory_mb = memory_info.rss / (1024 * 1024)
-        return f"{memory_mb:.1f}MB"
-    except Exception as e:
-        logger.error(f"Error getting memory usage: {e}")
-        # Fallback to ps command
+        # Fallback to ps command for Linux/Mac systems
         try:
             memory_kb = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
             memory_mb = float(memory_kb) / 1024
             return f"{memory_mb:.1f}MB"
         except:
             return "Unknown"
+    except Exception as e:
+        logger.error(f"Error getting memory usage: {e}")
+        return "Unknown"
 
 def monitor_memory(label=""):
     """Log current memory usage with a label"""

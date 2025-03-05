@@ -20,7 +20,6 @@ from werkzeug.utils import secure_filename
 import glob
 import requests
 import hashlib
-import psutil
 import platform
 import threading
 from sqlalchemy import text, create_engine
@@ -714,11 +713,20 @@ def system_status():
         }), 403
     
     try:
-        # Import monitoring functions
-        from ..database.multi_user_db.update_bookmarks_final import get_memory_usage
-
-        # Get current memory usage
-        memory_usage = get_memory_usage()
+        # Basic system info without psutil
+        system_info = {
+            'os': platform.platform(),
+            'python_version': platform.python_version(),
+            'cpu_count': os.cpu_count() or "Unknown",
+            'total_memory': "Not available without psutil",
+            'available_memory': "Not available without psutil"
+        }
+        
+        # Simplified memory usage without psutil
+        memory_usage = {
+            'current_mb': 0,
+            'peak_mb': 0
+        }
         
         # Check for active processes
         active_processes = []
@@ -844,40 +852,83 @@ def system_status():
             'timestamp': datetime.now().isoformat()
         }), 500
 
+@app.route('/api/get-system-paths-info', methods=['GET'])
 def get_system_paths_info():
-    """Helper function to get system path information for debugging"""
-    info = {
-        "current_dir": os.getcwd(),
-        "app_dir_exists": os.path.exists("/app"),
-        "database_dirs": []
-    }
+    """Return information about system paths and environment."""
+    # Require authentication to view system paths
+    user = UserContext.get_current_user()
+    if not user:
+        return jsonify({
+            "status": "error",
+            "message": "Authentication required"
+        }), 401
     
-    # Check various database directory combinations
-    possible_dirs = [
-        "/app/database",
-        "/database",
-        "database",
-        "./database"
-    ]
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    if not is_admin:
+        return jsonify({
+            "status": "error",
+            "message": "Admin access required"
+        }), 403
     
-    for dir_path in possible_dirs:
-        dir_info = {
-            "path": dir_path,
-            "exists": os.path.exists(dir_path),
-            "is_dir": os.path.isdir(dir_path) if os.path.exists(dir_path) else False,
-            "writable": os.access(dir_path, os.W_OK) if os.path.exists(dir_path) else False
+    try:
+        # Get system environment variables
+        env_vars = dict(os.environ)
+        
+        # Filter out sensitive information
+        sensitive_keys = ['SECRET', 'KEY', 'PASSWORD', 'TOKEN', 'CREDENTIAL']
+        for key in list(env_vars.keys()):
+            for pattern in sensitive_keys:
+                if pattern.lower() in key.lower():
+                    env_vars[key] = "***REDACTED***"
+        
+        # Get system paths
+        system_paths = {
+            'cwd': os.getcwd(),
+            'python_path': sys.path,
+            'os_temp': os.path.join(os.sep, 'tmp'),
+            'user_temp': os.path.expanduser('~/tmp')
         }
         
-        # If directory exists, list its contents
-        if dir_info["exists"] and dir_info["is_dir"]:
-            try:
-                dir_info["contents"] = os.listdir(dir_path)
-            except Exception as e:
-                dir_info["error"] = str(e)
+        # Basic system info without psutil
+        system_info = {
+            'os': platform.platform(),
+            'python_version': platform.python_version(),
+            'cpu_count': os.cpu_count() or "Unknown",
+            'total_memory': "Not available without psutil",
+            'available_memory': "Not available without psutil"
+        }
         
-        info["database_dirs"].append(dir_info)
-    
-    return info
+        # Get disk space information
+        try:
+            import shutil
+            disk_info = {}
+            
+            # Get disk usage for current directory
+            disk_usage = shutil.disk_usage(os.getcwd())
+            disk_info['current_directory'] = {
+                'path': os.getcwd(),
+                'total_gb': f"{disk_usage.total / (1024*1024*1024):.1f} GB",
+                'used_gb': f"{disk_usage.used / (1024*1024*1024):.1f} GB",
+                'free_gb': f"{disk_usage.free / (1024*1024*1024):.1f} GB",
+                'percent_used': f"{(disk_usage.used / disk_usage.total) * 100:.1f}%"
+            }
+        except Exception as e:
+            disk_info = {'error': str(e)}
+
+        return jsonify({
+            "status": "ok",
+            "system_info": system_info,
+            "system_paths": system_paths,
+            "disk_info": disk_info,
+            "environment": env_vars
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
 
 @app.route('/api/diagnostics', methods=['GET'])
 @with_user_context
