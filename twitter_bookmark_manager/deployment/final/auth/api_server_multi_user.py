@@ -884,6 +884,34 @@ def path_diagnostics():
         
     return jsonify(get_system_paths_info())
 
+@app.route('/api/db-schema', methods=['GET'])
+def db_schema_diagnostics():
+    """Endpoint to check database schema"""
+    try:
+        from sqlalchemy import create_engine, text
+        from database.multi_user_db.db_final import get_db_url
+        
+        # Get database URL
+        db_url = get_db_url()
+        engine = create_engine(db_url)
+        
+        with engine.connect() as conn:
+            # Get bookmarks table schema
+            result = conn.execute(text("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'bookmarks'
+            """))
+            
+            columns = [{"column_name": row[0], "data_type": row[1]} for row in result]
+            
+            return jsonify({
+                "table": "bookmarks",
+                "columns": columns
+            })
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port) 
