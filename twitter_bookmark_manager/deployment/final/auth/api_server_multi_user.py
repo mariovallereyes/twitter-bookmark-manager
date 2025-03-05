@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask.sessions import SecureCookieSessionInterface
-from flask_login import login_required, current_user
 import uuid
 import traceback
 import shutil
@@ -87,7 +86,10 @@ def index():
         # Don't pass user_id again, it's already in the searcher instance
         categories = searcher.get_categories()
         
-        return render_template(template, categories=categories, user=user)
+        # Check if user is admin
+        is_admin = getattr(user, 'is_admin', False)
+        
+        return render_template(template, categories=categories, user=user, is_admin=is_admin)
     finally:
         conn.close()
 
@@ -106,6 +108,9 @@ def search():
     query = request.args.get('q', '')
     author = request.args.get('author', '')
     categories = request.args.getlist('category')
+    
+    # Get admin status
+    is_admin = getattr(user, 'is_admin', False)
     
     # Get connection and search
     conn = get_db_connection()
@@ -134,7 +139,8 @@ def search():
             results=results,
             categories=all_categories,
             selected_categories=category_ids,
-            user=user
+            user=user,
+            is_admin=is_admin
         )
     finally:
         conn.close()
@@ -149,6 +155,9 @@ def recent():
     # Redirect to login if not authenticated
     if not user:
         return redirect(url_for('auth.login', next=request.url))
+    
+    # Get admin status
+    is_admin = getattr(user, 'is_admin', False)
     
     # Get connection and fetch recent bookmarks
     conn = get_db_connection()
@@ -165,7 +174,8 @@ def recent():
             'recent_final.html',
             results=results,
             categories=categories,
-            user=user
+            user=user,
+            is_admin=is_admin
         )
     finally:
         conn.close()
@@ -181,6 +191,9 @@ def categories():
     if not user:
         return redirect(url_for('auth.login', next=request.url))
     
+    # Get admin status
+    is_admin = getattr(user, 'is_admin', False)
+    
     # Get connection and fetch categories
     conn = get_db_connection()
     try:
@@ -191,7 +204,8 @@ def categories():
         return render_template(
             'categories_final.html',
             categories=categories,
-            user=user
+            user=user,
+            is_admin=is_admin
         )
     finally:
         conn.close()
@@ -604,36 +618,49 @@ def update_database():
 # Including upload-bookmarks, update-database, etc.
 
 @app.route('/admin/monitor', methods=['GET'])
-@login_required
 def monitoring_dashboard():
     """Render the monitoring dashboard page"""
-    # Only allow admin users or set a flag for when the user is an admin
+    # Only allow admin users
     user = UserContext.get_current_user()
     is_admin = getattr(user, 'is_admin', False)
     
-    # You might want to add an admin check here in a production environment
-    # if not is_admin:
-    #     flash('Admin access required')
-    #     return redirect(url_for('index'))
+    # Check for admin access
+    if not is_admin:
+        return render_template('error_final.html', 
+                              error_title="Access Denied", 
+                              error_message="Admin access required to view this page."), 403
     
-    return render_template('monitoring_final.html')
+    return render_template('monitoring_final.html', is_admin=is_admin)
 
 # Error handlers
 @app.errorhandler(404)
 def not_found_error(error):
     """404 error handler"""
-    return render_template('error_final.html', error='Page not found'), 404
+    # Get user and admin status for rendering the template
+    user = UserContext.get_current_user()
+    is_admin = getattr(user, 'is_admin', False) if user else False
+    return render_template('error_final.html', error='Page not found', is_admin=is_admin), 404
 
 @app.errorhandler(500)
 def internal_error(error):
     """500 error handler"""
     logger.error(f"Server error: {error}")
-    return render_template('error_final.html', error='Server error'), 500
+    # Get user and admin status for rendering the template
+    user = UserContext.get_current_user()
+    is_admin = getattr(user, 'is_admin', False) if user else False
+    return render_template('error_final.html', error='Server error', is_admin=is_admin), 500
 
 @app.route('/api/status', methods=['GET'])
-@login_required
 def system_status():
-    """Get system status information including memory usage and running processes"""
+    """Return system status information as JSON."""
+    # Require authentication to view system status
+    user = UserContext.get_current_user()
+    if not user:
+        return jsonify({
+            "status": "error",
+            "message": "Authentication required"
+        }), 401
+    
     try:
         # Import monitoring functions
         from ..database.multi_user_db.update_bookmarks_final import get_memory_usage

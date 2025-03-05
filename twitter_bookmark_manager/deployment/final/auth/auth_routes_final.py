@@ -176,5 +176,8 @@ def profile():
     # Get current user
     user = UserContext.get_current_user()
     
+    # Get admin status
+    is_admin = getattr(user, 'is_admin', False)
+    
     # Render profile template
-    return render_template('profile_pa.html', user=user) 
+    return render_template('profile_pa.html', user=user, is_admin=is_admin) 
