@@ -58,7 +58,7 @@ def login():
         session['next'] = request.args.get('next')
         
     # Render login template
-    return render_template('login_pa.html')
+    return render_template('login_final.html')
 
 # OAuth login initiator
 @auth_bp.route('/login/<provider>')
