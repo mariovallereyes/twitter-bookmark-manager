@@ -521,15 +521,15 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         return {'success': False, 'error': error_msg}
     
     # Process bookmarks in smaller batches
-    BATCH_SIZE = 25  # Reduced batch size
+    BATCH_SIZE = 10  # Reduced batch size for better error handling
     current_batch = []
     
     try:
-        with get_db_session() as session:
-            # Get existing bookmarks once using raw SQL instead of ORM
-            existing_bookmarks = {}
-            
-            try:
+        # Get existing bookmarks once using raw SQL instead of ORM
+        existing_bookmarks = {}
+        
+        try:
+            with get_db_session() as session:
                 # First attempt to get just id and raw_data, which are the minimum we need
                 bookmark_query = """
                     SELECT id, raw_data, user_id
@@ -560,32 +560,37 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
             
                 logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
-            except Exception as e:
-                logger.warning(f"Error querying bookmarks table: {e}")
-                logger.info("Proceeding with empty existing bookmarks")
-            
-            # Process each bookmark
-            for i, bookmark_data in enumerate(new_bookmarks, start_index):
-                try:
-                    tweet_url = bookmark_data.get('tweet_url')
-                    if not tweet_url or tweet_url in processed_ids:
-                        continue
-                        
-                    mapped_data = map_bookmark_data(bookmark_data, user_id)
-                    if not mapped_data:
-                        stats['errors'] += 1
-                        continue
+        except Exception as e:
+            logger.warning(f"Error querying bookmarks table: {e}")
+            logger.info("Proceeding with empty existing bookmarks")
+        
+        # Process each bookmark
+        for i, bookmark_data in enumerate(new_bookmarks, start_index):
+            try:
+                tweet_url = bookmark_data.get('tweet_url')
+                if not tweet_url or tweet_url in processed_ids:
+                    continue
                     
-                    # Add to current batch
-                    current_batch.append((tweet_url, mapped_data, bookmark_data))
+                mapped_data = map_bookmark_data(bookmark_data, user_id)
+                if not mapped_data:
+                    stats['errors'] += 1
+                    continue
+                
+                # Add to current batch
+                current_batch.append((tweet_url, mapped_data, bookmark_data))
+                
+                # Process batch if full or last item
+                if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) + start_index - 1:
+                    batch_success = 0
+                    batch_errors = 0
                     
-                    # Process batch if full or last item
-                    if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) + start_index - 1:
-                        # Process the batch
-                        for url, data, raw in current_batch:
+                    # Process each item in batch with separate transactions
+                    for url, data, raw in current_batch:
+                        # Use a new session for each bookmark to isolate transactions
+                        with get_db_session() as item_session:
                             try:
                                 if url not in existing_bookmarks:
-                                    # Use raw SQL to insert new bookmark instead of session.add()
+                                    # Use raw SQL to insert new bookmark
                                     insert_query = """
                                         INSERT INTO bookmarks 
                                         (id, raw_data, user_id)
@@ -597,7 +602,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                         'raw_data': json.dumps(data.get('raw_data', {})),
                                         'user_id': data.get('user_id')
                                     }
-                                    session.execute(text(insert_query), insert_params)
+                                    item_session.execute(text(insert_query), insert_params)
                                     stats['new_count'] += 1
                                 else:
                                     # Use raw SQL to update existing bookmark
@@ -611,57 +616,55 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                         'id': existing.id,
                                         'raw_data': json.dumps(data.get('raw_data', {}))
                                     }
-                                    session.execute(text(update_query), update_params)
+                                    item_session.execute(text(update_query), update_params)
                                     stats['updated_count'] += 1
                                 
+                                # Commit the individual transaction
+                                item_session.commit()
                                 processed_ids.add(url)
+                                batch_success += 1
+                                
                             except Exception as e:
+                                # Rollback the individual transaction on error
+                                item_session.rollback()
                                 logger.error(f"Error processing bookmark {url}: {e}")
                                 stats['errors'] += 1
-                        
-                        # Commit the batch
-                        session.commit()
-                        
-                        # Update progress file with session_id
-                        stats['total_processed'] = i + 1
-                        progress_data = {
-                            'session_id': session_id,
-                            'last_processed_index': i + 1,
-                            'processed_ids': list(processed_ids),
-                            'stats': stats,
-                            'last_update': datetime.now().isoformat()
-                        }
-                        
-                        with open(progress_file, 'w') as f:
-                            json.dump(progress_data, f)
-                        
-                        # Clear batch
-                        current_batch = []
-                        
-                        # Log progress with memory usage info
-                        progress_percent = ((i + 1) / total_bookmarks) * 100
-                        memory_usage = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
-                        logger.info(f"✅ [UPDATE-{session_id}] Progress: {progress_percent:.1f}% ({i + 1}/{total_bookmarks}) - Memory: {memory_usage}KB")
-                        
-                except Exception as e:
-                    logger.error(f"Error in batch processing: {e}")
-                    stats['errors'] += 1
-                    continue
+                                batch_errors += 1
+                    
+                    # Update progress file with session_id
+                    stats['total_processed'] = i + 1
+                    progress_data = {
+                        'session_id': session_id,
+                        'last_processed_index': i + 1,
+                        'processed_ids': list(processed_ids),
+                        'stats': stats,
+                        'last_update': datetime.now().isoformat()
+                    }
+                    
+                    # Log batch results
+                    logger.info(f"Batch completed: {batch_success} successful, {batch_errors} failed")
+                    
+                    with open(progress_file, 'w') as f:
+                        json.dump(progress_data, f)
+                    
+                    # Clear batch
+                    current_batch = []
+                    
+                    # Log progress with memory usage info
+                    progress_percent = ((i + 1) / total_bookmarks) * 100
+                    memory_usage = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
+                    logger.info(f"✅ [UPDATE-{session_id}] Progress: {progress_percent:.1f}% ({i + 1}/{total_bookmarks}) - Memory: {memory_usage}KB")
+                    
+            except Exception as e:
+                logger.error(f"Error in batch processing: {e}")
+                stats['errors'] += 1
+                continue
             
             # Return progress information
             is_complete = stats['total_processed'] >= total_bookmarks
             logger.info(f"🏁 [UPDATE-{session_id}] Update {'completed' if is_complete else 'in progress'}: {stats['total_processed']}/{total_bookmarks} bookmarks processed")
             
-            if is_complete:
-                # If update is complete, update the vector store too
-                logger.info("Performing final vector store rebuild")
-                rebuild_result = rebuild_vector_store(session_id, user_id)
-                if not rebuild_result[0]:
-                    logger.warning(f"Vector rebuild warning: {rebuild_result[1]}")
-                else:
-                    logger.info("Vector store rebuild successful")
-            
-            return {
+            result_data = {
                 'success': True,
                 'session_id': session_id,
                 'progress': {
@@ -670,18 +673,50 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                     'new': stats['new_count'],
                     'updated': stats['updated_count'],
                     'errors': stats['errors'],
-                    'percent_complete': (stats['total_processed'] / total_bookmarks) * 100
+                    'percent_complete': (stats['total_processed'] / total_bookmarks) * 100 if total_bookmarks > 0 else 0
                 },
                 'is_complete': is_complete,
                 'next_index': stats['total_processed'] if not is_complete else None,
-                'vector_store_updated': is_complete,
-                'vector_rebuild_result': rebuild_result if is_complete else None,
+                'vector_store_updated': False,
                 'user_id': user_id
             }
+            
+            if is_complete or stats['new_count'] > 0 or stats['updated_count'] > 0:
+                # Rebuild vector store if update is complete or if we added/updated any bookmarks
+                try:
+                    logger.info(f"Performing vector store rebuild (completed={is_complete}, new={stats['new_count']}, updated={stats['updated_count']})")
+                    rebuild_result = rebuild_vector_store(session_id, user_id)
+                    result_data['vector_store_updated'] = True
+                    result_data['vector_rebuild_result'] = rebuild_result
+                    
+                    if not rebuild_result[0]:
+                        logger.warning(f"Vector rebuild warning: {rebuild_result[1]}")
+                    else:
+                        logger.info("Vector store rebuild successful")
+                except Exception as vector_error:
+                    error_msg = f"Vector store rebuild error: {str(vector_error)}"
+                    logger.error(error_msg)
+                    result_data['vector_rebuild_error'] = error_msg
+            
+            return result_data
             
     except Exception as e:
         error_msg = f"Database error: {str(e)}"
         logger.error(error_msg)
+        
+        # Try to perform vector store rebuild even if there was an error in the main process
+        vector_rebuild_result = None
+        if stats['new_count'] > 0 or stats['updated_count'] > 0:
+            try:
+                logger.info(f"Attempting vector store rebuild despite errors (new={stats['new_count']}, updated={stats['updated_count']})")
+                vector_rebuild_result = rebuild_vector_store(session_id, user_id)
+                if not vector_rebuild_result[0]:
+                    logger.warning(f"Vector rebuild warning: {vector_rebuild_result[1]}")
+                else:
+                    logger.info("Vector store rebuild successful despite errors in main process")
+            except Exception as vector_error:
+                logger.error(f"Vector store rebuild error: {str(vector_error)}")
+        
         return {
             'success': False,
             'error': error_msg,
@@ -690,12 +725,9 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                 'last_index': start_index,
                 'stats': stats
             },
-            'user_id': user_id
+            'user_id': user_id,
+            'vector_rebuild_result': vector_rebuild_result
         }
-        
-    except Exception as e:
-        logger.error(f"Update error: {str(e)}")
-        return {'success': False, 'error': str(e), 'session_id': session_id if session_id else None, 'user_id': user_id}
 
 def test_resumable_update():
     """Test the resumable update functionality
