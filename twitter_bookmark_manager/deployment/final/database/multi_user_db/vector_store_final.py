@@ -13,9 +13,37 @@ import uuid
 import hashlib
 import random
 import string
+import gc
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Shared embedding model at module level to prevent multiple loading
+_embedding_model = None
+_model_load_count = 0
+
+def get_embedding_model():
+    """Get the shared embedding model instance"""
+    global _embedding_model, _model_load_count
+    
+    if _embedding_model is None:
+        try:
+            # Load the model and track the load count
+            from sentence_transformers import SentenceTransformer
+            logger.info("Loading sentence transformer model...")
+            _embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            _model_load_count = 1
+            logger.info(f"Loaded model with dimension {_embedding_model.get_sentence_embedding_dimension()}")
+            # Force garbage collection after model loading to free memory
+            gc.collect()
+        except Exception as e:
+            logger.error(f"Error loading embedding model: {e}")
+            raise
+    else:
+        _model_load_count += 1
+        logger.info(f"Reusing existing sentence transformer model (use count: {_model_load_count})")
+    
+    return _embedding_model
 
 class VectorStore:
     def __init__(self, persist_directory: str = None, user_id: str = None):
@@ -57,9 +85,8 @@ class VectorStore:
                         prefer_grpc=False  # Use HTTP instead of gRPC for better compatibility
                     )
                     
-                    # Initialize sentence transformer
-                    from sentence_transformers import SentenceTransformer
-                    self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                    # Use the shared embedding model instead of loading a new one
+                    self.model = get_embedding_model()
                     
                     # Create collection with a unique name since we're in memory mode
                     # If user_id is provided, include it in the collection name
@@ -81,6 +108,8 @@ class VectorStore:
                     )
                     
                     logger.info(f"✅ VectorStore initialized with Qdrant in-memory backend (collection: {self.collection_name})")
+                    # Force garbage collection after initialization
+                    gc.collect()
                     return  # Success, exit the retry loop
                     
                 except Exception as e:
@@ -98,6 +127,18 @@ class VectorStore:
         except Exception as e:
             logger.error(f"Error initializing VectorStore: {e}")
             raise
+    
+    def __del__(self):
+        """Cleanup when object is destroyed"""
+        try:
+            # Close Qdrant client if it exists
+            if hasattr(self, 'client'):
+                self.client = None
+            
+            # Force garbage collection
+            gc.collect()
+        except Exception as e:
+            logger.error(f"Error during VectorStore cleanup: {e}")
 
     def _generate_uuid(self, bookmark_id: str) -> str:
         """Generate a deterministic UUID from bookmark ID"""
@@ -112,8 +153,29 @@ class VectorStore:
                     metadata: Dict[str, Any] = None):
         """Add a single bookmark to the vector store"""
         try:
-            # Generate embedding
-            embedding = self.model.encode(text).tolist()
+            # Skip empty text
+            if not text or len(text.strip()) == 0:
+                logger.warning(f"Skipping empty text for bookmark {bookmark_id}")
+                return False
+                
+            # Truncate very long text to prevent memory issues
+            max_text_length = 2048  # SentenceTransformer can handle this length easily
+            if len(text) > max_text_length:
+                logger.debug(f"Truncating long text ({len(text)} chars) for bookmark {bookmark_id}")
+                text = text[:max_text_length]
+            
+            # Generate embedding with error handling
+            try:
+                embedding = self.model.encode(text, show_progress_bar=False).tolist()
+            except Exception as e:
+                logger.error(f"Error generating embedding for bookmark {bookmark_id}: {e}")
+                # Try with shorter text if original failed
+                if len(text) > 500:
+                    logger.info(f"Retrying with shorter text for bookmark {bookmark_id}")
+                    text = text[:500]
+                    embedding = self.model.encode(text, show_progress_bar=False).tolist()
+                else:
+                    raise
             
             # Generate UUID from bookmark ID
             point_id = self._generate_uuid(bookmark_id)
@@ -134,10 +196,10 @@ class VectorStore:
                     )
                 ]
             )
-            logger.debug(f"Added bookmark {bookmark_id} to vector store with UUID {point_id}")
+            return True
         except Exception as e:
             logger.error(f"Error adding bookmark to vector store: {e}")
-            raise
+            return False
 
     def search(self, 
                query_text: str, 
