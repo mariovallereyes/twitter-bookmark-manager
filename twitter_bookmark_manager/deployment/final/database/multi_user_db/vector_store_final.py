@@ -18,8 +18,13 @@ import string
 logger = logging.getLogger(__name__)
 
 class VectorStore:
-    def __init__(self, persist_directory: str = None):
-        """Initialize Qdrant client in memory mode to avoid lock issues"""
+    def __init__(self, persist_directory: str = None, user_id: str = None):
+        """Initialize Qdrant client in memory mode to avoid lock issues
+        
+        Args:
+            persist_directory: Directory where vector store data will be persisted
+            user_id: User ID for multi-user support to create user-specific collections
+        """
         try:
             # Define config locally to avoid dependency on pythonanywhere directory
             VECTOR_STORE_CONFIG = {
@@ -30,6 +35,9 @@ class VectorStore:
             
             # Store path for later use (may be used for backup/restore)
             self.vector_db_path = VECTOR_STORE_CONFIG['persist_directory']
+            
+            # Store user_id for filtering operations
+            self.user_id = user_id
             
             # Initialize with retry logic
             retry_count = 0
@@ -54,7 +62,13 @@ class VectorStore:
                     self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
                     
                     # Create collection with a unique name since we're in memory mode
-                    self.collection_name = f"bookmarks_{instance_id}"
+                    # If user_id is provided, include it in the collection name
+                    if user_id:
+                        self.collection_name = f"bookmarks_user_{user_id}_{instance_id}"
+                        logger.info(f"Creating user-specific collection for user_id: {user_id}")
+                    else:
+                        self.collection_name = f"bookmarks_{instance_id}"
+                    
                     self.vector_size = self.model.get_sentence_embedding_dimension()
                     
                     # Always create a new collection since we're in memory mode
@@ -126,42 +140,89 @@ class VectorStore:
             raise
 
     def search(self, 
-               query_embedding: List[float] = None,
-               query: str = None,
-               limit: int = 10,
-               n_results: int = None) -> List[Dict[str, Any]]:
-        """Search for similar bookmarks"""
-        try:
-            # Handle both embedding and text-based search
-            if query_embedding is None and query is not None:
-                query_embedding = self.model.encode(query).tolist()
-            elif query_embedding is None and query is None:
-                raise ValueError("Either query_embedding or query must be provided")
-
-            # Use n_results if provided (backward compatibility), otherwise use limit
-            final_limit = n_results if n_results is not None else limit
+               query_text: str, 
+               limit: int = 10, 
+               exclude_ids: List[str] = None) -> List[Dict[str, Any]]:
+        """Search for bookmarks similar to the query text
+        
+        Args:
+            query_text: Text to search for
+            limit: Maximum number of results to return
+            exclude_ids: List of bookmark IDs to exclude from results
             
-            # Perform the search
-            results = self.client.search(
+        Returns:
+            List of dictionaries containing bookmarks and their similarity scores
+        """
+        try:
+            # Embed the query
+            query_embedding = self.model.encode(query_text).tolist()
+            
+            # Convert exclude_ids to UUIDs
+            exclude_uuids = [self._generate_uuid(id) for id in exclude_ids] if exclude_ids else []
+            
+            # Prepare filter for excluding specific IDs
+            id_filter = None
+            if exclude_uuids:
+                id_filter = models.Filter(
+                    should_not=[
+                        models.FieldCondition(
+                            key="id",
+                            match=models.MatchAny(any=exclude_uuids)
+                        )
+                    ]
+                )
+            
+            # Add user_id filter if provided during initialization
+            if self.user_id:
+                user_filter = models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="metadata.user_id",
+                            match=models.MatchValue(value=self.user_id)
+                        )
+                    ]
+                )
+                
+                # Combine filters if we have both
+                if id_filter:
+                    # Combine user_filter and id_filter
+                    combined_filter = models.Filter(
+                        must=[
+                            models.NestedCondition(filter=user_filter.must[0])
+                        ],
+                        should_not=[
+                            models.NestedCondition(filter=id_filter.should_not[0])
+                        ]
+                    )
+                    search_filter = combined_filter
+                else:
+                    search_filter = user_filter
+            else:
+                search_filter = id_filter
+            
+            # Perform search
+            search_result = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
-                limit=final_limit
+                limit=limit,
+                filter=search_filter
             )
             
-            # Process results
-            processed_results = []
-            for result in results:
-                processed_results.append({
-                    'bookmark_id': result.payload.get('original_id'),  # Use original ID
-                    'score': result.score,
-                    'metadata': {k: v for k, v in result.payload.items() if k not in ['text', 'original_id']},
-                    'text': result.payload.get('text')
-                })
+            # Process and return results
+            results = []
+            for scored_point in search_result:
+                result = {
+                    'id': scored_point.payload.get('original_id', ''),
+                    'score': scored_point.score,
+                    'distance': 1.0 - scored_point.score,  # Convert cosine similarity to distance
+                    'metadata': scored_point.payload.get('metadata', {})
+                }
+                results.append(result)
             
-            return processed_results
-            
+            return results
+        
         except Exception as e:
-            logger.error(f"Search error in VectorStore: {e}")
+            logger.error(f"Error searching in vector store: {e}")
             return []
 
     def delete_bookmark(self, bookmark_id: str):

@@ -110,7 +110,7 @@ def map_bookmark_data(data):
         logger.error(f"Error mapping bookmark data: {e}")
         return None
 
-def rebuild_vector_store_final(session_id=None):
+def rebuild_vector_store_final(session_id=None, user_id=None):
     """Rebuild the vector store from the database
     
     This function rebuilds the vector store by adding all bookmarks from the 
@@ -118,6 +118,7 @@ def rebuild_vector_store_final(session_id=None):
     
     Args:
         session_id: Optional session identifier for logging purposes
+        user_id: Optional user ID for multi-user support
         
     Returns:
         Dict with rebuild results and status
@@ -126,17 +127,24 @@ def rebuild_vector_store_final(session_id=None):
         session_id = str(uuid.uuid4())[:8]
         
     logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store (Qdrant) rebuild process")
+    if user_id:
+        logger.info(f"👤 [REBUILD-{session_id}] Processing for user_id: {user_id}")
     start_time = datetime.now()
     
     try:
-        # Initialize a new vector store
-        vector_store = VectorStore()
+        # Initialize a new vector store with user_id if provided
+        vector_store = VectorStore(user_id=user_id)
         logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
         
-        # Get all bookmarks from PostgreSQL
+        # Get all bookmarks from PostgreSQL, filtered by user_id if provided
         with get_db_session() as session:
+            # Create query that filters by user_id if provided
+            query = session.query(Bookmark)
+            if user_id:
+                query = query.filter(Bookmark.user_id == user_id)
+                
             # Count total bookmarks first for logging
-            total_count = session.query(Bookmark).count()
+            total_count = query.count()
             logger.info(f"📊 [REBUILD-{session_id}] Found {total_count} bookmarks in PostgreSQL database")
             
             if total_count == 0:
@@ -146,7 +154,8 @@ def rebuild_vector_store_final(session_id=None):
                     "message": "No bookmarks found in database",
                     "postgres_count": 0,
                     "vector_count": 0,
-                    "duration_seconds": (datetime.now() - start_time).total_seconds()
+                    "duration_seconds": (datetime.now() - start_time).total_seconds(),
+                    "user_id": user_id
                 }
             
             # Process bookmarks in batches to avoid memory issues
@@ -157,7 +166,7 @@ def rebuild_vector_store_final(session_id=None):
             
             # Use batched query to reduce memory pressure
             for i in range(0, total_count, BATCH_SIZE):
-                batch = session.query(Bookmark).limit(BATCH_SIZE).offset(i).all()
+                batch = query.limit(BATCH_SIZE).offset(i).all()
                 batch_size = len(batch)
                 
                 logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i // BATCH_SIZE + 1}: {batch_size} bookmarks")
@@ -172,7 +181,8 @@ def rebuild_vector_store_final(session_id=None):
                         metadata = {
                             'tweet_url': tweet_url,
                             'screen_name': bookmark.author_username or '',
-                            'author_name': bookmark.author_name or ''
+                            'author_name': bookmark.author_name or '',
+                            'user_id': user_id if user_id else bookmark.user_id
                         }
                         
                         # Add bookmark to vector store using its ID
@@ -212,6 +222,7 @@ def rebuild_vector_store_final(session_id=None):
             duration = (datetime.now() - start_time).total_seconds()
             logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed in {duration:.2f} seconds")
             logger.info(f"📊 [REBUILD-{session_id}] Summary:")
+            logger.info(f"  - User ID: {user_id if user_id else 'All users'}")
             logger.info(f"  - PostgreSQL bookmark count: {total_count}")
             logger.info(f"  - Vector store count: {vector_count}")
             logger.info(f"  - Successful additions: {success_count}")
@@ -231,7 +242,8 @@ def rebuild_vector_store_final(session_id=None):
                 "successful_additions": success_count,
                 "errors": error_count,
                 "duration_seconds": duration,
-                "is_in_sync": total_count == vector_count
+                "is_in_sync": total_count == vector_count,
+                "user_id": user_id
             }
             
     except Exception as e:
@@ -243,16 +255,18 @@ def rebuild_vector_store_final(session_id=None):
             "success": False,
             "error": error_msg,
             "traceback": traceback.format_exc(),
-            "duration_seconds": (datetime.now() - start_time).total_seconds()
+            "duration_seconds": (datetime.now() - start_time).total_seconds(),
+            "user_id": user_id
         }
 
-def detect_update_loop(progress_file, max_loop_count=3):
+def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
     """
     Detect and prevent infinite update loops by analyzing the progress file
     
     Args:
         progress_file (str): Path to the progress file
         max_loop_count (int): Maximum number of times an index can be repeated
+        user_id: Optional user ID for multi-user support
         
     Returns:
         tuple: (is_in_loop, loop_data) where loop_data contains diagnostic information
@@ -263,6 +277,12 @@ def detect_update_loop(progress_file, max_loop_count=3):
             
         with open(progress_file, 'r') as f:
             progress = json.load(f)
+            
+        # Check if progress file belongs to current user
+        if user_id and progress.get('user_id') != user_id:
+            # Create new progress file for this user
+            logger.warning(f"⚠️ Progress file belongs to different user. Creating new progress for user {user_id}")
+            return False, {"message": f"Progress file belongs to different user. Creating new for {user_id}"}
             
         # Check if we have a 'loop_detection' field already
         loop_detection = progress.get('loop_detection', {})
@@ -294,6 +314,10 @@ def detect_update_loop(progress_file, max_loop_count=3):
         
         # Update the progress file with loop detection data
         progress['loop_detection'] = loop_detection
+        # Add user_id to progress
+        if user_id:
+            progress['user_id'] = user_id
+            
         with open(progress_file, 'w') as f:
             json.dump(progress, f)
             
@@ -305,7 +329,8 @@ def detect_update_loop(progress_file, max_loop_count=3):
             "occurrences": loop_detection['count'].get(str(current_index), 0),
             "recent_indices": loop_detection['indices'],
             "timestamps": loop_detection['timestamps'],
-            "is_in_loop": is_in_loop
+            "is_in_loop": is_in_loop,
+            "user_id": user_id
         }
             
     except Exception as e:
@@ -313,7 +338,7 @@ def detect_update_loop(progress_file, max_loop_count=3):
         return False, {"error": str(e)}
 
 # Enhance the update_bookmarks function with better debugging and vector store updates
-def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False):
+def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
     """Function to update bookmarks from JSON file
     
     This version has enhanced debugging, error handling, and vector store updates.
@@ -323,36 +348,68 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
         session_id: Optional identifier for this update session (for resumable operations)
         start_index: Index to start processing from (for resumable operations)
         rebuild_vector: Whether to rebuild the vector store after updating
+        user_id: Optional user ID for multi-user support
         
     Returns:
         Dict with update results and status
     """
     # Generate a session ID if not provided
     if not session_id:
-        session_id = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())[:8]
         
-    # Set up progress tracking
-    progress_file = os.path.join(LOG_DIR, f'update_progress_{session_id}.json')
+    # Set up user-specific paths
+    if user_id:
+        logger.info(f"👤 [UPDATE-{session_id}] Processing for user_id: {user_id}")
+        
+        # Define user-specific directories
+        from pathlib import Path
+        user_dir = f"user_{user_id}"
+        base_dir = Path(app.root_path).parent.parent if 'app' in globals() else Path(DATABASE_DIR).parent
+        database_dir = base_dir / "database" / user_dir
+        
+        # Ensure directories exist
+        database_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Set up user-specific progress file
+        progress_file = database_dir / 'update_progress.json'
+        bookmarks_file = database_dir / 'twitter_bookmarks.json'
+    else:
+        # Use default paths
+        progress_file = os.path.join(LOG_DIR, f'update_progress_{session_id}.json')
+        bookmarks_file = os.path.join(DATABASE_DIR, 'twitter_bookmarks.json')
     
     logger.info(f"Starting final environment bookmark update process for session {session_id} from index {start_index}")
+    logger.info(f"Using bookmarks file: {bookmarks_file}")
+    logger.info(f"Using progress file: {progress_file}")
+    
+    # Check if bookmarks file exists
+    if not os.path.exists(bookmarks_file):
+        logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
+        return {
+            'success': False,
+            'error': f'Bookmarks file not found: {bookmarks_file}',
+            'session_id': session_id,
+            'user_id': user_id
+        }
     
     # If rebuild_vector is True, only rebuild vector store and return
     if rebuild_vector:
         logger.info("Rebuild vector flag is set, rebuilding vector store")
-        rebuild_result = rebuild_vector_store_final(session_id)
+        rebuild_result = rebuild_vector_store_final(session_id, user_id)
         return {
             'success': rebuild_result[0],
             'message': 'Vector store rebuild complete',
             'details': rebuild_result,
-            'session_id': session_id
+            'session_id': session_id,
+            'user_id': user_id
         }
         
     # Check for update loops
-    is_in_loop, loop_data = detect_update_loop(progress_file)
+    is_in_loop, loop_data = detect_update_loop(progress_file, user_id=user_id)
     if is_in_loop:
         logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
         # Force a vector rebuild to break the loop
-        rebuild_result = rebuild_vector_store_final(session_id)
+        rebuild_result = rebuild_vector_store_final(session_id, user_id)
         
         # Reset progress file to start fresh
         if os.path.exists(progress_file):
@@ -374,7 +431,8 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
             'loop_data': loop_data,
             'rebuild_result': rebuild_result,
             'session_id': session_id,
-            'is_complete': True
+            'is_complete': True,
+            'user_id': user_id
         }
 
     # Load progress if exists
@@ -383,9 +441,21 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
         try:
             with open(progress_file, 'r') as f:
                 current_progress = json.load(f)
-            logger.info(f"Loaded progress: {current_progress}")
+            
+            # Check if progress belongs to current user
+            if user_id and current_progress.get('user_id') != user_id:
+                logger.info(f"Progress file exists but belongs to different user, creating new for user {user_id}")
+                current_progress = {'user_id': user_id}
+            elif user_id:
+                logger.info(f"Loaded progress for user {user_id}: {current_progress}")
+            else:
+                logger.info(f"Loaded progress: {current_progress}")
         except Exception as e:
             logger.error(f"Error loading progress: {e}")
+    
+    # Add user_id to progress if not present
+    if user_id and 'user_id' not in current_progress:
+        current_progress['user_id'] = user_id
     
     # Use provided start_index or resume from saved progress if start_index is 0
     if start_index == 0 and current_progress.get('last_processed_index'):
@@ -505,7 +575,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
             if is_complete:
                 # If update is complete, update the vector store too
                 logger.info("Performing final vector store rebuild")
-                rebuild_result = rebuild_vector_store_final(session_id)
+                rebuild_result = rebuild_vector_store_final(session_id, user_id)
                 if not rebuild_result[0]:
                     logger.warning(f"Vector rebuild warning: {rebuild_result[1]}")
                 else:
@@ -525,7 +595,8 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
                 'is_complete': is_complete,
                 'next_index': stats['total_processed'] if not is_complete else None,
                 'vector_store_updated': is_complete,
-                'vector_rebuild_result': rebuild_result if is_complete else None
+                'vector_rebuild_result': rebuild_result if is_complete else None,
+                'user_id': user_id
             }
             
     except Exception as e:
@@ -538,12 +609,13 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False)
             'progress': {
                 'last_index': start_index,
                 'stats': stats
-            }
+            },
+            'user_id': user_id
         }
         
     except Exception as e:
         logger.error(f"Update error: {str(e)}")
-        return {'success': False, 'error': str(e), 'session_id': session_id if session_id else None}
+        return {'success': False, 'error': str(e), 'session_id': session_id if session_id else None, 'user_id': user_id}
 
 def test_resumable_update():
     """Test the resumable update functionality
