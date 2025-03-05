@@ -60,7 +60,7 @@ def setup_logger(name, log_file):
 
 logger = setup_logger('final_update', LOG_FILE)
 
-def map_bookmark_data(data):
+def map_bookmark_data(data, user_id=None):
     """Map JSON data to Bookmark model fields"""
     try:
         # Extract tweet ID from URL
@@ -96,7 +96,8 @@ def map_bookmark_data(data):
             'author_name': data.get('name'),
             'author_username': data.get('screen_name'),
             'media_files': data.get('media_files', {}),
-            'raw_data': data
+            'raw_data': data,
+            'user_id': user_id
         }
         
         # Validate required fields
@@ -570,7 +571,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                     if not tweet_url or tweet_url in processed_ids:
                         continue
                         
-                    mapped_data = map_bookmark_data(bookmark_data)
+                    mapped_data = map_bookmark_data(bookmark_data, user_id)
                     if not mapped_data:
                         stats['errors'] += 1
                         continue
