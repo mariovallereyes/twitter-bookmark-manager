@@ -326,55 +326,82 @@ def upload_bookmarks():
         if not file.filename.endswith('.json'):
             return jsonify({"error": "File must be a JSON file"}), 400
         
-        # Create user directory if it doesn't exist
-        user_dir = get_user_directory(user_id)
-        os.makedirs(user_dir, exist_ok=True)
-        
-        # Save the file
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(user_dir, filename)
-        file.save(filepath)
-        logger.info(f"File saved to {filepath}")
-        
-        # Generate session ID for background processing
-        session_id = f"upload_{int(time.time())}_{secrets.token_hex(4)}"
-        
-        # Start background processing
-        thread = threading.Thread(
-            target=lambda: background_process(user_id, filepath, session_id),
-            daemon=True
-        )
-        thread.start()
-        logger.info(f"Started background processing thread for session {session_id}")
-        
-        return jsonify({
-            "success": True,
-            "message": "File uploaded successfully. Processing started in background.",
-            "filename": filename,
-            "session_id": session_id
-        })
-        
+        try:
+            # Create user directory if it doesn't exist
+            user_dir = get_user_directory(user_id)
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Save the file
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(user_dir, filename)
+            file.save(filepath)
+            logger.info(f"File saved to {filepath}")
+            
+            # Generate a simple session ID
+            session_id = f"upload_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            
+            # Start background processing immediately but don't wait for it
+            def background_process():
+                logger.info(f"Starting background processing for user {user_id}, file {filepath}")
+                try:
+                    # Basic retry mechanism right in the background thread
+                    max_retries = 3
+                    retry_delay = 2
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            # Force closing any lingering connections before starting
+                            close_all_sessions()
+                            
+                            # Process the uploaded file with a fresh connection
+                            result = final_update_bookmarks(
+                                user_id=user_id,
+                                file_path=filepath,
+                                session_id=session_id,
+                                rebuild_vector_store=True,  # Always rebuild for consistency
+                                reset_progress=False
+                            )
+                            logger.info(f"Background processing completed: {result}")
+                            break  # Success, exit retry loop
+                            
+                        except Exception as retry_error:
+                            if "connection" in str(retry_error).lower() and attempt < max_retries - 1:
+                                logger.warning(f"Connection error in background processing (attempt {attempt+1}/{max_retries}): {retry_error}")
+                                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                            else:
+                                logger.error(f"Final error in background processing: {retry_error}")
+                                logger.error(traceback.format_exc())
+                                break
+                except Exception as e:
+                    logger.error(f"Unhandled error in background thread: {e}")
+                    logger.error(traceback.format_exc())
+                    
+                # Always ensure connections are cleaned up when thread exits
+                try:
+                    close_all_sessions()
+                except:
+                    pass
+                    
+            # Start background thread
+            t = threading.Thread(target=background_process, daemon=True)
+            t.start()
+            logger.info(f"Started background processing in thread for session {session_id}")
+            
+            return jsonify({
+                "success": True,
+                "message": "File uploaded successfully and processing started in background.",
+                "filename": filename,
+                "session_id": session_id
+            })
+            
+        except (OSError, IOError) as file_error:
+            logger.error(f"File system error: {file_error}")
+            return jsonify({"error": f"Error saving file: {str(file_error)}"}), 500
+            
     except Exception as e:
         logger.error(f"Error in upload_bookmarks: {e}")
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
-    
-    def background_process(user_id, filepath, session_id):
-        """Background function to process the uploaded file."""
-        logger.info(f"Starting background processing for user {user_id}, file {filepath}")
-        try:
-            # Process the uploaded file
-            result = final_update_bookmarks(
-                user_id=user_id,
-                file_path=filepath,
-                session_id=session_id,
-                rebuild_vector_store=True,  # Always rebuild to ensure consistency
-                reset_progress=False
-            )
-            logger.info(f"Background processing completed: {result}")
-        except Exception as e:
-            logger.error(f"Error in background processing: {e}")
-            traceback.print_exc()
 
 # Update database endpoint
 @app.route('/update-database', methods=['POST', 'GET'])

@@ -15,7 +15,8 @@ import importlib.util
 import traceback
 import threading
 import time
-from sqlalchemy.pool import QueuePool
+import random
+from sqlalchemy.pool import QueuePool, NullPool
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -26,12 +27,50 @@ _session_factory = None
 _vector_store = None
 _connection_monitor = None
 
+# Simple retry decorator for database operations
+def with_retries(max_attempts=3, backoff_factor=0.5):
+    """Decorator to retry database operations that fail due to connection issues"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    # Only retry on connection-related errors
+                    if any(err in str(e).lower() for err in 
+                           ['connection', 'reset', 'broken pipe', 'timeout']):
+                        logger.warning(f"Connection error in {func.__name__}, attempt {attempt+1}/{max_attempts}: {e}")
+                        if attempt < max_attempts - 1:
+                            # Add jitter to prevent thundering herd
+                            sleep_time = backoff_factor * (2 ** attempt) * (0.8 + 0.4 * random.random())
+                            time.sleep(sleep_time)
+                            # Try to recreate engine on connection failures
+                            global _engine
+                            try:
+                                if _engine:
+                                    _engine.dispose()
+                                setup_database()
+                            except:
+                                pass
+                        else:
+                            logger.error(f"Failed after {max_attempts} attempts: {e}")
+                            raise
+                    else:
+                        # Don't retry on non-connection errors
+                        logger.error(f"Non-connection error in {func.__name__}: {e}")
+                        raise
+            raise last_exception
+        return wrapper
+    return decorator
+
 def setup_database():
     """Set up the database connection."""
     global _engine, _session_factory, _vector_store
     
     try:
-        logger.info("Loading PythonAnywhere database module")
+        logger.info("Loading database module with NullPool to prevent connection leaks")
         
         # Load environment variables - try multiple possible locations
         env_paths = [
@@ -54,28 +93,23 @@ def setup_database():
         # First check if DATABASE_URL is provided (Railway recommends this approach)
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL:
-            logger.info("Using DATABASE_URL for connection")
+            logger.info("Using DATABASE_URL for connection with NullPool")
             _engine = create_engine(
                 DATABASE_URL,
-                poolclass=QueuePool,
-                pool_size=1,            # CRITICAL: Use minimal pool size (1) to avoid connection leaks
-                max_overflow=1,         # CRITICAL: Very limited overflow to avoid overloading the DB
-                pool_timeout=3,         # Fail faster (3 seconds) on connection timeout
-                pool_recycle=30,        # CRITICAL: Super aggressive connection recycling (30 seconds)
-                pool_pre_ping=True,     # Always ping before using a connection
+                poolclass=NullPool,  # CRITICAL: Use NullPool to avoid connection pooling issues
                 connect_args={
                     "connect_timeout": 3,            # Very short connection timeout
                     "application_name": "TwitterBookmarkManager",
                     "keepalives": 1,                 # Enable TCP keepalives
-                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle (REDUCED)
-                    "keepalives_interval": 3,        # Check every 3 seconds (REDUCED)
+                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle
+                    "keepalives_interval": 1,        # Check every 1 second (REDUCED further)
                     "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
-                    "options": "-c statement_timeout=5000"  # 5 second statement timeout (REDUCED)
+                    "options": "-c statement_timeout=5000"  # 5 second statement timeout
                 }
             )
         else:
             # Fall back to individual components
-            logger.info("DATABASE_URL not found, using individual connection parameters")
+            logger.info("DATABASE_URL not found, using individual connection parameters with NullPool")
             # Get database connection settings with fallbacks
             DB_USER = os.getenv("DB_USER")
             DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -100,24 +134,19 @@ def setup_database():
             # Create connection string from individual components
             DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=prefer"
             
-            # Create database engine with PostgreSQL and connection pooling
-            logger.info(f"Creating PostgreSQL engine with connection pooling")
+            # Create database engine with PostgreSQL and no connection pooling
+            logger.info(f"Creating PostgreSQL engine with NO connection pooling (NullPool)")
             _engine = create_engine(
                 DATABASE_URI,
-                poolclass=QueuePool,
-                pool_size=1,            # CRITICAL: Use minimal pool size (1) to avoid connection leaks
-                max_overflow=1,         # CRITICAL: Very limited overflow to avoid overloading the DB
-                pool_timeout=3,         # Fail faster (3 seconds) on connection timeout
-                pool_recycle=30,        # CRITICAL: Super aggressive connection recycling (30 seconds)
-                pool_pre_ping=True,     # Always ping before using a connection
+                poolclass=NullPool,  # CRITICAL: Use NullPool to avoid connection pooling issues
                 connect_args={
                     "connect_timeout": 3,            # Very short connection timeout
                     "application_name": "TwitterBookmarkManager",
                     "keepalives": 1,                 # Enable TCP keepalives
-                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle (REDUCED)
-                    "keepalives_interval": 3,        # Check every 3 seconds (REDUCED)
+                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle
+                    "keepalives_interval": 1,        # Check every 1 second (REDUCED further)
                     "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
-                    "options": "-c statement_timeout=5000"  # 5 second statement timeout (REDUCED)
+                    "options": "-c statement_timeout=5000"  # 5 second statement timeout
                 }
             )
         
@@ -248,145 +277,85 @@ def get_vector_store():
         _vector_store = VectorStore()
     return _vector_store
 
+# Apply the retry decorator to the db_session context manager
 @contextmanager
 def db_session() -> Generator:
     """Context manager for database sessions with extremely aggressive connection handling"""
     session = None
-    max_retries = 2  # Reduce to 2 retries to fail faster
-    retry_count = 0
-    last_error = None
     
-    while retry_count < max_retries:
+    try:
+        session = get_session()
+        # Set a short statement timeout
+        session.execute(text("SET statement_timeout = 3000"))  # Shorter timeout: 3 seconds
+        yield session
+        
+        # Try to commit changes with a timeout
         try:
-            session = get_session()
-            # Set a short statement timeout
-            session.execute(text("SET statement_timeout = 5000"))  # 5 seconds
-            yield session
+            session.commit()
+            logger.debug("Session committed successfully")
+        except Exception as commit_error:
+            session.rollback()
+            logger.warning(f"Commit failed, rolling back: {commit_error}")
+            raise
             
-            # Try to commit changes with a timeout
+    except Exception as session_error:
+        logger.error(f"Session error: {session_error}")
+        raise
+        
+    finally:
+        if session:
             try:
-                session.commit()
-                logger.debug("Session committed successfully")
-                break  # Success, exit the retry loop
-            except Exception as commit_error:
-                session.rollback()
-                logger.warning(f"Commit failed (attempt {retry_count+1}/{max_retries}): {commit_error}")
-                last_error = commit_error
-                retry_count += 1
-                if retry_count >= max_retries:
-                    logger.error(f"Failed to commit after {max_retries} attempts: {commit_error}")
-                    raise
-                # Short delay before retry
-                time.sleep(0.2 * retry_count)  # Reduced backoff delay
-                
-        except Exception as session_error:
-            last_error = session_error
-            logger.error(f"Session error (attempt {retry_count+1}/{max_retries}): {session_error}")
-            retry_count += 1
-            if retry_count >= max_retries:
-                logger.error(f"Failed to execute session after {max_retries} attempts: {session_error}")
-                raise
-            # Short delay before retry
-            time.sleep(0.2 * retry_count)  # Reduced backoff delay
-            
-        finally:
-            if session:
-                try:
-                    # Force immediate return of connection to pool
-                    session.close()
-                    # Explicitly remove session
-                    if hasattr(session, 'remove'):
-                        session.remove()
-                    logger.debug("Session closed and removed")
-                except Exception as close_error:
-                    logger.warning(f"Error closing session: {close_error}")
-                    # Don't raise here, as we may have already succeeded with the transaction
+                # Force immediate return of connection to pool
+                session.close()
+                # Explicitly remove session
+                if hasattr(_session_factory, 'remove'):
+                    _session_factory.remove()
+                logger.debug("Session closed and removed")
+            except Exception as close_error:
+                logger.warning(f"Error closing session: {close_error}")
 
-def init_database():
-    """Verify database connection for PythonAnywhere and initialize vector store"""
-    try:
-        # Test database connection
-        with db_session() as session:
-            session.execute(text("SELECT 1"))
-        logger.info("✅ PostgreSQL database connection verified")
-        
-        # Test vector store initialization
-        vector_store = get_vector_store()
-        logger.info("✅ Vector store initialized successfully")
-        
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize database system: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
-def check_database_status():
-    """Check database connection status and configuration"""
-    try:
-        # Testing the database connection
-        engine = get_engine()
-        with engine.connect() as connection:
-            result = connection.execute(text("SELECT 1"))
-            connection_ok = result.scalar() == 1
-            logger.info("✅ Database connection test: SUCCESS")
-            
-        return {
-            "database_connection": "ok" if connection_ok else "error",
-            "database_type": "PostgreSQL",
-            "database_url": "Using DATABASE_URL environment variable" if os.getenv("DATABASE_URL") else "Not using DATABASE_URL",
-            "connection_string": "Configured" if _engine else "Not configured",
-            "environment_variables": {
-                "DB_HOST": os.getenv("DB_HOST", "Not set"),
-                "DB_NAME": os.getenv("DB_NAME", "Not set"),
-                "DB_USER": os.getenv("DB_USER", "Not set"),
-                "DB_PASSWORD": "***" if os.getenv("DB_PASSWORD") else "Not set"
-            }
-        }
-    except Exception as e:
-        logger.error(f"❌ Database connection test failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {
-            "database_connection": "error",
-            "error_message": str(e),
-            "environment_variables": {
-                "DB_HOST": os.getenv("DB_HOST", "Not set"),
-                "DB_NAME": os.getenv("DB_NAME", "Not set"),
-                "DB_USER": os.getenv("DB_USER", "Not set"),
-                "DB_PASSWORD": "***" if os.getenv("DB_PASSWORD") else "Not set"
-            }
-        }
-
-def get_db_url():
-    """
-    Get the database URL for direct connection.
-    This is used by diagnostic tools to inspect the database.
+# Apply retry decorator to check_engine_health function
+@with_retries(max_attempts=3)
+def check_engine_health():
+    """Check if the engine/pool is healthy and recreate if needed"""
+    global _engine, _session_factory
     
-    Returns:
-        str: The database connection URL
-    """
-    # First check if DATABASE_URL is provided (Railway recommends this approach)
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if DATABASE_URL:
-        return DATABASE_URL
-    else:
-        # Fall back to individual components
-        DB_USER = os.getenv("DB_USER")
-        DB_PASSWORD = os.getenv("DB_PASSWORD")
-        DB_HOST = os.getenv("DB_HOST")
-        DB_NAME = os.getenv("DB_NAME")
-        
-        if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
-            missing = []
-            if not DB_USER: missing.append("DB_USER")
-            if not DB_PASSWORD: missing.append("DB_PASSWORD")
-            if not DB_HOST: missing.append("DB_HOST")
-            if not DB_NAME: missing.append("DB_NAME")
-            error_msg = f"Missing required environment variables: {', '.join(missing)}"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        return f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:14374/{DB_NAME}?sslmode=prefer"
+    try:
+        if not _engine:
+            logger.warning("Database engine is None, creating new engine")
+            setup_database()
+            return {"healthy": False, "message": "Engine was None, recreated"}
+            
+        try:
+            # Quick connection test
+            with _engine.connect() as conn:
+                result = conn.execute(text("SELECT 1")).scalar()
+                if result == 1:
+                    return {"healthy": True, "message": "Connection test passed"}
+                else:
+                    raise Exception("Connection test returned unexpected result")
+        except Exception as e:
+            logger.error(f"Connection test failed: {e}")
+            logger.warning("Recreating database engine due to connection failure")
+            
+            # Dispose of existing engine
+            try:
+                if _engine:
+                    _engine.dispose()
+            except Exception as dispose_error:
+                logger.error(f"Error disposing engine: {dispose_error}")
+                
+            # Create new engine
+            setup_database()
+            return {"healthy": False, "message": f"Connection failed: {str(e)}, engine recreated"}
+            
+        return {"healthy": True, "message": "Engine health check passed"}
+    except Exception as e:
+        logger.error(f"Error in check_engine_health: {e}")
+        return {"healthy": False, "message": f"Error during health check: {str(e)}"}
 
+# Apply the retry decorator to get_db_connection
+@with_retries(max_attempts=3)
 def get_db_connection():
     """
     Get a PostgreSQL database connection.
@@ -482,45 +451,6 @@ def cleanup_db_connections():
         logger.error(f"Unhandled exception in cleanup_db_connections: {e}")
         logger.error(traceback.format_exc())
         
-# Function to check engine health and recreate if needed
-def check_engine_health():
-    """Check if the engine/pool is healthy and recreate if needed"""
-    global _engine, _session_factory
-    
-    try:
-        if not _engine:
-            logger.warning("Database engine is None, creating new engine")
-            setup_database()
-            return {"healthy": False, "message": "Engine was None, recreated"}
-            
-        try:
-            # Quick connection test
-            with _engine.connect() as conn:
-                result = conn.execute(text("SELECT 1")).scalar()
-                if result == 1:
-                    return {"healthy": True, "message": "Connection test passed"}
-                else:
-                    raise Exception("Connection test returned unexpected result")
-        except Exception as e:
-            logger.error(f"Connection test failed: {e}")
-            logger.warning("Recreating database engine due to connection failure")
-            
-            # Dispose of existing engine
-            try:
-                if _engine:
-                    _engine.dispose()
-            except Exception as dispose_error:
-                logger.error(f"Error disposing engine: {dispose_error}")
-                
-            # Create new engine
-            setup_database()
-            return {"healthy": False, "message": f"Connection failed: {str(e)}, engine recreated"}
-            
-        return {"healthy": True, "message": "Engine health check passed"}
-    except Exception as e:
-        logger.error(f"Error in check_engine_health: {e}")
-        return {"healthy": False, "message": f"Error during health check: {str(e)}"}
-
 # Helper function to close all active sessions
 def close_all_sessions():
     """Close all active sessions and remove them from the registry"""
