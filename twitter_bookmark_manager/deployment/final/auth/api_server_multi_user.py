@@ -12,6 +12,7 @@ import secrets
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from functools import wraps
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -40,6 +41,7 @@ import requests
 import hashlib
 import platform
 from sqlalchemy import text, create_engine
+import random
 
 # Import user context features
 from auth.user_context_final import UserContext, with_user_context
@@ -50,8 +52,16 @@ DATABASE_DIR = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database')
 MEDIA_DIR = os.environ.get('MEDIA_DIR', os.path.join(BASE_DIR, 'media'))
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('api_server_multi_user.log')
+    ]
+)
 logger = logging.getLogger('api_server_multi_user')
+logger.info("Starting multi-user API server...")
 
 # Import user authentication components
 from auth.auth_routes_final import auth_bp
@@ -60,11 +70,14 @@ from auth.user_context_final import UserContextMiddleware
 from database.multi_user_db.user_model_final import get_user_by_id
 
 # Import database modules
-from database.multi_user_db.db_final import get_db_connection, create_tables, cleanup_db_connections, check_engine_health
+from database.multi_user_db.db_final import get_db_connection, create_tables, cleanup_db_connections, check_engine_health, Session, close_all_sessions, get_engine
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.update_bookmarks_final import (
     final_update_bookmarks,
-    rebuild_vector_store
+    rebuild_vector_store,
+    detect_update_loop,
+    find_file_in_possible_paths,
+    get_user_directory
 )
 from database.multi_user_db.vector_store_final import VectorStore
 
@@ -89,11 +102,15 @@ def check_db_health():
         return
         
     try:
-        # Perform a health check
-        check_engine_health()
+        # Only check health on percentage of requests to avoid overhead
+        if random.random() < 0.1:  # 10% of requests
+            health = check_engine_health()
+            if not health['healthy']:
+                logger.warning(f"Database health check failed: {health['message']}")
+                # Don't fail the request, just log the issue
     except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        # Don't fail the request, just log the error
+        logger.error(f"Error checking database health: {e}")
+        # Continue processing the request even if health check fails
 
 # Configure app
 app.config.update(
@@ -289,95 +306,75 @@ def api_categories():
 @app.route('/upload-bookmarks', methods=['POST'])
 def upload_bookmarks():
     """
-    Simplified endpoint for uploading bookmarks JSON file.
+    Endpoint for uploading bookmarks JSON file and starting processing.
+    This is a simplified version that focuses on reliability.
     """
     try:
-        user_id = UserContext.get_user_id()
-        logger.info(f"Upload bookmarks request received for user {user_id}")
-        
+        # Get current user's ID for the file path
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "User not authenticated"}), 401
+            
+        # Ensure a file was uploaded
         if 'file' not in request.files:
-            logger.error("No file part in the request")
-            return jsonify({'error': 'No file part'}), 400
+            return jsonify({"error": "No file provided"}), 400
             
         file = request.files['file']
         if file.filename == '':
-            logger.error("No file selected")
-            return jsonify({'error': 'No file selected'}), 400
+            return jsonify({"error": "No file selected"}), 400
             
         if not file.filename.endswith('.json'):
-            logger.error(f"Invalid file type: {file.filename}")
-            return jsonify({'error': 'Only JSON files are allowed'}), 400
-            
+            return jsonify({"error": "File must be a JSON file"}), 400
+        
         # Create user directory if it doesn't exist
-        user_dir = f"user_{user_id}"
+        user_dir = get_user_directory(user_id)
+        os.makedirs(user_dir, exist_ok=True)
         
-        # Find or create database directory
-        database_dir = None
-        potential_dirs = [
-            os.path.join(BASE_DIR, "database", user_dir),
-            os.path.join("database", user_dir),
-            os.path.join("/app/database", user_dir)
-        ]
+        # Save the file
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(user_dir, filename)
+        file.save(filepath)
+        logger.info(f"File saved to {filepath}")
         
-        for dir_path in potential_dirs:
-            try:
-                os.makedirs(dir_path, exist_ok=True)
-                if os.path.exists(dir_path):
-                    database_dir = dir_path
-                    logger.info(f"Using directory: {dir_path}")
-                    break
-            except Exception as e:
-                logger.warning(f"Could not create directory {dir_path}: {e}")
+        # Generate session ID for background processing
+        session_id = f"upload_{int(time.time())}_{secrets.token_hex(4)}"
         
-        if not database_dir:
-            logger.error("Could not create any database directory")
-            return jsonify({'error': 'Server error creating user directory'}), 500
+        # Start background processing
+        thread = threading.Thread(
+            target=lambda: background_process(user_id, filepath, session_id),
+            daemon=True
+        )
+        thread.start()
+        logger.info(f"Started background processing thread for session {session_id}")
         
-        # Set paths for files
-        bookmarks_file = os.path.join(database_dir, 'twitter_bookmarks.json')
+        return jsonify({
+            "success": True,
+            "message": "File uploaded successfully. Processing started in background.",
+            "filename": filename,
+            "session_id": session_id
+        })
         
-        # Save the file directly (simple approach)
-        try:
-            file.save(bookmarks_file)
-            logger.info(f"File saved to {bookmarks_file}")
-            
-            # Generate a session ID for this update
-            session_id = str(uuid.uuid4())[:8]
-            
-            # Start background processing
-            def background_process():
-                try:
-                    logger.info(f"Starting background processing for session {session_id}")
-                    from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
-                    
-                    # Simple processing with default options
-                    result = final_update_bookmarks(
-                        session_id=session_id, 
-                        start_index=0,
-                        rebuild_vector=False,
-                        user_id=user_id
-                    )
-                    
-                    logger.info(f"Background processing completed: {result}")
-                except Exception as e:
-                    logger.error(f"Error in background processing: {e}")
-                    logger.error(traceback.format_exc())
-            
-            # Start the background thread
-            threading.Thread(target=background_process, daemon=True).start()
-            
-            # Return success immediately
-            return jsonify({'success': True, 'message': 'File uploaded and processing started'})
-            
-        except Exception as e:
-            logger.error(f"Error saving file: {e}")
-            logger.error(traceback.format_exc())
-            return jsonify({'error': f'Error saving file: {e}'}), 500
-            
     except Exception as e:
-        logger.error(f"Unexpected error in upload: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({'error': f'Server error: {e}'}), 500
+        logger.error(f"Error in upload_bookmarks: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    
+    def background_process(user_id, filepath, session_id):
+        """Background function to process the uploaded file."""
+        logger.info(f"Starting background processing for user {user_id}, file {filepath}")
+        try:
+            # Process the uploaded file
+            result = final_update_bookmarks(
+                user_id=user_id,
+                file_path=filepath,
+                session_id=session_id,
+                rebuild_vector_store=True,  # Always rebuild to ensure consistency
+                reset_progress=False
+            )
+            logger.info(f"Background processing completed: {result}")
+        except Exception as e:
+            logger.error(f"Error in background processing: {e}")
+            traceback.print_exc()
 
 # Update database endpoint
 @app.route('/update-database', methods=['POST', 'GET'])

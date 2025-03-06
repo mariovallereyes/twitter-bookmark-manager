@@ -917,57 +917,64 @@
 
     // Ensure handleUploadDirect is in global scope
     window.handleUploadDirect = function() {
-        console.log("== SIMPLIFIED UPLOAD FUNCTION ==");
+        console.log("Starting super simple upload function");
+        
+        // Check if a file is selected
         const fileInput = document.getElementById('json-file');
         if (!fileInput || !fileInput.files.length) {
-            alert('Please select a file to upload');
+            alert('Please select a JSON file to upload');
             return;
         }
         
-        // Show all progress icons as pending
+        // Show progress steps
+        document.getElementById('progress-steps').style.display = 'block';
+        
+        // Reset all icons to pending
         document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
             icon.textContent = '⭕';
         });
-        document.getElementById('progress-steps').style.display = 'block';
         
-        // Create FormData and upload the file
+        // Set upload step to processing
+        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '⚡';
+        
+        // Create FormData
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
         
-        // Show uploading step
-        document.querySelector('#step-upload .progress-icon').textContent = '⚡';
-        document.querySelector('#step-upload span:last-child').textContent = 'Uploading file...';
+        // Display file name
+        document.getElementById('file-name').textContent = fileInput.files[0].name;
         
-        // Basic upload with minimal code
+        // Simple fetch upload
         fetch('/upload-bookmarks', {
             method: 'POST',
             body: formData
         })
         .then(response => {
-            if (response.ok) {
-                // Mark upload as complete
-                document.querySelector('#step-upload .progress-icon').textContent = '✅';
-                document.querySelector('#step-validate .progress-icon').textContent = '⚡';
-                document.querySelector('#step-validate span:last-child').textContent = 'File validated, waiting for server to process...';
-                
-                // Just show success message
-                setTimeout(() => {
-                    document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
-                        icon.textContent = '✅';
-                    });
-                    alert('File uploaded successfully! Processing has started on the server. Check your database in a few minutes.');
-                }, 2000);
-                
-                return true;
-            } else {
-                document.querySelector('#step-upload .progress-icon').textContent = '❌';
-                alert('Error uploading file. Please try again.');
-                throw new Error('Upload failed');
+            // Check if response is ok
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
             }
+            return response.json();
+        })
+        .then(data => {
+            console.log("Upload response:", data);
+            
+            // Mark all steps as completed
+            document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
+                icon.textContent = '✅';
+            });
+            
+            // Show success message
+            alert('File uploaded successfully! Your bookmarks will be processed in the background. This may take several minutes. You can close this window and check back later.');
         })
         .catch(error => {
-            console.error('Error:', error);
-            alert('Error occurred: ' + error.message);
+            console.error("Upload error:", error);
+            
+            // Mark upload step as failed
+            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
+            
+            // Show error message
+            alert('Error uploading file: ' + error.message + '\n\nPlease try again later.');
         });
     };
     
