@@ -65,50 +65,84 @@ def setup_logger(name, log_file):
 logger = setup_logger('final_update', LOG_FILE)
 
 def map_bookmark_data(data, user_id=None):
-    """Map JSON data to Bookmark model fields"""
+    """Map JSON data to Bookmark model fields with improved error tolerance"""
     try:
-        # Extract tweet ID from URL
+        # Extract tweet ID from URL or directly from data
         tweet_url = data.get('tweet_url', '')
-        if not tweet_url:
-            logger.error("No tweet_url found in data")
-            return None
-            
-        tweet_id = tweet_url.split('/')[-1] if tweet_url else None
+        tweet_id = None
+        
+        # Try multiple ways to get the tweet ID
+        if tweet_url:
+            # Extract from URL
+            tweet_id = tweet_url.split('/')[-1] if tweet_url else None
+        
+        # If no tweet ID from URL, try to find it directly in the data
         if not tweet_id:
-            logger.error("Could not extract tweet ID from URL")
+            # Try common ID field names
+            for id_field in ['id', 'id_str', 'tweet_id', 'status_id']:
+                if id_field in data and data[id_field]:
+                    tweet_id = str(data[id_field])
+                    break
+        
+        # If still no ID, generate one from content hash
+        if not tweet_id and (text := (data.get('full_text') or data.get('text'))):
+            import hashlib
+            # Create a consistent ID based on content hash
+            hash_input = (text + (data.get('screen_name', '') or ''))
+            tweet_id = 'gen_' + hashlib.md5(hash_input.encode('utf-8')).hexdigest()[:16]
+            logger.warning(f"Generated ID {tweet_id} for bookmark with no ID")
+        
+        # If we still don't have an ID, we have to skip
+        if not tweet_id:
+            logger.error("Could not determine an ID for bookmark")
             return None
         
-        # Parse datetime
+        # Parse datetime with fallback
         created_at = None
-        if tweeted_at := data.get('tweeted_at'):
-            try:
-                created_at = datetime.strptime(tweeted_at, "%Y-%m-%dT%H:%M:%S.%fZ")
-            except ValueError:
+        tweeted_at = data.get('tweeted_at')
+        if tweeted_at:
+            # Try multiple datetime formats
+            datetime_formats = [
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%d %H:%M:%S",
+                "%a %b %d %H:%M:%S %z %Y"  # Twitter API format
+            ]
+            
+            for dt_format in datetime_formats:
                 try:
-                    created_at = datetime.strptime(tweeted_at, "%Y-%m-%dT%H:%M:%SZ")
+                    created_at = datetime.strptime(tweeted_at, dt_format)
+                    break
                 except ValueError:
-                    logger.error(f"Could not parse datetime: {tweeted_at}")
+                    continue
+        
+        # If no datetime, use current time
+        if not created_at:
+            created_at = datetime.now()
+            logger.warning(f"Using current time for bookmark with ID {tweet_id}")
 
         # Extract text, preferring full_text over text
-        text = data.get('full_text') or data.get('text')
+        text = data.get('full_text') or data.get('text') or ''
         
-        # Map the data
+        # Make sure we have a tweet_url for referencing
+        if not tweet_url and tweet_id:
+            tweet_url = f"https://twitter.com/i/status/{tweet_id}"
+            # Also add it to the original data
+            data['tweet_url'] = tweet_url
+            logger.info(f"Generated tweet_url for bookmark ID {tweet_id}")
+        
+        # Map the data, ensuring we have at least minimal values for required fields
         mapped_data = {
             'id': tweet_id,
-            'text': text,
+            'text': text or '[No Text Available]',
             'created_at': created_at,
-            'author_name': data.get('name'),
-            'author_username': data.get('screen_name'),
-            'media_files': data.get('media_files', {}),
+            'author_name': data.get('name') or data.get('author_name') or '[Unknown]',
+            'author_username': data.get('screen_name') or data.get('author_username') or '[Unknown]',
+            'media_files': data.get('media_files') or data.get('extended_media') or {},
             'raw_data': data,
             'user_id': user_id
         }
         
-        # Validate required fields
-        if not mapped_data['id']:
-            logger.error("No valid ID could be extracted")
-            return None
-            
         return mapped_data
         
     except Exception as e:
@@ -714,17 +748,35 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         batch_count = 0
         for i, bookmark_data in enumerate(new_bookmarks, start_index):
             try:
+                # Get or generate tweet_url for tracking
                 tweet_url = bookmark_data.get('tweet_url')
-                if not tweet_url or tweet_url in processed_ids:
+                
+                # If no tweet_url but we have a tweet ID, create one
+                if not tweet_url and (tweet_id := bookmark_data.get('id')):
+                    tweet_url = f"https://twitter.com/i/status/{tweet_id}"
+                    bookmark_data['tweet_url'] = tweet_url
+                
+                # We'll use this key for tracking duplicates
+                tracking_key = tweet_url if tweet_url else f"item_{i}"
+                
+                # Skip if we've already processed this exact URL (duplicate in the same file)
+                if tracking_key in processed_ids:
+                    logger.info(f"Skipping duplicate bookmark at index {i}: {tracking_key}")
                     continue
-                    
+                
+                # Map the data with our improved function
                 mapped_data = map_bookmark_data(bookmark_data, user_id)
                 if not mapped_data:
+                    logger.error(f"Failed to map bookmark at index {i}: {bookmark_data.get('id', 'unknown')}")
                     stats['errors'] += 1
                     continue
                 
-                # Add to current batch
-                current_batch.append((tweet_url, mapped_data, bookmark_data))
+                # Use the ID from mapped_data for tracking now that we have one
+                if mapped_data.get('id') and not tweet_url:
+                    tracking_key = f"id_{mapped_data['id']}"
+                
+                # Add to current batch with the proper tracking key
+                current_batch.append((tracking_key, mapped_data, bookmark_data))
                 
                 # Process batch if full or last item
                 if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) + start_index - 1:
