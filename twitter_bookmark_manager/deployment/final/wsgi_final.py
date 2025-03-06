@@ -45,6 +45,7 @@ for key, value in os.environ.items():
 
 # Store the import error for later use
 import_error = None
+error_details = None
 
 # Import the existing Flask app instead of creating a new one
 try:
@@ -57,13 +58,22 @@ try:
         db_status = check_database_status()
         if db_status['healthy']:
             logger.info("✅ Database connection successful")
+            # Important: Do NOT set import_error here since the database is healthy
         else:
             logger.warning(f"⚠️ Database connection issues: {db_status['message']}")
-            # Try to setup database again
-            setup_database(force_reconnect=True)
+            # Try to setup database again but don't fail if it doesn't work
+            try:
+                setup_database(force_reconnect=True)
+                logger.info("✅ Successfully reconnected to database")
+            except Exception as reconnect_error:
+                logger.warning(f"⚠️ Reconnection attempt failed: {reconnect_error}")
+                # We'll still try to import the application
     except Exception as db_error:
         logger.error(f"❌ Database connection failed: {db_error}")
-        import_error = f"Database connection error: {str(db_error)}"
+        # Only set import_error for actual exceptions, not for status checks
+        if not str(db_error).lower() == 'healthy':  # Fix for incorrectly treating 'healthy' as an error
+            import_error = f"Database connection error: {str(db_error)}"
+            error_details = traceback.format_exc()
         
     # Now import the application
     if not import_error:
