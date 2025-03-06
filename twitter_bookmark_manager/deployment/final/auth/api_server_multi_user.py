@@ -12,6 +12,13 @@ import secrets
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# Simple, direct path fix for Railway deployment
+# Add the root directory to Python path
+sys.path.insert(0, os.getcwd())  # Add current working directory to path
+print(f"Working directory: {os.getcwd()}")
+print(f"Python path: {sys.path}")
+
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g
 from flask.sessions import SecureCookieSessionInterface
 import uuid
