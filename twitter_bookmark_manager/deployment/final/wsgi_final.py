@@ -48,8 +48,13 @@ for var in important_vars:
     else:
         logger.info(f"  {var}={value}")
 
+# Initialize db_status with default values to avoid KeyError
+db_status = {
+    "healthy": False,
+    "message": "Not tested yet"
+}
+
 # Try to import database module to test connection
-db_status = {"healthy": False, "message": "Not tested"}
 try:
     logger.info("Attempting to import database module...")
     from database.multi_user_db.db_final import check_database_status, setup_database, get_db_url
@@ -58,12 +63,22 @@ try:
     try:
         logger.info("Testing database connection")
         logger.info(f"Database URL: {get_db_url().replace('postgresql://', 'postgresql://user:****@')}")
-        db_status = check_database_status()
         
-        if db_status['healthy']:
+        # Get database status
+        temp_status = check_database_status()
+        
+        # Update our status dictionary with values from check_database_status
+        if isinstance(temp_status, dict):
+            if 'healthy' in temp_status:
+                db_status['healthy'] = temp_status['healthy']
+            if 'message' in temp_status:
+                db_status['message'] = temp_status['message']
+        
+        # Log database status
+        if db_status.get('healthy', False):
             logger.info("✅ Database connection successful")
         else:
-            logger.warning(f"⚠️ Database connection issues: {db_status['message']}")
+            logger.warning(f"⚠️ Database connection issues: {db_status.get('message', 'Unknown issue')}")
             
             # Try to reconnect
             try:
@@ -73,12 +88,20 @@ try:
                 db_status['message'] = "Reconnection successful"
             except Exception as reconnect_error:
                 logger.warning(f"⚠️ Database reconnection failed: {reconnect_error}")
+                db_status['message'] = f"Reconnection failed: {str(reconnect_error)}"
     except Exception as db_test_error:
         logger.error(f"❌ Database test failed: {db_test_error}")
-        db_status['message'] = str(db_test_error)
+        db_status['message'] = f"Test failed: {str(db_test_error)}"
 except ImportError as import_error:
     logger.error(f"❌ Failed to import database module: {import_error}")
     db_status['message'] = f"Import error: {str(import_error)}"
+    db_status['healthy'] = False
+
+# Make sure db_status has the required keys
+if 'healthy' not in db_status:
+    db_status['healthy'] = False
+if 'message' not in db_status:
+    db_status['message'] = "Status information not available"
 
 # Store application loading errors
 application_error = None
@@ -86,7 +109,7 @@ error_details = None
 
 # Attempt to import the full application
 try:
-    if db_status['healthy']:
+    if db_status.get('healthy', False):
         logger.info("Loading full application from auth.api_server_multi_user")
         from auth.api_server_multi_user import app as full_application
         logger.info("✅ Successfully loaded full application")
@@ -95,9 +118,9 @@ try:
         application = full_application
         logger.info("Full application is active")
     else:
-        logger.warning(f"⚠️ Database issues detected, not loading full application: {db_status['message']}")
-        application_error = f"Database not healthy: {db_status['message']}"
-        raise ImportError(f"Skipping full application due to database issues: {db_status['message']}")
+        logger.warning(f"⚠️ Database issues detected, not loading full application: {db_status.get('message', 'Unknown issue')}")
+        application_error = f"Database not healthy: {db_status.get('message', 'Unknown issue')}"
+        raise ImportError(f"Skipping full application due to database issues: {db_status.get('message', 'Unknown issue')}")
 except Exception as e:
     error_details = traceback.format_exc()
     application_error = str(e)
@@ -148,7 +171,10 @@ if 'application' not in locals():
     def status():
         return jsonify({
             "status": "limited_functionality",
-            "database": db_status,
+            "database": {
+                "healthy": db_status.get('healthy', False),
+                "message": db_status.get('message', "Status information not available")
+            },
             "application_error": application_error,
             "message": "Running in fallback mode with limited functionality"
         })
@@ -219,8 +245,8 @@ if 'application' not in locals():
         working_dir=os.getcwd(),
         error_message=application_error or "Unknown error occurred during application initialization",
         error_details=error_details or "No detailed error information available",
-        db_healthy=db_status['healthy'],
-        db_message=db_status['message'],
+        db_healthy=db_status.get('healthy', False),
+        db_message=db_status.get('message', "Status information not available"),
         project_id=os.environ.get('RAILWAY_PROJECT_ID', ''))
     
     # Add a simple API test endpoint
@@ -229,7 +255,10 @@ if 'application' not in locals():
         return jsonify({
             "status": "limited_functionality",
             "message": "Running in fallback mode",
-            "database_status": db_status,
+            "database_status": {
+                "healthy": db_status.get('healthy', False),
+                "message": db_status.get('message', "Status information not available")
+            },
             "environment": os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
             "python_version": sys.version
         })
