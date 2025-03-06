@@ -425,7 +425,19 @@
                                 type="button"
                                 onclick="console.log('Button clicked'); window.handleUploadDirect(); return false;"
                                 class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">
-                                Upload and Update Database
+                                Upload File
+                            </button>
+                        </div>
+                        
+                        <!-- Process Button (hidden until file is uploaded) -->
+                        <div id="process-button-container" class="flex justify-end gap-3 mt-4">
+                            <button 
+                                id="process-button"
+                                type="button"
+                                onclick="window.processBookmarks(this); return false;"
+                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                                style="display: none;">
+                                Process File
                             </button>
                         </div>
 
@@ -917,7 +929,7 @@
 
     // Ensure handleUploadDirect is in global scope
     window.handleUploadDirect = function() {
-        console.log("Starting super simple upload function");
+        console.log("Starting ultra-simple upload function - NO DATABASE OPERATIONS");
         
         // Check if a file is selected
         const fileInput = document.getElementById('json-file');
@@ -944,7 +956,7 @@
         // Display file name
         document.getElementById('file-name').textContent = fileInput.files[0].name;
         
-        // Simple fetch upload
+        // Super simple upload - just saves the file, NO database operations
         fetch('/upload-bookmarks', {
             method: 'POST',
             body: formData
@@ -959,13 +971,16 @@
         .then(data => {
             console.log("Upload response:", data);
             
-            // Mark all steps as completed
-            document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
-                icon.textContent = '✅';
-            });
+            // Mark upload step as completed
+            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-validate').querySelector('.progress-icon').textContent = '⚡';
             
             // Show success message
-            alert('File uploaded successfully! Your bookmarks will be processed in the background. This may take several minutes. You can close this window and check back later.');
+            alert('File uploaded successfully! Click the "Process File" button to start processing your bookmarks.');
+            
+            // Show the process button
+            document.getElementById('process-button').style.display = 'block';
+            document.getElementById('process-button').setAttribute('data-session-id', data.session_id);
         })
         .catch(error => {
             console.error("Upload error:", error);
@@ -978,94 +993,110 @@
         });
     };
     
-    // Add a function to update progress UI based on status
-    function updateAllProgressSteps(isComplete) {
-        const steps = [
-            'step-upload', 
-            'step-validate', 
-            'step-find-new', 
-            'step-init-ai', 
-            'step-dedup', 
-            'step-sql', 
-            'step-categories', 
-            'step-vectors', 
-            'step-sync'
-        ];
-        
-        if (isComplete) {
-            // Mark all steps as complete
-            steps.forEach(stepId => {
-                document.getElementById(stepId).querySelector('.progress-icon').textContent = '✅';
-            });
+    // Add function to start processing after upload
+    window.processBookmarks = function(button) {
+        // Get session ID from button
+        const sessionId = button.getAttribute('data-session-id');
+        if (!sessionId) {
+            alert('No session ID found. Please upload a file first.');
+            return;
         }
-    }
+        
+        // Show that processing is starting
+        document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
+        document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '⚡';
+        
+        // Send request to process bookmarks
+        fetch('/process-bookmarks', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_id: sessionId
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("Process response:", data);
+            
+            // Start polling for status
+            pollProcessStatus(sessionId);
+            
+            // Disable the process button
+            button.disabled = true;
+            button.textContent = 'Processing...';
+        })
+        .catch(error => {
+            console.error("Process error:", error);
+            
+            // Mark find-new step as failed
+            document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+            
+            // Show error message
+            alert('Error starting processing: ' + error.message);
+        });
+    };
     
-    // Add polling function to check status
-    function pollStatus(sessionId) {
+    // Add function to poll for process status
+    function pollProcessStatus(sessionId) {
         console.log("Polling status for session:", sessionId);
         
-        fetch(`/update-status?session_id=${sessionId}`)
-        .then(response => response.json())
-        .then(status => {
-            console.log("Status update:", status);
+        fetch(`/process-status?session_id=${sessionId}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("Status response:", data);
             
-            if (status.is_complete) {
-                updateAllProgressSteps(true);
-                alert('Processing completed successfully!');
-            } else {
-                // Update progress UI with current status
-                updateProgressFromStatus(status);
+            const status = data.status.status;
+            
+            // Update UI based on status
+            if (status === 'processing') {
+                // Still processing, update UI and poll again
+                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '⚡';
+                setTimeout(() => pollProcessStatus(sessionId), 2000);
+            } else if (status === 'completed') {
+                // Processing completed
+                document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
+                    icon.textContent = '✅';
+                });
                 
-                // Continue polling after delay
-                setTimeout(() => pollStatus(sessionId), 2000);
+                // Show success message
+                alert('Processing completed successfully!');
+                
+                // Re-enable the process button
+                const button = document.getElementById('process-button');
+                button.disabled = false;
+                button.textContent = 'Process File';
+            } else if (status === 'error') {
+                // Processing error
+                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+                
+                // Show error message
+                alert('Error during processing: ' + (data.status.error || 'Unknown error'));
+                
+                // Re-enable the process button
+                const button = document.getElementById('process-button');
+                button.disabled = false;
+                button.textContent = 'Retry Processing';
             }
         })
         .catch(error => {
-            console.error("Error polling status:", error);
-            alert("Error checking process status: " + error.message);
-        });
-    }
-    
-    // Function to update progress UI from status response
-    function updateProgressFromStatus(status) {
-        console.log("Updating progress UI with status:", status);
-        
-        // Update step indicators based on status
-        let currentStep = 'step-find-new';
-        
-        // Reset all icons first
-        const allSteps = document.querySelectorAll('#progress-steps .progress-icon');
-        allSteps.forEach(icon => {
-            icon.textContent = '⭕';
-        });
-        
-        // Mark completed steps
-        document.querySelector('#step-upload .progress-icon').textContent = '✅';
-        document.querySelector('#step-validate .progress-icon').textContent = '✅';
-        
-        // Update current processing step
-        if (status.current_step) {
-            currentStep = `step-${status.current_step.replace(/_/g, '-')}`;
-        }
-        
-        if (document.getElementById(currentStep)) {
-            document.getElementById(currentStep).querySelector('.progress-icon').textContent = '⚡';
+            console.error("Status polling error:", error);
             
-            // Add progress details if available
-            const progress = status.progress || {};
-            const stepTextEl = document.getElementById(currentStep).querySelector('span:last-child');
-            if (stepTextEl && progress.total_processed !== undefined) {
-                const baseText = stepTextEl.textContent.split('...')[0] + '...';
-                stepTextEl.textContent = `${baseText} (${progress.total_processed} processed, ${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
-            }
-        }
+            // Try again in 5 seconds
+            setTimeout(() => pollProcessStatus(sessionId), 5000);
+        });
     }
-
-    // Make sure basic functions are available globally
-    window.showProgressSteps = function() {
-        console.log("Setting up progress steps");
-        document.getElementById('progress-steps').style.display = 'block';
-    };
     </script>
 </body>
 </html> 
