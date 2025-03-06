@@ -13,11 +13,8 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Simple, direct path fix for Railway deployment
-# Add the root directory to Python path
-sys.path.insert(0, os.getcwd())  # Add current working directory to path
+# Simple diagnostic print
 print(f"Working directory: {os.getcwd()}")
-print(f"Python path: {sys.path}")
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g
 from flask.sessions import SecureCookieSessionInterface
@@ -31,8 +28,33 @@ import hashlib
 import platform
 from sqlalchemy import text, create_engine
 
-# Import user context features
-from auth.user_context_final import UserContext, with_user_context
+# Fix import paths for Railway deployment
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+deployment_dir = os.path.dirname(parent_dir)
+root_dir = os.path.dirname(deployment_dir)
+
+# Add these directories to path to ensure imports work
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+if deployment_dir not in sys.path:
+    sys.path.insert(0, deployment_dir) 
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+print(f"Added to path: {parent_dir}, {deployment_dir}, {root_dir}")
+print(f"Python path: {sys.path}")
+
+try:
+    # Import user context features
+    from .user_context_final import UserContext, with_user_context
+except ImportError:
+    try:
+        from user_context_final import UserContext, with_user_context
+    except ImportError:
+        print("Error importing user_context_final, trying alternative path")
+        sys.path.insert(0, current_dir)
+        from user_context_final import UserContext, with_user_context
 
 # Set up base directory using environment variables or relative paths
 BASE_DIR = os.environ.get('APP_BASE_DIR', '/app')
@@ -43,20 +65,53 @@ MEDIA_DIR = os.environ.get('MEDIA_DIR', os.path.join(BASE_DIR, 'media'))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('api_server_multi_user')
 
-# Import user authentication components
-from auth.auth_routes_final import auth_bp
-from auth.user_api_final import user_api_bp
-from auth.user_context_final import UserContextMiddleware
-from database.multi_user_db.user_model_final import get_user_by_id
+# Import user authentication components with fallbacks
+try:
+    from .auth_routes_final import auth_bp
+    from .user_api_final import user_api_bp
+    from .user_context_final import UserContextMiddleware
+    from ..database.multi_user_db.user_model_final import get_user_by_id
+except ImportError:
+    try:
+        from auth_routes_final import auth_bp
+        from user_api_final import user_api_bp
+        from user_context_final import UserContextMiddleware
+        from database.multi_user_db.user_model_final import get_user_by_id
+    except ImportError:
+        print("Error importing auth components, trying absolute imports")
+        import sys
+        from twitter_bookmark_manager.deployment.final.auth.auth_routes_final import auth_bp
+        from twitter_bookmark_manager.deployment.final.auth.user_api_final import user_api_bp
+        from twitter_bookmark_manager.deployment.final.auth.user_context_final import UserContextMiddleware
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.user_model_final import get_user_by_id
 
-# Import database modules
-from database.multi_user_db.db_final import get_db_connection, create_tables
-from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
-from database.multi_user_db.update_bookmarks_final import (
-    final_update_bookmarks,
-    rebuild_vector_store
-)
-from database.multi_user_db.vector_store_final import VectorStore
+# Import database modules with fallbacks
+try:
+    from ..database.multi_user_db.db_final import get_db_connection, create_tables
+    from ..database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+    from ..database.multi_user_db.update_bookmarks_final import (
+        final_update_bookmarks,
+        rebuild_vector_store
+    )
+    from ..database.multi_user_db.vector_store_final import VectorStore
+except ImportError:
+    try:
+        from database.multi_user_db.db_final import get_db_connection, create_tables
+        from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+        from database.multi_user_db.update_bookmarks_final import (
+            final_update_bookmarks,
+            rebuild_vector_store
+        )
+        from database.multi_user_db.vector_store_final import VectorStore
+    except ImportError:
+        print("Error importing database modules, trying absolute imports")
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_db_connection, create_tables
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.update_bookmarks_final import (
+            final_update_bookmarks,
+            rebuild_vector_store
+        )
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.vector_store_final import VectorStore
 
 # Create Flask app
 app = Flask(__name__, 
