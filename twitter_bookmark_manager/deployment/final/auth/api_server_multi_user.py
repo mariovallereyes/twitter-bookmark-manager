@@ -196,7 +196,7 @@ def login_required(f):
 # Home page
 @app.route('/')
 def index():
-    """Home page - now aware of user context with direct DB connection"""
+    """Home page with multiple database connection fallbacks"""
     logger.info("Home page requested")
     user = UserContext.get_current_user()
     
@@ -208,20 +208,104 @@ def index():
         logger.info("User not authenticated, redirecting to login")
         return redirect(url_for('auth.login'))
     
-    # Get categories for the current user - using DIRECT connection without pooling
-    retry_count = 0
-    max_retries = 5
-    last_error = None
+    # Track if we've tried all database connection methods
+    all_methods_tried = False
+    categories = []
+    error_message = None
     
-    while retry_count < max_retries:
+    # Method 1: Direct psycopg2 connection
+    try:
+        logger.info("Trying direct psycopg2 connection")
+        db_url = get_db_url()
+        
+        # Parse the connection string to get connection parameters
+        if 'postgresql://' in db_url:
+            # Extract connection params from sqlalchemy URL
+            conn_parts = db_url.replace('postgresql://', '').split('@')
+            user_pass = conn_parts[0].split(':')
+            host_port_db = conn_parts[1].split('/')
+            host_port = host_port_db[0].split(':')
+            
+            db_user = user_pass[0]
+            db_password = user_pass[1]
+            db_host = host_port[0]
+            db_port = host_port[1] if len(host_port) > 1 else '5432'
+            db_name = host_port_db[1]
+            
+            logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+            
+            # Connect directly with psycopg2
+            direct_conn = psycopg2.connect(
+                user=db_user,
+                password=db_password,
+                host=db_host,
+                port=db_port,
+                dbname=db_name,
+                connect_timeout=3,
+                application_name='twitter_bookmark_manager_direct'
+            )
+            
+            # Set autocommit to avoid transaction issues
+            direct_conn.autocommit = True
+            
+            # Execute a simple query to get categories
+            cursor = direct_conn.cursor()
+            cursor.execute(f"""
+                SELECT id, name, description 
+                FROM categories 
+                WHERE user_id = %s 
+                ORDER BY name
+            """, (user.id,))
+            
+            # Fetch categories directly
+            categories = []
+            for row in cursor.fetchall():
+                categories.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'description': row[2]
+                })
+            
+            cursor.close()
+            direct_conn.close()
+            
+            logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
+        else:
+            # Non-PostgreSQL DB, skip to method 2
+            raise Exception("Not a PostgreSQL database, trying SQLAlchemy")
+    except Exception as e:
+        logger.warning(f"Direct psycopg2 connection failed: {e}")
+        error_message = str(e)
+    
+    # Method 2: SQLAlchemy connection if Method 1 failed
+    if not categories:
         try:
-            # Create a direct connection to the database instead of using the pool
-            # This approach is less efficient but more reliable when the server has connection issues
+            logger.info("Trying SQLAlchemy connection")
+            # Force reconnect the engine first
+            from database.multi_user_db.db_final import setup_database
+            setup_database(force_reconnect=True)
+            
+            # Get a new connection
+            conn = get_db_connection()
+            try:
+                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                categories = searcher.get_categories()
+                logger.info(f"Successfully loaded {len(categories)} categories via SQLAlchemy for user {user.id}")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"SQLAlchemy connection failed: {e}")
+            if not error_message:
+                error_message = str(e)
+    
+    # Method 3: Direct SQL connection with different parameters if Method 2 failed
+    if not categories:
+        try:
+            logger.info("Trying alternative direct connection")
             db_url = get_db_url()
             
-            # Parse the connection string to get connection parameters
             if 'postgresql://' in db_url:
-                # Extract connection params from sqlalchemy URL
+                # Extract connection params from sqlalchemy URL (same as Method 1)
                 conn_parts = db_url.replace('postgresql://', '').split('@')
                 user_pass = conn_parts[0].split(':')
                 host_port_db = conn_parts[1].split('/')
@@ -233,21 +317,25 @@ def index():
                 db_port = host_port[1] if len(host_port) > 1 else '5432'
                 db_name = host_port_db[1]
                 
-                logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+                logger.info(f"Trying alternative connection to PostgreSQL")
                 
-                # Connect directly with psycopg2
+                # Try different connection parameters
                 direct_conn = psycopg2.connect(
                     user=db_user,
                     password=db_password,
                     host=db_host,
                     port=db_port,
                     dbname=db_name,
-                    connect_timeout=3,
-                    application_name='twitter_bookmark_manager_direct'
+                    connect_timeout=5,  # Longer timeout
+                    application_name='twitter_bookmark_manager_last_resort',
+                    keepalives=1,
+                    keepalives_idle=10,
+                    keepalives_interval=2,
+                    keepalives_count=3
                 )
                 
-                # Set autocommit to avoid transaction issues
-                direct_conn.autocommit = True
+                # Important: Set isolation level to avoid transaction issues
+                direct_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
                 
                 # Execute a simple query to get categories
                 cursor = direct_conn.cursor()
@@ -270,41 +358,45 @@ def index():
                 cursor.close()
                 direct_conn.close()
                 
-                logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
-                
-                # Check if user is admin
-                is_admin = getattr(user, 'is_admin', False)
-                
-                return render_template(template, categories=categories, user=user, is_admin=is_admin)
+                logger.info(f"Successfully loaded {len(categories)} categories via alternative connection")
             else:
-                # Fall back to SQLAlchemy for non-PostgreSQL databases
-                conn = get_db_connection()
-                try:
-                    searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                    categories = searcher.get_categories()
-                    
-                    # Check if user is admin
-                    is_admin = getattr(user, 'is_admin', False)
-                    
-                    logger.info(f"Successfully loaded categories for user {user.id}")
-                    return render_template(template, categories=categories, user=user, is_admin=is_admin)
-                finally:
-                    conn.close()
+                # Skip for non-PostgreSQL
+                all_methods_tried = True
         except Exception as e:
-            retry_count += 1
-            last_error = e
-            
-            if retry_count < max_retries:
-                wait_time = 1 * (2 ** (retry_count - 1))
-                logger.warning(f"Database error in index route, retrying in {wait_time}s (attempt {retry_count}/{max_retries}): {e}")
-                time.sleep(wait_time)
-            else:
-                # Last attempt failed, show error page
-                logger.error(f"All retries for index route failed: {e}")
-                return render_template('error_final.html', 
-                                      error_title="Database Connection Issue", 
-                                      error_message="We're having trouble connecting to our database. Please try again in a few moments.",
-                                      user=user, is_admin=getattr(user, 'is_admin', False)), 500
+            logger.warning(f"Alternative direct connection failed: {e}")
+            if not error_message:
+                error_message = str(e)
+            all_methods_tried = True
+    
+    # At this point, we've tried all database methods
+    if not categories:
+        all_methods_tried = True
+    
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    
+    # If all database methods failed, show a simplified interface with error message
+    if all_methods_tried and not categories:
+        logger.error(f"All database connection methods failed. Last error: {error_message}")
+        
+        # Return a simplified interface
+        return render_template(
+            template, 
+            categories=[],  # Empty categories
+            user=user, 
+            is_admin=is_admin,
+            db_error=True,
+            error_message="Database connection issues. Some features may be unavailable."
+        )
+    
+    # Return normal template if we have categories
+    return render_template(
+        template, 
+        categories=categories, 
+        user=user, 
+        is_admin=is_admin,
+        db_error=False
+    )
 
 # Upload bookmarks endpoint
 @app.route('/upload-bookmarks', methods=['POST'])
