@@ -58,19 +58,19 @@ def setup_database():
             _engine = create_engine(
                 DATABASE_URL,
                 poolclass=QueuePool,
-                pool_size=3,           # Reduced pool size to avoid too many connections
-                max_overflow=5,        # Reduced max overflow to prevent connection buildup
-                pool_timeout=10,       # Reduced timeout to fail faster
-                pool_recycle=300,      # Recycle connections after 5 minutes
-                pool_pre_ping=True,    # Verify connections before using them
+                pool_size=2,            # Minimal pool size to reduce connections
+                max_overflow=2,         # Minimal overflow to reduce connections
+                pool_timeout=5,         # Fail fast on connection timeout
+                pool_recycle=60,        # Very aggressive connection recycling (1 minute)
+                pool_pre_ping=True,     # Always ping before using a connection
                 connect_args={
-                    "connect_timeout": 5,          # Reduced connection timeout to fail faster
-                    "application_name": "TwitterBookmarkManager",  # Helps identify connections in pg_stat_activity
-                    "keepalives": 1,               # Enable TCP keepalives
-                    "keepalives_idle": 30,         # Send keepalive packets after 30 seconds of inactivity
-                    "keepalives_interval": 10,     # Resend keepalives every 10 seconds
-                    "keepalives_count": 3,         # Consider connection dead after 3 failed keepalives
-                    "tcp_user_timeout": 30000      # Abort connection if not established within 30 seconds
+                    "connect_timeout": 3,            # Very short connection timeout
+                    "application_name": "TwitterBookmarkManager",
+                    "keepalives": 1,                 # Enable TCP keepalives
+                    "keepalives_idle": 10,           # Send keepalive after 10 seconds idle
+                    "keepalives_interval": 5,        # Check every 5 seconds
+                    "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
+                    "options": "-c statement_timeout=10000"  # 10 second statement timeout
                 }
             )
         else:
@@ -105,19 +105,19 @@ def setup_database():
             _engine = create_engine(
                 DATABASE_URI,
                 poolclass=QueuePool,
-                pool_size=3,
-                max_overflow=5,
-                pool_timeout=10,
-                pool_recycle=300,
-                pool_pre_ping=True,
+                pool_size=2,            # Minimal pool size to reduce connections
+                max_overflow=2,         # Minimal overflow to reduce connections
+                pool_timeout=5,         # Fail fast on connection timeout
+                pool_recycle=60,        # Very aggressive connection recycling (1 minute)
+                pool_pre_ping=True,     # Always ping before using a connection
                 connect_args={
-                    "connect_timeout": 5,
+                    "connect_timeout": 3,            # Very short connection timeout
                     "application_name": "TwitterBookmarkManager",
-                    "keepalives": 1,
-                    "keepalives_idle": 30,
-                    "keepalives_interval": 10,
-                    "keepalives_count": 3,
-                    "tcp_user_timeout": 30000
+                    "keepalives": 1,                 # Enable TCP keepalives
+                    "keepalives_idle": 10,           # Send keepalive after 10 seconds idle
+                    "keepalives_interval": 5,        # Check every 5 seconds
+                    "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
+                    "options": "-c statement_timeout=10000"  # 10 second statement timeout
                 }
             )
         
@@ -214,10 +214,15 @@ def get_engine():
     return _engine
 
 def get_session():
-    """Get a new SQLAlchemy session"""
+    """Get a new SQLAlchemy session with health check"""
     global _session_factory
+    
+    # Check engine health
+    check_engine_health()
+    
     if _session_factory is None:
-        db_objects = setup_database()  # Try to set up again if not already done
+        setup_database()  # Try to set up again if not already done
+        
     return _session_factory()
 
 # Alias for backward compatibility
@@ -233,18 +238,20 @@ def get_vector_store():
 
 @contextmanager
 def db_session() -> Generator:
-    """Context manager for database sessions with retry logic and better error handling"""
+    """Context manager for database sessions with extremely aggressive connection handling"""
     session = None
-    max_retries = 3
+    max_retries = 2  # Reduce to 2 retries to fail faster
     retry_count = 0
     last_error = None
     
     while retry_count < max_retries:
         try:
             session = get_session()
+            # Set a short statement timeout
+            session.execute(text("SET statement_timeout = 5000"))  # 5 seconds
             yield session
             
-            # Try to commit changes
+            # Try to commit changes with a timeout
             try:
                 session.commit()
                 logger.debug("Session committed successfully")
@@ -258,7 +265,7 @@ def db_session() -> Generator:
                     logger.error(f"Failed to commit after {max_retries} attempts: {commit_error}")
                     raise
                 # Short delay before retry
-                time.sleep(0.5 * retry_count)  # Exponential backoff
+                time.sleep(0.2 * retry_count)  # Reduced backoff delay
                 
         except Exception as session_error:
             last_error = session_error
@@ -268,13 +275,17 @@ def db_session() -> Generator:
                 logger.error(f"Failed to execute session after {max_retries} attempts: {session_error}")
                 raise
             # Short delay before retry
-            time.sleep(0.5 * retry_count)  # Exponential backoff
+            time.sleep(0.2 * retry_count)  # Reduced backoff delay
             
         finally:
             if session:
                 try:
+                    # Force immediate return of connection to pool
                     session.close()
-                    logger.debug("Session closed")
+                    # Explicitly remove session
+                    if hasattr(session, 'remove'):
+                        session.remove()
+                    logger.debug("Session closed and removed")
                 except Exception as close_error:
                     logger.warning(f"Error closing session: {close_error}")
                     # Don't raise here, as we may have already succeeded with the transaction
@@ -433,3 +444,60 @@ def create_tables():
         logger.error(f"❌ Error creating tables: {str(e)}")
         logger.error(traceback.format_exc())
         return False 
+
+# Add a connection cleanup function that will be registered to run on app shutdown
+def cleanup_db_connections():
+    """Force cleanup of all database connections in the pool"""
+    global _engine, _session_factory
+    
+    try:
+        if _session_factory:
+            logger.info("Cleaning up all database sessions")
+            try:
+                _session_factory.remove()
+                logger.info("✓ All sessions removed")
+            except Exception as e:
+                logger.error(f"Error removing sessions: {e}")
+                
+        if _engine:
+            logger.info("Disposing of database engine and connection pool")
+            try:
+                _engine.dispose()
+                logger.info("✓ Engine disposed")
+            except Exception as e:
+                logger.error(f"Error disposing engine: {e}")
+    except Exception as e:
+        logger.error(f"Unhandled exception in cleanup_db_connections: {e}")
+        logger.error(traceback.format_exc())
+        
+# Function to check engine health and recreate if needed
+def check_engine_health():
+    """Check if the engine/pool is healthy and recreate if needed"""
+    global _engine, _session_factory
+    
+    try:
+        if not _engine:
+            logger.warning("Database engine is None, creating new engine")
+            setup_database()
+            return
+            
+        try:
+            # Quick connection test
+            with _engine.connect() as conn:
+                result = conn.execute(text("SELECT 1")).scalar()
+                if result != 1:
+                    raise Exception("Connection test failed")
+        except Exception as e:
+            logger.error(f"Connection test failed: {e}")
+            logger.warning("Recreating database engine due to connection failure")
+            
+            # Dispose of existing engine
+            try:
+                _engine.dispose()
+            except:
+                pass
+                
+            # Create new engine
+            setup_database()
+    except Exception as e:
+        logger.error(f"Error in check_engine_health: {e}") 

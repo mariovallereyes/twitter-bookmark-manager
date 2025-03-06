@@ -60,7 +60,7 @@ from auth.user_context_final import UserContextMiddleware
 from database.multi_user_db.user_model_final import get_user_by_id
 
 # Import database modules
-from database.multi_user_db.db_final import get_db_connection, create_tables
+from database.multi_user_db.db_final import get_db_connection, create_tables, cleanup_db_connections, check_engine_health
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.update_bookmarks_final import (
     final_update_bookmarks,
@@ -72,6 +72,28 @@ from database.multi_user_db.vector_store_final import VectorStore
 app = Flask(__name__, 
             template_folder='../web_final/templates',
             static_folder='../web_final/static')
+
+# Register cleanup function to run on app shutdown
+@app.teardown_appcontext
+def shutdown_cleanup(exception=None):
+    """Clean up resources when the app shuts down"""
+    logger.info("Application context tearing down, cleaning up resources")
+    cleanup_db_connections()
+
+# Check database health before each request
+@app.before_request
+def check_db_health():
+    """Check database connection health before handling request"""
+    # Skip for static files and non-db routes
+    if request.path.startswith('/static/'):
+        return
+        
+    try:
+        # Perform a health check
+        check_engine_health()
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        # Don't fail the request, just log the error
 
 # Configure app
 app.config.update(
