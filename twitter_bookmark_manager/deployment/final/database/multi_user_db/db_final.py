@@ -115,118 +115,177 @@ def with_db_retry(max_tries=5, backoff_in_seconds=1):
 
 # Get direct PostgreSQL connection parameters from environment
 def get_pg_direct_params() -> Dict[str, str]:
-    """Get PostgreSQL connection parameters directly from environment variables"""
-    return {
-        'dbname': os.environ.get('PGDATABASE', 'railway'),
-        'user': os.environ.get('PGUSER', 'postgres'),
-        'password': os.environ.get('PGPASSWORD', ''),
-        'host': 'postgres.railway.internal',  # Always use internal endpoint
-        'port': '5432',
-        'connect_timeout': '10',
-        'application_name': 'twitter_bookmark_manager_direct'
+    """
+    Get PostgreSQL connection parameters directly from environment variables.
+    Prioritizes PG* environment variables, then falls back to POSTGRES_* variables,
+    and finally extracts from DATABASE_URL if needed.
+    """
+    # Log which environment variables we have for debugging
+    db_variables = [
+        "PGUSER", "PGPASSWORD", "PGHOST", "PGPORT", "PGDATABASE",
+        "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
+        "DATABASE_URL", "RAILWAY_PRIVATE_DOMAIN"
+    ]
+    
+    available_vars = [var for var in db_variables if os.environ.get(var)]
+    logging.info(f"Available database environment variables: {available_vars}")
+    
+    # First try to use the PG* variables (Railway standard)
+    params = {
+        "user": os.environ.get("PGUSER"),
+        "password": os.environ.get("PGPASSWORD"),
+        "host": os.environ.get("PGHOST"),
+        "port": os.environ.get("PGPORT", "5432"),
+        "database": os.environ.get("PGDATABASE"),
     }
+    
+    # Fall back to POSTGRES_* variables if needed
+    if not params["user"]:
+        params["user"] = os.environ.get("POSTGRES_USER")
+        if params["user"]:
+            logging.info("Using POSTGRES_USER as fallback")
+    
+    if not params["password"]:
+        params["password"] = os.environ.get("POSTGRES_PASSWORD")
+        if params["password"]:
+            logging.info("Using POSTGRES_PASSWORD as fallback")
+    
+    if not params["database"]:
+        params["database"] = os.environ.get("POSTGRES_DB")
+        if params["database"]:
+            logging.info("Using POSTGRES_DB as fallback")
+            
+    # For Railway, always prefer the internal domain when available
+    if os.environ.get("RAILWAY_PRIVATE_DOMAIN"):
+        original_host = params["host"]
+        params["host"] = os.environ.get("RAILWAY_PRIVATE_DOMAIN")
+        logging.info(f"Using RAILWAY_PRIVATE_DOMAIN: {params['host']} (was: {original_host})")
+    
+    # If we're still missing critical parameters, try to extract from DATABASE_URL
+    if not all([params["user"], params["password"], params["host"], params["database"]]):
+        db_url = os.environ.get("DATABASE_URL")
+        if db_url:
+            logging.info("Extracting connection parameters from DATABASE_URL")
+            try:
+                # Extract credentials from DATABASE_URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(db_url)
+                
+                if not params["user"] and parsed_url.username:
+                    params["user"] = parsed_url.username
+                
+                if not params["password"] and parsed_url.password:
+                    params["password"] = parsed_url.password
+                
+                if not params["host"] and parsed_url.hostname:
+                    params["host"] = parsed_url.hostname
+                
+                if not params["port"] and parsed_url.port:
+                    params["port"] = str(parsed_url.port)
+                
+                if not params["database"] and parsed_url.path:
+                    params["database"] = parsed_url.path.lstrip('/')
+            except Exception as e:
+                logging.error(f"Error parsing DATABASE_URL: {e}")
+    
+    # Log which parameters we were able to resolve (without revealing the password)
+    safe_params = {**params}
+    if safe_params["password"]:
+        safe_params["password"] = "******"
+    
+    logging.info(f"Resolved database parameters: {safe_params}")
+    
+    # Verify we have all required parameters
+    missing = [k for k, v in params.items() if not v and k != "port"]
+    if missing:
+        logging.warning(f"Missing required database parameters: {missing}")
+    
+    return params
 
 # Get a direct psycopg2 connection - useful as a fallback
 def get_direct_connection():
     """
-    Get a direct psycopg2 connection to PostgreSQL without using SQLAlchemy.
-    This serves as a backup when SQLAlchemy pool has issues.
+    Establish a direct connection to PostgreSQL using psycopg2.
+    This is a fallback when SQLAlchemy connection fails.
     """
-    global _direct_conn
-    
-    # If we already have a connection, check if it's still valid
-    if _direct_conn:
-        try:
-            # Test connection with a simple query
-            cur = _direct_conn.cursor()
-            cur.execute("SELECT 1")
-            cur.fetchone()
-            cur.close()
-            logger.debug("Reusing existing direct psycopg2 connection")
-            return _direct_conn
-        except Exception as e:
-            logger.warning(f"Existing direct connection failed: {e}")
-            try:
-                _direct_conn.close()
-            except:
-                pass
-            _direct_conn = None
-    
-    # Create a new connection
     try:
-        # Get connection parameters
         params = get_pg_direct_params()
-        logger.info(f"Creating direct psycopg2 connection to {params['host']}:{params['port']}/{params['dbname']}")
+        logging.info(f"Attempting direct psycopg2 connection to {params['host']}:{params['port']}/{params['database']} as {params['user']}")
         
-        # Create the connection
-        conn = psycopg2.connect(**params)
-        conn.autocommit = True  # Set autocommit mode
+        conn = psycopg2.connect(
+            user=params["user"],
+            password=params["password"],
+            host=params["host"],
+            port=params["port"],
+            database=params["database"],
+            connect_timeout=10  # 10 seconds timeout
+        )
         
-        # Test the connection
-        cur = conn.cursor()
-        cur.execute("SELECT version()")
-        version = cur.fetchone()[0]
-        cur.close()
-        
-        logger.info(f"✅ Direct PostgreSQL connection established: {version}")
-        _direct_conn = conn
+        logging.info("Direct psycopg2 connection established successfully")
         return conn
     except Exception as e:
-        logger.error(f"❌ Direct PostgreSQL connection failed: {e}")
-        return None
+        logging.error(f"Failed to establish direct psycopg2 connection: {e}")
+        logging.error(traceback.format_exc())
+        raise
 
 def get_db_url() -> str:
     """
-    Get the database URL from environment variables or use SQLite as fallback.
-    Always prioritizes internal Railway PostgreSQL endpoint when in Railway environment.
+    Get the database URL for SQLAlchemy.
+    Prioritizes using DATABASE_URL environment variable if available,
+    otherwise constructs URL from individual parameters.
     """
-    # Always use the internal endpoint for Railway PostgreSQL
-    if 'RAILWAY_PROJECT_ID' in os.environ:
-        db_user = os.environ.get('PGUSER')
-        db_password = os.environ.get('PGPASSWORD')
-        db_name = os.environ.get('PGDATABASE', 'railway')
+    # First try to use DATABASE_URL directly
+    db_url = os.environ.get("DATABASE_URL")
+    
+    if not db_url:
+        # Construct URL from individual parameters
+        params = get_pg_direct_params()
         
-        if db_user and db_password:
-            # Construct internal URL
-            internal_url = f"postgresql://{db_user}:{db_password}@postgres.railway.internal:5432/{db_name}"
-            logger.info(f"Using Railway internal PostgreSQL URL: {internal_url.replace(db_password, '****')}")
-            return internal_url
-    
-    # Fallback to other methods if not in Railway or missing credentials
-    database_url = os.environ.get('DATABASE_URL')
-    
-    # If DATABASE_URL exists but contains proxy.rlwy.net, fix it
-    if database_url and 'proxy.rlwy.net' in database_url:
-        logger.warning("⚠️ Found external proxy URL, converting to internal endpoint")
-        database_url = database_url.replace('postgresql://', '')
-        credentials, rest = database_url.split('@', 1)
-        host_port, db_name = rest.split('/', 1)
-        database_url = f"postgresql://{credentials}@postgres.railway.internal:5432/{db_name}"
-        logger.info(f"Converted to internal URL: postgresql://user:****@postgres.railway.internal:5432/{db_name}")
-        return database_url
-    
-    # Use individual connection parameters as another fallback
-    db_user = os.environ.get('PGUSER') or os.environ.get('DB_USER')
-    db_password = os.environ.get('PGPASSWORD') or os.environ.get('DB_PASSWORD')
-    db_host = os.environ.get('PGHOST') or os.environ.get('DB_HOST')
-    db_port = os.environ.get('PGPORT') or os.environ.get('DB_PORT', '5432')
-    db_name = os.environ.get('PGDATABASE') or os.environ.get('DB_NAME')
-    
-    # Check if we have all required PostgreSQL environment variables
-    if all([db_user, db_password, db_host, db_name]):
-        # Force internal Railway hostname in Railway environment
-        if 'RAILWAY_PROJECT_ID' in os.environ and db_host != 'postgres.railway.internal':
-            db_host = 'postgres.railway.internal'
-            db_port = '5432'
+        # Construct URL
+        db_url = (
+            f"postgresql://{params['user']}:{params['password']}@"
+            f"{params['host']}:{params['port']}/{params['database']}"
+        )
+        logging.info(f"Constructed database URL from parameters (host: {params['host']})")
+    else:
+        logging.info("Using DATABASE_URL from environment")
+        
+        # For Railway, always ensure we're using the internal endpoint
+        if os.environ.get("RAILWAY_PRIVATE_DOMAIN"):
+            from urllib.parse import urlparse, urlunparse
             
-        url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-        logger.info(f"Using constructed PostgreSQL URL: postgresql://user:****@{db_host}:{db_port}/{db_name}")
-        return url
+            parsed_url = urlparse(db_url)
+            railway_host = os.environ.get("RAILWAY_PRIVATE_DOMAIN")
+            
+            # Only replace if we're not already using the Railway internal endpoint
+            if parsed_url.hostname != railway_host:
+                parts = list(parsed_url)
+                netloc = parsed_url.netloc
+                
+                # Replace just the hostname part
+                netloc_parts = netloc.split('@')
+                if len(netloc_parts) > 1:
+                    host_port = netloc_parts[1].split(':')
+                    if len(host_port) > 1:
+                        netloc_parts[1] = f"{railway_host}:{host_port[1]}"
+                    else:
+                        netloc_parts[1] = railway_host
+                    
+                    parts[1] = '@'.join(netloc_parts)
+                    db_url = urlunparse(parts)
+                    logging.info(f"Updated DATABASE_URL to use Railway internal endpoint: {railway_host}")
     
-    # Final fallback to SQLite
-    logger.warning("⚠️ No PostgreSQL credentials found, defaulting to SQLite")
-    db_path = os.environ.get('SQLITE_PATH', 'twitter_bookmarks.db')
-    return f"sqlite:///{db_path}"
+    # Log the URL with password masked
+    log_url = db_url
+    if ":" in log_url and "@" in log_url:
+        parts = log_url.split(":")
+        if len(parts) >= 3:
+            # Format: postgresql://user:password@host:port/database
+            user_part = parts[1].lstrip("/")
+            masked_url = f"{parts[0]}://{user_part}:******@{parts[2].split('@', 1)[1]}"
+            logging.info(f"Using database URL: {masked_url}")
+    
+    return db_url
 
 def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Engine:
     """
