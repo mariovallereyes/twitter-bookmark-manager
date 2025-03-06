@@ -12,6 +12,7 @@ import time
 import secrets
 import threading
 import traceback
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
@@ -43,7 +44,6 @@ import requests
 import hashlib
 import platform
 from sqlalchemy import text, create_engine
-import random
 
 # Import user authentication components
 from auth.auth_routes_final import auth_bp
@@ -61,7 +61,8 @@ from database.multi_user_db.db_final import (
     get_engine,
     db_session,
     check_database_status,
-    init_database
+    init_database,
+    setup_database
 )
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.update_bookmarks_final import (
@@ -134,13 +135,38 @@ def check_db_health():
         
     try:
         # Only check health on percentage of requests to avoid overhead
-        if random.random() < 0.1:  # 10% of requests
-            health = check_engine_health()
-            if not health['healthy']:
-                logger.warning(f"Database health check failed: {health['message']}")
-                # Don't fail the request, just log the issue
+        if random.random() < 0.05:  # 5% of requests (reduced from 10%)
+            # Use retry logic for health check
+            max_attempts = 3
+            attempt = 0
+            last_error = None
+            
+            while attempt < max_attempts:
+                try:
+                    health = check_engine_health()
+                    if not health['healthy']:
+                        logger.warning(f"Database health check failed: {health['message']}")
+                        
+                        # Force reconnect on unhealthy status
+                        setup_database(force_reconnect=True)
+                        logger.info("Forced database reconnection after unhealthy status")
+                    
+                    # If we get here, either health check passed or we reconnected
+                    return
+                    
+                except Exception as e:
+                    attempt += 1
+                    last_error = e
+                    wait_time = 0.5 * (2 ** (attempt - 1))  # Short exponential backoff
+                    
+                    if attempt < max_attempts:
+                        logger.warning(f"Health check attempt {attempt} failed, retrying in {wait_time}s: {e}")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Health check failed after {max_attempts} attempts: {e}")
+                        # Don't fail the request, just log the issue
     except Exception as e:
-        logger.error(f"Error checking database health: {e}")
+        logger.error(f"Error in health check routine: {e}")
         # Continue processing the request even if health check fails
 
 # Set session to be permanent by default
@@ -625,11 +651,30 @@ if __name__ == '__main__':
     
     logger.info(f"Starting server on port {port} with debug={debug}")
     
+    # Number of attempts to connect to the database
+    max_db_attempts = 5
+    db_attempt = 0
+    db_initialized = False
+    
+    while db_attempt < max_db_attempts and not db_initialized:
+        try:
+            # Initialize the database
+            init_database()
+            logger.info("Database initialized successfully")
+            db_initialized = True
+        except Exception as e:
+            db_attempt += 1
+            wait_time = 2 ** db_attempt  # Exponential backoff
+            logger.error(f"Database initialization attempt {db_attempt}/{max_db_attempts} failed: {e}")
+            
+            if db_attempt < max_db_attempts:
+                logger.info(f"Retrying database initialization in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Failed to initialize database after {max_db_attempts} attempts")
+                # Continue anyway - we'll try again when a request comes in
+    
     try:
-        # Initialize the database
-        init_database()
-        logger.info("Database initialized successfully")
-        
         # Run the app
         app.run(host='0.0.0.0', port=port, debug=debug)
     except Exception as e:
