@@ -69,6 +69,19 @@ from auth.user_api_final import user_api_bp
 from auth.user_context_final import UserContextMiddleware
 from database.multi_user_db.user_model_final import get_user_by_id
 
+# Add missing login_required import
+from functools import wraps
+from flask import redirect, url_for
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = UserContext.get_current_user()
+        if user is None:
+            return redirect(url_for('auth.login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
 # Import database modules
 from database.multi_user_db.db_final import get_db_connection, create_tables, cleanup_db_connections, check_engine_health, Session, close_all_sessions, get_engine
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
