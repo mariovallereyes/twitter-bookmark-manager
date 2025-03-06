@@ -13,6 +13,7 @@ import secrets
 import threading
 import traceback
 import random
+import psycopg2
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
@@ -62,7 +63,8 @@ from database.multi_user_db.db_final import (
     db_session,
     check_database_status,
     init_database,
-    setup_database
+    setup_database,
+    get_db_url
 )
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.update_bookmarks_final import (
@@ -194,7 +196,7 @@ def login_required(f):
 # Home page
 @app.route('/')
 def index():
-    """Home page - now aware of user context"""
+    """Home page - now aware of user context with direct DB connection"""
     logger.info("Home page requested")
     user = UserContext.get_current_user()
     
@@ -206,30 +208,88 @@ def index():
         logger.info("User not authenticated, redirecting to login")
         return redirect(url_for('auth.login'))
     
-    # Get categories for the current user
+    # Get categories for the current user - using DIRECT connection without pooling
     retry_count = 0
     max_retries = 5
     last_error = None
     
     while retry_count < max_retries:
         try:
-            conn = get_db_connection()
-            try:
-                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                # Don't pass user_id again, it's already in the searcher instance
-                categories = searcher.get_categories()
+            # Create a direct connection to the database instead of using the pool
+            # This approach is less efficient but more reliable when the server has connection issues
+            db_url = get_db_url()
+            
+            # Parse the connection string to get connection parameters
+            if 'postgresql://' in db_url:
+                # Extract connection params from sqlalchemy URL
+                conn_parts = db_url.replace('postgresql://', '').split('@')
+                user_pass = conn_parts[0].split(':')
+                host_port_db = conn_parts[1].split('/')
+                host_port = host_port_db[0].split(':')
+                
+                db_user = user_pass[0]
+                db_password = user_pass[1]
+                db_host = host_port[0]
+                db_port = host_port[1] if len(host_port) > 1 else '5432'
+                db_name = host_port_db[1]
+                
+                logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+                
+                # Connect directly with psycopg2
+                direct_conn = psycopg2.connect(
+                    user=db_user,
+                    password=db_password,
+                    host=db_host,
+                    port=db_port,
+                    dbname=db_name,
+                    connect_timeout=3,
+                    application_name='twitter_bookmark_manager_direct'
+                )
+                
+                # Set autocommit to avoid transaction issues
+                direct_conn.autocommit = True
+                
+                # Execute a simple query to get categories
+                cursor = direct_conn.cursor()
+                cursor.execute(f"""
+                    SELECT id, name, description 
+                    FROM categories 
+                    WHERE user_id = %s 
+                    ORDER BY name
+                """, (user.id,))
+                
+                # Fetch categories directly
+                categories = []
+                for row in cursor.fetchall():
+                    categories.append({
+                        'id': row[0],
+                        'name': row[1],
+                        'description': row[2]
+                    })
+                
+                cursor.close()
+                direct_conn.close()
+                
+                logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
                 
                 # Check if user is admin
                 is_admin = getattr(user, 'is_admin', False)
                 
-                logger.info(f"Successfully loaded categories for user {user.id}")
                 return render_template(template, categories=categories, user=user, is_admin=is_admin)
-            except Exception as e:
-                logger.error(f"Error in index route with connection: {e}")
-                last_error = e
-                raise  # Let our retry handler catch this
-            finally:
-                conn.close()
+            else:
+                # Fall back to SQLAlchemy for non-PostgreSQL databases
+                conn = get_db_connection()
+                try:
+                    searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                    categories = searcher.get_categories()
+                    
+                    # Check if user is admin
+                    is_admin = getattr(user, 'is_admin', False)
+                    
+                    logger.info(f"Successfully loaded categories for user {user.id}")
+                    return render_template(template, categories=categories, user=user, is_admin=is_admin)
+                finally:
+                    conn.close()
         except Exception as e:
             retry_count += 1
             last_error = e
@@ -238,16 +298,6 @@ def index():
                 wait_time = 1 * (2 ** (retry_count - 1))
                 logger.warning(f"Database error in index route, retrying in {wait_time}s (attempt {retry_count}/{max_retries}): {e}")
                 time.sleep(wait_time)
-                
-                # Force reconnect for specific errors
-                error_str = str(e).lower()
-                if "connection" in error_str or "server closed" in error_str or "reset" in error_str:
-                    try:
-                        from database.multi_user_db.db_final import setup_database
-                        setup_database(force_reconnect=True)
-                        logger.info(f"Forced database reconnection on index page retry #{retry_count}")
-                    except Exception as reconnect_error:
-                        logger.error(f"Failed to reconnect for index page: {reconnect_error}")
             else:
                 # Last attempt failed, show error page
                 logger.error(f"All retries for index route failed: {e}")

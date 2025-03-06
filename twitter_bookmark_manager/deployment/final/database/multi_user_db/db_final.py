@@ -156,26 +156,17 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
             db_url = get_db_url()
             db_type = 'postgresql' if 'postgresql' in db_url else 'sqlite'
             
-            # Ultra-conservative connection pool parameters for Railway
-            pool_size = int(os.environ.get('DB_POOL_SIZE', '1'))  # Single connection
-            max_overflow = int(os.environ.get('DB_MAX_OVERFLOW', '1'))  # At most one overflow connection
-            pool_timeout = int(os.environ.get('DB_POOL_TIMEOUT', '5'))  # Quick timeout
-            pool_recycle = int(os.environ.get('DB_POOL_RECYCLE', '30'))  # Very frequent recycling
-            
             # Engine parameters dict
             engine_params = {
                 'echo': show_sql,
                 'pool_pre_ping': True,  # Test connections before use
-                'pool_timeout': pool_timeout,
-                'pool_recycle': pool_recycle
             }
             
-            # Add pool settings for PostgreSQL
+            # Add settings for PostgreSQL
             if db_type == 'postgresql':
                 engine_params.update({
-                    'poolclass': QueuePool,
-                    'pool_size': pool_size,
-                    'max_overflow': max_overflow,
+                    # Use NullPool to disable connection pooling
+                    'poolclass': NullPool,
                     'connect_args': {
                         'connect_timeout': 3,  # Very short connection timeout
                         'keepalives': 1,  # Enable TCP keepalives
@@ -204,15 +195,15 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
             if db_type == 'postgresql':
                 @event.listens_for(_engine, "connect")
                 def set_pg_statement_timeout(dbapi_connection, connection_record):
-                    # Set statement timeout to 10 seconds (even shorter)
+                    # Set statement timeout to 5 seconds (extremely short)
                     cursor = dbapi_connection.cursor()
-                    cursor.execute("SET statement_timeout = '10s';")
+                    cursor.execute("SET statement_timeout = '5s';")
                     cursor.close()
             
             # Create session factory
             _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
             
-            logger.info(f"✅ Database connection established: {db_type}")
+            logger.info(f"✅ Database connection established: {db_type} with NullPool (no connection pooling)")
             
             # Initialize tables
             create_tables()
