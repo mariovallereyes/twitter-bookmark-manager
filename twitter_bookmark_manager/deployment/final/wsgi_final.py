@@ -1,122 +1,65 @@
-import sys
 import os
+import sys
 import logging
-from pathlib import Path
-import traceback
+from flask import Flask, jsonify
 
-# Set up logging
-logging_format = '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-logging.basicConfig(level=logging.INFO, format=logging_format)
+# Set up simplified logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 logger.info("="*50)
-logger.info("Initializing WSGI Application for Railway")
+logger.info("Starting SIMPLIFIED WSGI Application for Railway")
 
-# Add the current directory to Python path
-current_dir = Path(__file__).parent.resolve()
-if str(current_dir) not in sys.path:
-    sys.path.insert(0, str(current_dir))
-    logger.info(f"Added {current_dir} to Python path")
+# Create a basic application for testing
+application = Flask(__name__)
 
-# Add parent directory to Python path
-parent_dir = current_dir.parent.resolve()
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
-    logger.info(f"Added {parent_dir} to Python path")
-
-# Add grandparent directory to Python path to find twitter_bookmark_manager module
-grandparent_dir = parent_dir.parent.resolve()
-if str(grandparent_dir) not in sys.path:
-    sys.path.insert(0, str(grandparent_dir))
-    logger.info(f"Added {grandparent_dir} to Python path")
-
-# Change working directory
-os.chdir(current_dir)
-logger.info(f"Changed working directory to: {os.getcwd()}")
-
-# Log all environment variables (redacting sensitive ones)
-logger.info("Environment variables:")
-for key, value in os.environ.items():
-    # Redact sensitive values
-    if any(sensitive in key.lower() for sensitive in ['password', 'secret', 'key', 'token']):
-        logger.info(f"  {key}=******")
-    else:
-        logger.info(f"  {key}={value}")
-
-# Store the import error for later use
-import_error = None
-error_details = None
-
-# Import the existing Flask app instead of creating a new one
-try:
-    # First try importing the database module to test connection
-    logger.info("Testing database connection")
-    try:
-        from database.multi_user_db.db_final import check_database_status, setup_database
-        
-        # Test database connection
-        db_status = check_database_status()
-        if db_status['healthy']:
-            logger.info("✅ Database connection successful")
-            # Important: Do NOT set import_error here since the database is healthy
-        else:
-            logger.warning(f"⚠️ Database connection issues: {db_status['message']}")
-            # Try to setup database again but don't fail if it doesn't work
-            try:
-                setup_database(force_reconnect=True)
-                logger.info("✅ Successfully reconnected to database")
-            except Exception as reconnect_error:
-                logger.warning(f"⚠️ Reconnection attempt failed: {reconnect_error}")
-                # We'll still try to import the application
-    except Exception as db_error:
-        logger.error(f"❌ Database connection failed: {db_error}")
-        # Only set import_error for actual exceptions, not for status checks
-        if not str(db_error).lower() == 'healthy':  # Fix for incorrectly treating 'healthy' as an error
-            import_error = f"Database connection error: {str(db_error)}"
-            error_details = traceback.format_exc()
-        
-    # Now import the application
-    if not import_error:
-        logger.info("Importing application from auth.api_server_multi_user")
-        from auth.api_server_multi_user import app as application
-        logger.info("✅ Successfully imported application from api_server_multi_user")
-except Exception as e:
-    error_details = traceback.format_exc()
-    import_error = str(e)
-    logger.error(f"Error importing application: {import_error}")
-    logger.error(f"Error details: {error_details}")
-    
-    # Create a fallback application
-    from flask import Flask, jsonify
-    application = Flask(__name__, 
-                      template_folder='web_final/templates',
-                      static_folder='web_final/static')
-    
-    # Root route for testing
-    @application.route('/')
-    def index():
-        return f"""
+@application.route('/')
+def index():
+    """Basic test route to confirm WSGI is working"""
+    return """
+    <html>
+    <head>
+        <title>Twitter Bookmark Manager - Test Page</title>
+        <style>
+            body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+            h1 { color: #1DA1F2; }
+            .info { background: #f5f8fa; padding: 15px; border-radius: 5px; }
+            .success { color: green; }
+        </style>
+    </head>
+    <body>
         <h1>Twitter Bookmark Manager</h1>
-        <p>Error loading application: {import_error}</p>
-        <h2>Error Details:</h2>
-        <pre>{error_details}</pre>
-        <h2>Troubleshooting:</h2>
-        <ul>
-            <li>Check database connection settings</li>
-            <li>Verify that all environment variables are set correctly</li>
-            <li>Ensure that the application code is properly deployed</li>
-        </ul>
-        """
-    
-    # Add JSON error endpoint for API clients
-    @application.route('/api/status')
-    def api_status():
-        return jsonify({
-            "status": "error",
-            "message": f"Application failed to initialize: {import_error}",
-            "error_details": error_details
-        }), 500
-    
-    logger.error("⚠️ Using fallback application due to import error")
+        <div class="info">
+            <h2 class="success">✅ Basic WSGI server is working!</h2>
+            <p>This is a simplified test page to verify the server can start.</p>
+            <h3>Environment Information:</h3>
+            <ul>
+                <li>Python Version: {}</li>
+                <li>Environment: {}</li>
+                <li>Working Directory: {}</li>
+            </ul>
+        </div>
+    </body>
+    </html>
+    """.format(
+        sys.version,
+        os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
+        os.getcwd()
+    )
 
+@application.route('/api/test')
+def api_test():
+    """Test API endpoint"""
+    return jsonify({
+        "status": "success",
+        "message": "API endpoint is responding",
+        "environment": os.environ.get('RAILWAY_ENVIRONMENT', 'unknown')
+    })
+
+if __name__ == "__main__":
+    # Only for local testing
+    application.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+logger.info("Simplified WSGI application initialized")
 logger.info("="*50) 
