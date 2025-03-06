@@ -237,6 +237,11 @@ def get_db_connection():
     """Create and return a database session"""
     return create_session()
 
+# Alias for backward compatibility
+def get_db_session():
+    """Alias for create_session for backward compatibility"""
+    return create_session()
+
 def create_tables():
     """Create database tables if they don't exist"""
     from sqlalchemy import (Table, Column, Integer, String, Boolean, 
