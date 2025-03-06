@@ -420,93 +420,130 @@ def update_database():
             rebuild_vector = request.args.get('rebuild_vector', '').lower() in ('true', 't', '1')
             reset_progress = request.args.get('reset_progress', '').lower() in ('true', 't', '1')
         
-        # Generate a session ID if not provided
+        logger.info(f"Update parameters: start_index={start_index}, session_id={session_id}, rebuild_vector={rebuild_vector}, reset_progress={reset_progress}")
+            
+        # Get or generate session ID
         if not session_id:
             session_id = str(uuid.uuid4())[:8]
-            
-        logger.info(f"Update parameters: start_index={start_index}, rebuild_vector={rebuild_vector}, reset_progress={reset_progress}")
+            logger.info(f"Generated new session ID: {session_id}")
         
-        # If reset_progress is requested, delete the progress file
-        if reset_progress:
-            user_dir = f"user_{user_id}"
-            potential_progress_files = [
-                os.path.join(BASE_DIR, "database", user_dir, 'update_progress.json'),
-                os.path.join("database", user_dir, 'update_progress.json'),
-                os.path.join("/app/database", user_dir, 'update_progress.json')
-            ]
-            
-            # Try to remove all possible progress files
-            for progress_file in potential_progress_files:
-                if os.path.exists(progress_file):
-                    try:
-                        # Backup before deleting
-                        backup = f"{progress_file}.bak_{int(time.time())}"
-                        shutil.copy2(progress_file, backup)
-                        os.remove(progress_file)
-                        logger.info(f"Reset progress file: {progress_file}")
-                    except Exception as e:
-                        logger.warning(f"Could not reset progress file {progress_file}: {e}")
-            
-            # Reset start_index
-            start_index = 0
-        
-        # If start_index is 0, this is a new update, so use a new session ID
-        if start_index == 0:
-            session_id = str(uuid.uuid4())[:8]
-            logger.info(f"Starting new update session: {session_id}")
-        
-        # Get total bookmarks count for progress tracking
+        # Try to get user directory
         user_dir = f"user_{user_id}"
+        progress_file = None
+        
+        # Check multiple possible paths for the progress file
+        potential_progress_files = [
+            os.path.join(BASE_DIR, "database", user_dir, 'update_progress.json'),
+            os.path.join("database", user_dir, 'update_progress.json'),
+            os.path.join("/app/database", user_dir, 'update_progress.json')
+        ]
+        
+        for file_path in potential_progress_files:
+            if os.path.exists(file_path):
+                progress_file = file_path
+                logger.info(f"Found progress file at {progress_file}")
+                break
+        
+        # Reset progress if requested
+        if reset_progress and progress_file and os.path.exists(progress_file):
+            try:
+                os.remove(progress_file)
+                logger.info(f"Reset progress file at {progress_file}")
+                start_index = 0  # Force start from beginning
+            except Exception as e:
+                logger.error(f"Error resetting progress: {e}")
+        
+        # Check for bookmarks file
+        bookmarks_file = None
         potential_bookmark_files = [
             os.path.join(BASE_DIR, "database", user_dir, 'twitter_bookmarks.json'),
             os.path.join("database", user_dir, 'twitter_bookmarks.json'),
             os.path.join("/app/database", user_dir, 'twitter_bookmarks.json')
         ]
         
-        total_bookmarks = 0
-        for bookmarks_file in potential_bookmark_files:
-            if os.path.exists(bookmarks_file):
+        for file_path in potential_bookmark_files:
+            if os.path.exists(file_path):
+                bookmarks_file = file_path
+                logger.info(f"Found bookmarks file at {bookmarks_file}")
+                break
+                
+        if not bookmarks_file:
+            logger.error("No bookmarks file found")
+            return jsonify({
+                'error': 'Bookmarks file not found',
+                'session_id': session_id,  # Return session ID for polling
+                'status': 'error'
+            }), 400
+            
+        # Log the start of the update process
+        logger.info(f"Starting update process for session {session_id}")
+        
+        # Start the background processing thread
+        def background_update():
+            try:
+                logger.info(f"Starting background processing thread for session {session_id}")
+                # Import the update_bookmarks function
+                from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
+                
+                # Process update
+                result = final_update_bookmarks(
+                    session_id=session_id,
+                    start_index=start_index,
+                    rebuild_vector=rebuild_vector,
+                    user_id=user_id
+                )
+                
+                # Log the result
+                if result.get('success'):
+                    logger.info(f"Background processing completed successfully for session {session_id}")
+                    logger.info(f"Processed: {result.get('processed_this_session', 0)} bookmarks")
+                else:
+                    logger.error(f"Background processing failed for session {session_id}: {result.get('error', 'Unknown error')}")
+                    
+                # Save the final status
+                status_file = os.path.join(os.path.dirname(bookmarks_file), f'update_status_{session_id}.json')
+                with open(status_file, 'w') as f:
+                    json.dump({
+                        'is_complete': True,
+                        'success': result.get('success', False),
+                        'message': result.get('message', ''),
+                        'error': result.get('error', ''),
+                        'processed': result.get('processed_this_session', 0),
+                        'timestamp': datetime.now().isoformat()
+                    }, f)
+                    
+            except Exception as e:
+                logger.error(f"Unhandled exception in background thread for session {session_id}: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Save error status
                 try:
-                    with open(bookmarks_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        
-                    if isinstance(data, list):
-                        total_bookmarks = len(data)
-                    elif isinstance(data, dict) and 'bookmarks' in data:
-                        total_bookmarks = len(data['bookmarks'])
-                        
-                    if total_bookmarks > 0:
-                        break
-                except Exception as e:
-                    logger.warning(f"Could not determine bookmark count from {bookmarks_file}: {e}")
+                    status_file = os.path.join(os.path.dirname(bookmarks_file), f'update_status_{session_id}.json')
+                    with open(status_file, 'w') as f:
+                        json.dump({
+                            'is_complete': True,
+                            'success': False,
+                            'error': str(e),
+                            'traceback': traceback.format_exc(),
+                            'timestamp': datetime.now().isoformat()
+                        }, f)
+                except Exception as save_error:
+                    logger.error(f"Error saving status file: {save_error}")
         
-        # Import the update_bookmarks function from the right location
-        from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
+        # Start the background thread
+        threading.Thread(target=background_update, daemon=True).start()
         
-        # Process update
-        result = final_update_bookmarks(
-            session_id=session_id,
-            start_index=start_index,
-            rebuild_vector=rebuild_vector,
-            user_id=user_id
-        )
-        
-        # If successful, add total bookmarks count for progress calculation
-        if result.get('success'):
-            result['total_bookmarks'] = total_bookmarks
-            if total_bookmarks > 0:
-                result['percent_complete'] = min(100, (result.get('processed_this_session', 0) / total_bookmarks) * 100)
-            else:
-                result['percent_complete'] = 100
-        
-        # Return result
-        return jsonify(result)
+        # Process the update - return immediately to prevent timeouts
+        return jsonify({
+            'message': 'Update process started in background',
+            'session_id': session_id,
+            'status': 'processing'  # Indicate processing is ongoing
+        })
         
     except Exception as e:
-        logger.error(f"Error updating database: {e}")
+        logger.error(f"Error in update-database endpoint: {e}")
         logger.error(traceback.format_exc())
         return jsonify({
-            'success': False,
             'error': str(e),
             'traceback': traceback.format_exc()
         }), 500
@@ -640,9 +677,7 @@ def async_update_database():
 # Update status endpoint to check progress
 @app.route('/update-status', methods=['GET'])
 def update_status():
-    """
-    Check the status of an async database update.
-    """
+    """Get the status of an update process"""
     try:
         user_id = UserContext.get_user_id()
         session_id = request.args.get('session_id')
@@ -650,78 +685,98 @@ def update_status():
         if not session_id:
             return jsonify({'error': 'Session ID required'}), 400
             
-        logger.info(f"Checking status for session {session_id}, user {user_id}")
+        logger.info(f"Status check for session {session_id} by user {user_id}")
         
-        # Find status file
+        # Try to find the status file
         user_dir = f"user_{user_id}"
+        status_file = None
+        
+        # Check multiple possible paths for the status file
         potential_status_files = [
             os.path.join(BASE_DIR, "database", user_dir, f'update_status_{session_id}.json'),
             os.path.join("database", user_dir, f'update_status_{session_id}.json'),
             os.path.join("/app/database", user_dir, f'update_status_{session_id}.json')
         ]
         
-        status_file = None
         for file_path in potential_status_files:
             if os.path.exists(file_path):
                 status_file = file_path
+                logger.info(f"Found status file at {status_file}")
                 break
                 
-        if not status_file:
-            # Check progress file instead
-            potential_progress_files = [
-                os.path.join(BASE_DIR, "database", user_dir, 'update_progress.json'),
-                os.path.join("database", user_dir, 'update_progress.json'),
-                os.path.join("/app/database", user_dir, 'update_progress.json')
-            ]
-            
-            for file_path in potential_progress_files:
-                if os.path.exists(file_path):
-                    try:
-                        with open(file_path, 'r') as f:
-                            progress_data = json.load(f)
-                            
-                        # Check if this is the right session
-                        if progress_data.get('session_id') == session_id:
-                            # Convert progress to status format
-                            return jsonify({
-                                'status': 'processing',
-                                'session_id': session_id,
-                                'progress': progress_data.get('stats', {}),
-                                'last_processed_index': progress_data.get('last_processed_index', 0)
-                            })
-                    except Exception as e:
-                        logger.warning(f"Error reading progress file {file_path}: {e}")
-            
-            # No status file found
-            return jsonify({
-                'status': 'unknown',
-                'session_id': session_id,
-                'error': 'Status file not found'
-            }), 404
+        if status_file and os.path.exists(status_file):
+            # Read the status file
+            try:
+                with open(status_file, 'r') as f:
+                    status = json.load(f)
+                logger.info(f"Status for session {session_id}: {status}")
+                return jsonify(status)
+            except Exception as e:
+                logger.error(f"Error reading status file {status_file}: {e}")
+                return jsonify({
+                    'error': f'Error reading status: {str(e)}',
+                    'session_id': session_id,
+                    'is_complete': False
+                }), 500
         
-        # Read status file
-        with open(status_file, 'r') as f:
-            status_data = json.load(f)
-            
-        # Check if process is still running (if status file hasn't been updated recently)
-        last_update = datetime.fromisoformat(status_data.get('last_update', ''))
-        current_time = datetime.now()
-        time_diff = (current_time - last_update).total_seconds()
+        # If no status file, check the progress file
+        progress_file = None
+        potential_progress_files = [
+            os.path.join(BASE_DIR, "database", user_dir, 'update_progress.json'),
+            os.path.join("database", user_dir, 'update_progress.json'),
+            os.path.join("/app/database", user_dir, 'update_progress.json')
+        ]
         
-        # If no update in 2 minutes, consider it stalled
-        if time_diff > 120 and status_data.get('status') == 'processing':
-            status_data['status'] = 'stalled'
-            status_data['error'] = f'No update in {time_diff:.1f} seconds'
-            
-        return jsonify(status_data)
+        for file_path in potential_progress_files:
+            if os.path.exists(file_path):
+                progress_file = file_path
+                logger.info(f"Found progress file at {progress_file}")
+                break
+                
+        if progress_file and os.path.exists(progress_file):
+            # Read the progress file
+            try:
+                with open(progress_file, 'r') as f:
+                    progress = json.load(f)
+                
+                # Check if this is the same session
+                if progress.get('session_id') == session_id:
+                    # Return progress info
+                    status = {
+                        'is_complete': False,
+                        'session_id': session_id,
+                        'current_step': 'finding_bookmarks',
+                        'progress': {
+                            'total_processed': progress.get('last_processed_index', 0),
+                            'new_count': progress.get('stats', {}).get('new_count', 0),
+                            'updated_count': progress.get('stats', {}).get('updated_count', 0),
+                            'errors': progress.get('stats', {}).get('errors', 0)
+                        }
+                    }
+                    logger.info(f"Progress for session {session_id}: {status}")
+                    return jsonify(status)
+                else:
+                    # Different session
+                    logger.info(f"Progress file has different session ID: {progress.get('session_id')} != {session_id}")
+            except Exception as e:
+                logger.error(f"Error reading progress file {progress_file}: {e}")
+        
+        # No status found - assume still initializing
+        logger.info(f"No status found for session {session_id}, assuming still initializing")
+        return jsonify({
+            'is_complete': False,
+            'session_id': session_id,
+            'current_step': 'initializing',
+            'message': 'Processing started, no status available yet'
+        })
         
     except Exception as e:
         logger.error(f"Error checking update status: {e}")
         logger.error(traceback.format_exc())
         return jsonify({
-            'success': False,
             'error': str(e),
-            'traceback': traceback.format_exc()
+            'traceback': traceback.format_exc(),
+            'is_complete': False
         }), 500
 
 @app.route('/admin/monitor', methods=['GET'])

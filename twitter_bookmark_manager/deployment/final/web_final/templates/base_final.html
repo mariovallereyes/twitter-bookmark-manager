@@ -922,6 +922,12 @@
         window.showProgressSteps();
         document.getElementById('progress-steps').style.display = 'block';
         
+        // Reset the progress indicators first
+        const progressSteps = document.querySelectorAll('#progress-steps .progress-icon');
+        progressSteps.forEach(step => {
+            step.textContent = '⭕';
+        });
+        
         const fileInput = document.getElementById('json-file');
         console.log("File input:", fileInput);
         if (!fileInput || !fileInput.files.length) {
@@ -931,6 +937,9 @@
         
         const file = fileInput.files[0];
         console.log("Selected file:", file);
+        
+        // Update first progress step to "in progress"
+        document.querySelector('#step-upload .progress-icon').textContent = '⚡';
         
         // Create FormData object to send the file
         const formData = new FormData();
@@ -944,28 +953,42 @@
         .then(response => {
             console.log("Upload response:", response);
             if (!response.ok) {
+                document.querySelector('#step-upload .progress-icon').textContent = '❌';
                 return response.json().then(err => {
                     throw new Error(`Upload failed: ${err.error || response.statusText}`);
                 });
             }
+            
+            // Update upload step to "completed"
+            document.querySelector('#step-upload .progress-icon').textContent = '✅';
+            // Update validation step to "in progress"
+            document.querySelector('#step-validate .progress-icon').textContent = '⚡';
+            
             return response.json();
         })
         .then(uploadResult => {
             console.log("Upload result:", uploadResult);
             // File uploaded successfully
-            alert('File uploaded successfully! Starting processing...');
+            
+            // Update validation step to "completed"
+            document.querySelector('#step-validate .progress-icon').textContent = '✅';
+            // Update "Finding bookmarks" step to "in progress"
+            document.querySelector('#step-find-new .progress-icon').textContent = '⚡';
             
             // Step 2: Process the bookmarks using regular endpoint
+            const rebuildVector = document.getElementById('rebuild-vector') ? 
+                document.getElementById('rebuild-vector').checked : false;
+            const resetProgress = document.getElementById('reset-progress') ? 
+                document.getElementById('reset-progress').checked : false;
+                
             return fetch('/update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    rebuild_vector: document.getElementById('rebuild-vector') ? 
-                        document.getElementById('rebuild-vector').checked : false,
-                    reset_progress: document.getElementById('reset-progress') ? 
-                        document.getElementById('reset-progress').checked : false
+                    rebuild_vector: rebuildVector,
+                    reset_progress: resetProgress
                 })
             });
         })
@@ -980,13 +1003,104 @@
         })
         .then(result => {
             console.log("Process result:", result);
-            alert('Processing completed! Check console for details.');
+            if (result.status === 'processing') {
+                // Show a more accurate message - still in progress
+                console.log("Processing in progress, checking status...");
+                pollStatus(result.session_id);
+            } else {
+                // Processing completed in single call
+                updateAllProgressSteps(true);
+                alert('Processing completed!');
+            }
         })
         .catch(error => {
             console.error('Error during process:', error);
             alert('Error: ' + error.message);
         });
     };
+    
+    // Add a function to update progress UI based on status
+    function updateAllProgressSteps(isComplete) {
+        const steps = [
+            'step-upload', 
+            'step-validate', 
+            'step-find-new', 
+            'step-init-ai', 
+            'step-dedup', 
+            'step-sql', 
+            'step-categories', 
+            'step-vectors', 
+            'step-sync'
+        ];
+        
+        if (isComplete) {
+            // Mark all steps as complete
+            steps.forEach(stepId => {
+                document.getElementById(stepId).querySelector('.progress-icon').textContent = '✅';
+            });
+        }
+    }
+    
+    // Add polling function to check status
+    function pollStatus(sessionId) {
+        console.log("Polling status for session:", sessionId);
+        
+        fetch(`/update-status?session_id=${sessionId}`)
+        .then(response => response.json())
+        .then(status => {
+            console.log("Status update:", status);
+            
+            if (status.is_complete) {
+                updateAllProgressSteps(true);
+                alert('Processing completed successfully!');
+            } else {
+                // Update progress UI with current status
+                updateProgressFromStatus(status);
+                
+                // Continue polling after delay
+                setTimeout(() => pollStatus(sessionId), 2000);
+            }
+        })
+        .catch(error => {
+            console.error("Error polling status:", error);
+            alert("Error checking process status: " + error.message);
+        });
+    }
+    
+    // Function to update progress UI from status response
+    function updateProgressFromStatus(status) {
+        console.log("Updating progress UI with status:", status);
+        
+        // Update step indicators based on status
+        let currentStep = 'step-find-new';
+        
+        // Reset all icons first
+        const allSteps = document.querySelectorAll('#progress-steps .progress-icon');
+        allSteps.forEach(icon => {
+            icon.textContent = '⭕';
+        });
+        
+        // Mark completed steps
+        document.querySelector('#step-upload .progress-icon').textContent = '✅';
+        document.querySelector('#step-validate .progress-icon').textContent = '✅';
+        
+        // Update current processing step
+        if (status.current_step) {
+            currentStep = `step-${status.current_step.replace(/_/g, '-')}`;
+        }
+        
+        if (document.getElementById(currentStep)) {
+            document.getElementById(currentStep).querySelector('.progress-icon').textContent = '⚡';
+            
+            // Add progress details if available
+            const progress = status.progress || {};
+            const stepTextEl = document.getElementById(currentStep).querySelector('span:last-child');
+            if (stepTextEl && progress.total_processed !== undefined) {
+                const baseText = stepTextEl.textContent.split('...')[0] + '...';
+                stepTextEl.textContent = `${baseText} (${progress.total_processed} processed, ${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
+            }
+        }
+    }
 
     // Make sure basic functions are available globally
     window.showProgressSteps = function() {
