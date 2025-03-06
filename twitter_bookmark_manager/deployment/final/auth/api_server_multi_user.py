@@ -402,114 +402,153 @@ def index():
 @app.route('/upload-bookmarks', methods=['POST'])
 def upload_bookmarks():
     """
-    Handle bookmark JSON file upload with improved reliability.
-    This endpoint ONLY handles the file upload and validation,
-    without starting database processing.
+    Upload bookmarks JSON file endpoint with improved error handling and duplicate detection
     """
-    session_id = str(uuid.uuid4())[:8]
     user = UserContext.get_current_user()
-    user_id = user.id if user else None
+    if not user:
+        return jsonify({"error": "Authentication required"}), 401
+        
+    # Check if a file was uploaded
+    if 'bookmarks_file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+        
+    file = request.files['bookmarks_file']
     
-    logger.info(f"🚀 [UPLOAD-{session_id}] Starting bookmark upload for user {user_id}")
+    # Check if the file is empty
+    if file.filename == '':
+        return jsonify({"error": "Empty file provided"}), 400
+        
+    # Create a safe filename based on user ID and timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    user_id_hash = hashlib.md5(str(user.id).encode()).hexdigest()[:8]
+    safe_filename = f"bookmarks_{user_id_hash}_{timestamp}.json"
     
+    # Ensure uploads directory exists
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    
+    # Save the uploaded file
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
+    file.save(file_path)
+    logger.info(f"Saved uploaded file to {file_path}")
+    
+    # Parse the JSON file
     try:
-        # Check if file exists in request
-        if 'file' not in request.files:
-            logger.error(f"❌ [UPLOAD-{session_id}] No file part in request")
-            return jsonify({
-                'error': 'No file part', 
-                'details': 'Please select a file to upload'
-            }), 400
-            
-        file = request.files['file']
-        
-        # Validate file name
-        if not file.filename:
-            logger.error(f"❌ [UPLOAD-{session_id}] No selected file")
-            return jsonify({
-                'error': 'No file selected', 
-                'details': 'Please select a file to upload'
-            }), 400
-            
-        if not file.filename.lower().endswith('.json'):
-            logger.error(f"❌ [UPLOAD-{session_id}] Invalid file type: {file.filename}")
-            return jsonify({
-                'error': 'Invalid file type', 
-                'details': 'Only JSON files are allowed'
-            }), 400
-            
-        # Validate file content is valid JSON
-        try:
-            file_content = file.read()
-            file.seek(0)  # Reset file pointer
-            json_data = json.loads(file_content)  # Just validate JSON syntax
-            logger.info(f"✅ [UPLOAD-{session_id}] JSON validation successful")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ [UPLOAD-{session_id}] Invalid JSON file: {str(e)}")
-            return jsonify({
-                'error': 'Invalid JSON file', 
-                'details': f'File is not a valid JSON: {str(e)}'
-            }), 400
-            
-        # Create user directory if it doesn't exist
-        user_dir = get_user_directory(user_id)
-        if not os.path.exists(user_dir):
+        with open(file_path, 'r', encoding='utf-8') as f:
             try:
-                os.makedirs(user_dir, exist_ok=True)
-                logger.info(f"📁 [UPLOAD-{session_id}] Created user directory: {user_dir}")
-            except Exception as e:
-                logger.error(f"❌ [UPLOAD-{session_id}] Error creating user directory: {str(e)}")
-                return jsonify({
-                    'error': 'Server error', 
-                    'details': 'Could not create user directory'
-                }), 500
+                bookmarks_data = json.load(f)
                 
-        # Determine file path
-        file_name = f"bookmarks_{session_id}.json"
-        file_path = os.path.join(user_dir, file_name)
-        
-        # Save the file
-        try:
-            file.save(file_path)
-            logger.info(f"💾 [UPLOAD-{session_id}] File saved to: {file_path}")
-        except Exception as e:
-            logger.error(f"❌ [UPLOAD-{session_id}] Error saving file: {str(e)}")
-            return jsonify({'error': 'Failed to save file', 'details': str(e)}), 500
-            
-        # Create status file
-        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-        status_data = {
-            'session_id': session_id,
-            'user_id': user_id,
-            'filename': file_name,
-            'file_path': file_path,
-            'status': 'uploaded',
-            'timestamp': datetime.now().isoformat(),
-            'size_bytes': os.path.getsize(file_path)
-        }
-        
-        try:
-            with open(status_file, 'w') as f:
-                json.dump(status_data, f)
-            logger.info(f"📝 [UPLOAD-{session_id}] Status file created: {status_file}")
-        except Exception as e:
-            logger.warning(f"⚠️ [UPLOAD-{session_id}] Error creating status file: {str(e)}")
-            # Non-critical error, continue
-            
-        # Return success with session ID for client to use in processing request
-        return jsonify({
-            'success': True,
-            'message': 'File uploaded successfully',
-            'session_id': session_id,
-            'filename': file_name,
-            'size_bytes': os.path.getsize(file_path),
-            'next_step': 'Call /process-bookmarks with this session_id to start processing'
-        })
-        
+                # Check if it's a list of bookmarks or has a nested structure
+                if isinstance(bookmarks_data, dict) and 'bookmarks' in bookmarks_data:
+                    bookmarks_list = bookmarks_data.get('bookmarks', [])
+                else:
+                    bookmarks_list = bookmarks_data if isinstance(bookmarks_data, list) else []
+                    
+                if not bookmarks_list:
+                    return jsonify({"error": "No bookmarks found in the file"}), 400
+                    
+                logger.info(f"Found {len(bookmarks_list)} bookmarks in the uploaded file")
+                
+                # Process bookmarks with robust error handling
+                try:
+                    # Get database connection
+                    db_conn = get_db_connection()
+                    
+                    # Check if bookmarks already exist to avoid duplicate key errors
+                    cursor = db_conn.cursor()
+                    cursor.execute(
+                        "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
+                        (user.id,)
+                    )
+                    existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
+                    
+                    # Process bookmarks - handle each bookmark individually with transaction control
+                    processed = 0
+                    skipped = 0
+                    errors = 0
+                    
+                    for bookmark in bookmarks_list:
+                        try:
+                            # Extract bookmark ID
+                            bookmark_id = None
+                            # Try different fields that might contain the ID
+                            for id_field in ['id_str', 'id', 'tweet_id']:
+                                if id_field in bookmark:
+                                    bookmark_id = str(bookmark[id_field])
+                                    break
+                                
+                            # Skip if we couldn't find an ID or it already exists
+                            if not bookmark_id:
+                                logger.warning(f"Bookmark missing ID, skipping: {bookmark}")
+                                errors += 1
+                                continue
+                                
+                            if bookmark_id in existing_bookmark_ids:
+                                logger.info(f"Bookmark {bookmark_id} already exists, skipping")
+                                skipped += 1
+                                continue
+                                
+                            # Extract basic fields
+                            text = bookmark.get('text', bookmark.get('full_text', ''))
+                            created_at = bookmark.get('created_at', '')
+                            author = bookmark.get('user', {}).get('screen_name', '')
+                            author_id = bookmark.get('user', {}).get('id_str') or bookmark.get('user', {}).get('id', '')
+                            
+                            # Use ON CONFLICT DO NOTHING to handle any potential duplicates gracefully
+                            cursor.execute("""
+                                INSERT INTO bookmarks (bookmark_id, user_id, text, created_at, author, author_id, processed)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (bookmark_id) DO NOTHING
+                            """, (
+                                bookmark_id,
+                                user.id,
+                                text,
+                                created_at,
+                                author,
+                                author_id,
+                                False
+                            ))
+                            
+                            # Add to existing set to prevent future duplicates in the same batch
+                            existing_bookmark_ids.add(bookmark_id)
+                            processed += 1
+                            
+                        except Exception as bookmark_error:
+                            logger.error(f"Error processing bookmark: {bookmark_error}")
+                            errors += 1
+                            # Continue with the next bookmark instead of failing the entire batch
+                            continue
+                    
+                    # Commit all changes
+                    db_conn.commit()
+                    
+                    # Store file path in session for the next step
+                    session['uploaded_file'] = file_path
+                    session['bookmark_count'] = processed
+                    
+                    return jsonify({
+                        "success": True,
+                        "message": f"Successfully processed {processed} bookmarks, skipped {skipped} duplicates",
+                        "processed": processed,
+                        "skipped": skipped,
+                        "errors": errors,
+                        "next_step": "/process-bookmarks"
+                    })
+                    
+                except Exception as db_error:
+                    # Rollback on error
+                    if 'db_conn' in locals() and db_conn:
+                        db_conn.rollback()
+                        
+                    logger.error(f"Database error: {db_error}")
+                    return jsonify({"error": f"Database error: {str(db_error)}"}), 500
+                    
+            except json.JSONDecodeError as json_error:
+                logger.error(f"Invalid JSON: {json_error}")
+                return jsonify({"error": f"Invalid JSON file: {str(json_error)}"}), 400
+                
     except Exception as e:
-        logger.error(f"❌ [UPLOAD-{session_id}] Unexpected error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'error': 'Server error', 'details': str(e)}), 500
+        logger.error(f"File processing error: {e}")
+        return jsonify({"error": f"Error processing file: {str(e)}"}), 500
 
 @app.route('/process-bookmarks', methods=['POST'])
 def process_bookmarks():

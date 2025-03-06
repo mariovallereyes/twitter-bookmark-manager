@@ -115,6 +115,28 @@ def get_db_url() -> str:
     Get the database URL from environment variables or use SQLite as fallback.
     Handles different environment variable naming depending on deployment.
     """
+    # First check for complete DATABASE_URL environment variable
+    database_url = os.environ.get('DATABASE_URL')
+    
+    # If DATABASE_URL exists but contains proxy.rlwy.net, ignore it and build from components
+    if database_url and 'proxy.rlwy.net' in database_url:
+        logger.warning("⚠️ Ignoring DATABASE_URL with proxy domain and building connection from individual credentials")
+        database_url = None
+    
+    if database_url:
+        # Make sure we're using the internal endpoint for Railway
+        if 'railway.app' in database_url or 'proxy.rlwy.net' in database_url:
+            logger.warning("⚠️ Converting external Railway URL to internal network URL")
+            # Replace external endpoints with internal ones
+            database_url = database_url.replace('postgresql://', '')
+            # Extract credentials and database name
+            credentials, rest = database_url.split('@', 1)
+            # Replace the host:port with internal endpoint
+            database_url = f"postgresql://{credentials}@postgres.railway.internal:5432/railway"
+            
+        logger.info(f"Using provided DATABASE_URL (sanitized): postgresql://user:****@{database_url.split('@')[1]}")
+        return database_url
+            
     # Try getting PostgreSQL connection info from Railway environment variables
     db_user = os.environ.get('PGUSER') or os.environ.get('DB_USER')
     db_password = os.environ.get('PGPASSWORD') or os.environ.get('DB_PASSWORD')
@@ -124,6 +146,11 @@ def get_db_url() -> str:
     
     # Check if we have all required PostgreSQL environment variables
     if all([db_user, db_password, db_host, db_name]):
+        # Force internal Railway hostname if we're in Railway environment
+        if 'RAILWAY_PROJECT_ID' in os.environ and db_host != 'postgres.railway.internal':
+            logger.warning(f"⚠️ Overriding provided host {db_host} with internal Railway endpoint")
+            db_host = 'postgres.railway.internal'
+            
         logger.info(f"Using PostgreSQL database at {db_host}:{db_port}/{db_name}")
         return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     else:
@@ -165,14 +192,18 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
             # Add settings for PostgreSQL
             if db_type == 'postgresql':
                 engine_params.update({
-                    # Use NullPool to disable connection pooling
-                    'poolclass': NullPool,
+                    # Use QueuePool with proper settings
+                    'poolclass': QueuePool,
+                    'pool_size': 5,  # Start with 5 connections
+                    'max_overflow': 10,  # Allow up to 10 more at peak times
+                    'pool_timeout': 30,  # Wait up to 30 seconds for a connection
+                    'pool_recycle': 1800,  # Recycle connections after 30 minutes
                     'connect_args': {
-                        'connect_timeout': 3,  # Very short connection timeout
+                        'connect_timeout': 10,  # Longer connection timeout (10 seconds)
                         'keepalives': 1,  # Enable TCP keepalives
-                        'keepalives_idle': 10,  # Shorter time between keepalives
-                        'keepalives_interval': 2,  # Shorter interval between keepalives
-                        'keepalives_count': 5,  # More keepalives before giving up
+                        'keepalives_idle': 60,  # Time between keepalives
+                        'keepalives_interval': 10,  # Interval between keepalives
+                        'keepalives_count': 5,  # Number of keepalives before giving up
                         'application_name': 'twitter_bookmark_manager'  # Identify in pg_stat_activity
                     }
                 })
@@ -195,15 +226,15 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
             if db_type == 'postgresql':
                 @event.listens_for(_engine, "connect")
                 def set_pg_statement_timeout(dbapi_connection, connection_record):
-                    # Set statement timeout to 5 seconds (extremely short)
+                    # Increase statement timeout to 30 seconds
                     cursor = dbapi_connection.cursor()
-                    cursor.execute("SET statement_timeout = '5s';")
+                    cursor.execute("SET statement_timeout = '30s';")
                     cursor.close()
             
             # Create session factory
             _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
             
-            logger.info(f"✅ Database connection established: {db_type} with NullPool (no connection pooling)")
+            logger.info(f"✅ Database connection established: {db_type} with QueuePool (pool_size=5, max_overflow=10)")
             
             # Initialize tables
             create_tables()
