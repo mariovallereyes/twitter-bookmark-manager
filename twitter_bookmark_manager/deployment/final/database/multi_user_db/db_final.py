@@ -13,6 +13,7 @@ import contextlib
 import functools
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
+import traceback
 
 import sqlalchemy
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text
@@ -113,10 +114,28 @@ def with_db_retry(max_tries=5, backoff_in_seconds=1):
 def get_db_url() -> str:
     """
     Get the database URL from environment variables or use SQLite as fallback.
-    Handles different environment variable naming depending on deployment.
+    Always prioritizes internal Railway PostgreSQL endpoint when in Railway environment.
     """
     # First check for complete DATABASE_URL environment variable
     database_url = os.environ.get('DATABASE_URL')
+    
+    # Flag to know if we're running in Railway
+    is_railway = 'RAILWAY_PROJECT_ID' in os.environ
+    
+    # If in Railway, always use the internal endpoint
+    if is_railway:
+        logger.info("Detected Railway environment, prioritizing internal connection")
+        
+        # Get credentials from environment variables
+        db_user = os.environ.get('PGUSER')
+        db_password = os.environ.get('PGPASSWORD')
+        db_name = os.environ.get('PGDATABASE', 'railway')
+        
+        if db_user and db_password:
+            # Always use internal endpoint in Railway
+            internal_url = f"postgresql://{db_user}:{db_password}@postgres.railway.internal:5432/{db_name}"
+            logger.info(f"Using Railway internal endpoint: postgresql://{db_user}:****@postgres.railway.internal:5432/{db_name}")
+            return internal_url
     
     # If DATABASE_URL exists but contains proxy.rlwy.net, ignore it and build from components
     if database_url and 'proxy.rlwy.net' in database_url:
@@ -147,9 +166,10 @@ def get_db_url() -> str:
     # Check if we have all required PostgreSQL environment variables
     if all([db_user, db_password, db_host, db_name]):
         # Force internal Railway hostname if we're in Railway environment
-        if 'RAILWAY_PROJECT_ID' in os.environ and db_host != 'postgres.railway.internal':
+        if is_railway and db_host != 'postgres.railway.internal':
             logger.warning(f"⚠️ Overriding provided host {db_host} with internal Railway endpoint")
             db_host = 'postgres.railway.internal'
+            db_port = '5432'  # Always use standard port with internal endpoint
             
         logger.info(f"Using PostgreSQL database at {db_host}:{db_port}/{db_name}")
         return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
@@ -161,7 +181,7 @@ def get_db_url() -> str:
 
 def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Engine:
     """
-    Set up the database connection with optimized parameters.
+    Set up the database connection with optimized parameters for reliability.
     
     Args:
         force_reconnect: Whether to force recreation of the engine
@@ -175,38 +195,62 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
     # Use lock to prevent race conditions during engine setup/reset
     with _engine_lock:
         if _engine is not None and not force_reconnect:
-            logger.info("Using existing database connection")
-            return _engine
+            # Test the existing connection before reusing it
+            try:
+                # Simple connection test
+                with _engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                logger.info("Verified existing database connection is healthy")
+                return _engine
+            except Exception as e:
+                logger.warning(f"Existing connection failed health check: {e}")
+                # Continue to reconnect
             
         try:
             # Get database URL
             db_url = get_db_url()
             db_type = 'postgresql' if 'postgresql' in db_url else 'sqlite'
             
-            # Engine parameters dict
+            # Log connection attempt with sanitized URL
+            sanitized_url = db_url.replace('postgresql://', 'postgresql://user:****@')
+            if 'sqlite' in db_url:
+                sanitized_url = db_url
+            logger.info(f"Connecting to database: {sanitized_url}")
+            
+            # Engine parameters dict - base settings
             engine_params = {
                 'echo': show_sql,
                 'pool_pre_ping': True,  # Test connections before use
             }
             
-            # Add settings for PostgreSQL
+            # Add settings for PostgreSQL - optimized for Railway
             if db_type == 'postgresql':
+                # Determine if we're in Railway - adjust settings accordingly
+                is_railway = 'RAILWAY_PROJECT_ID' in os.environ
+                
+                # Pool settings - more aggressive for Railway
+                pool_size = 3 if is_railway else 5
+                max_overflow = 7 if is_railway else 10
+                
                 engine_params.update({
-                    # Use QueuePool with proper settings
+                    # Use QueuePool with adjusted settings
                     'poolclass': QueuePool,
-                    'pool_size': 5,  # Start with 5 connections
-                    'max_overflow': 10,  # Allow up to 10 more at peak times
-                    'pool_timeout': 30,  # Wait up to 30 seconds for a connection
-                    'pool_recycle': 1800,  # Recycle connections after 30 minutes
+                    'pool_size': pool_size,
+                    'max_overflow': max_overflow,
+                    'pool_timeout': 20,  # Wait up to 20 seconds for a connection
+                    'pool_recycle': 300,  # Recycle connections after 5 minutes in Railway
                     'connect_args': {
-                        'connect_timeout': 10,  # Longer connection timeout (10 seconds)
+                        'connect_timeout': 10,  # Connection timeout (10 seconds)
                         'keepalives': 1,  # Enable TCP keepalives
-                        'keepalives_idle': 60,  # Time between keepalives
+                        'keepalives_idle': 30,  # Time between keepalives
                         'keepalives_interval': 10,  # Interval between keepalives
-                        'keepalives_count': 5,  # Number of keepalives before giving up
-                        'application_name': 'twitter_bookmark_manager'  # Identify in pg_stat_activity
+                        'keepalives_count': 3,  # Number of keepalives before giving up
+                        'application_name': 'twitter_bookmark_manager',  # Identify in pg_stat_activity
+                        'options': '-c timezone=UTC'  # Set timezone to UTC
                     }
                 })
+                
+                logger.info(f"Configured PostgreSQL pool: size={pool_size}, max_overflow={max_overflow}, recycle=300s")
                 
             # Dispose of existing engine if forcing reconnect
             if force_reconnect and _engine is not None:
@@ -218,23 +262,32 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
                     
             # Close all active sessions before creating a new engine
             close_all_sessions()
-                    
-            # Create engine
+            
+            # Starting engine creation
+            logger.info(f"Creating new database engine for {db_type}")
             _engine = create_engine(db_url, **engine_params)
             
-            # Set up statement timeout for PostgreSQL to prevent hangs
+            # Set up statement timeout and other session parameters for PostgreSQL
             if db_type == 'postgresql':
                 @event.listens_for(_engine, "connect")
-                def set_pg_statement_timeout(dbapi_connection, connection_record):
-                    # Increase statement timeout to 30 seconds
+                def set_pg_parameters(dbapi_connection, connection_record):
                     cursor = dbapi_connection.cursor()
-                    cursor.execute("SET statement_timeout = '30s';")
+                    # Set reasonable timeouts to prevent hanging operations
+                    cursor.execute("SET statement_timeout = '20s';")  # 20 second statement timeout
+                    cursor.execute("SET lock_timeout = '10s';")  # 10 second lock timeout
+                    cursor.execute("SET idle_in_transaction_session_timeout = '60s';")  # 1 minute idle timeout
                     cursor.close()
             
             # Create session factory
             _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
             
-            logger.info(f"✅ Database connection established: {db_type} with QueuePool (pool_size=5, max_overflow=10)")
+            # Test connection before returning
+            with _engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                if result.scalar() != 1:
+                    raise Exception("Database connection test failed")
+            
+            logger.info(f"✅ Database connection established and verified: {db_type}")
             
             # Initialize tables
             create_tables()
@@ -243,6 +296,7 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
             
         except Exception as e:
             logger.error(f"❌ Database connection error: {e}")
+            logger.error(traceback.format_exc())
             raise
 
 @event.listens_for(Engine, "connect")
@@ -465,54 +519,97 @@ def create_tables():
 
 def check_engine_health() -> Dict[str, Any]:
     """
-    Check the health of the database engine and connection pool.
+    Comprehensive health check for the database engine with detailed diagnostics.
     
     Returns:
-        Dict with health status information
+        Dict with health status information and diagnostics
     """
-    global _engine
+    global _engine, _last_connection_error
+    
+    # Start with a default response
+    health_info = {
+        "healthy": False,
+        "message": "Engine not initialized",
+        "pool": None,
+        "last_error": _last_connection_error,
+        "last_error_time": _connection_error_time.isoformat() if _connection_error_time else None,
+        "diagnostics": {}
+    }
     
     if _engine is None:
-        return {
-            "healthy": False,
-            "message": "Engine not initialized",
-            "pool": None
-        }
-        
+        return health_info
+    
     try:
+        # Basic connectivity test
+        start_time = time.time()
         with _engine.connect() as conn:
+            # Simple query to verify connectivity
             result = conn.execute(text("SELECT 1"))
             check_result = result.scalar() == 1
             
-            # Get pool status
-            pool_stats = {
-                "overflow": _engine.pool.overflow() if hasattr(_engine.pool, 'overflow') else 'n/a',
-                "checkedin": _engine.pool.checkedin() if hasattr(_engine.pool, 'checkedin') else 'n/a',
-                "checkedout": _engine.pool.checkedout() if hasattr(_engine.pool, 'checkedout') else 'n/a',
-                "size": _engine.pool.size() if hasattr(_engine.pool, 'size') else 'n/a'
-            }
+            # Get server version and time from PostgreSQL
+            if 'postgresql' in str(_engine.url):
+                try:
+                    version_result = conn.execute(text("SHOW server_version"))
+                    server_version = version_result.scalar()
+                    
+                    time_result = conn.execute(text("SELECT NOW()"))
+                    server_time = time_result.scalar()
+                    
+                    # Check active connections
+                    active_conn_result = conn.execute(text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    ))
+                    active_connections = active_conn_result.scalar()
+                    
+                    # Advanced diagnostics
+                    health_info["diagnostics"] = {
+                        "server_version": server_version,
+                        "server_time": server_time.isoformat() if server_time else None,
+                        "active_connections": active_connections,
+                    }
+                except Exception as diag_error:
+                    # Non-critical error, just log it
+                    logger.warning(f"Unable to collect extended diagnostics: {diag_error}")
             
-            conn.close()
+        # Calculate query time
+        query_time = time.time() - start_time
             
-            if not check_result:
-                return {
-                    "healthy": False,
-                    "message": "Database health check query failed",
-                    "pool": pool_stats
+        # Get pool status for connection pooled engines
+        if hasattr(_engine, 'pool'):
+            try:
+                pool_stats = {
+                    "overflow": _engine.pool.overflow() if hasattr(_engine.pool, 'overflow') else 'n/a',
+                    "checkedin": _engine.pool.checkedin() if hasattr(_engine.pool, 'checkedin') else 'n/a',
+                    "checkedout": _engine.pool.checkedout() if hasattr(_engine.pool, 'checkedout') else 'n/a',
+                    "size": _engine.pool.size() if hasattr(_engine.pool, 'size') else 'n/a'
                 }
-                
-            return {
-                "healthy": True,
-                "message": "Database connection is healthy",
-                "pool": pool_stats
-            }
-            
+                health_info["pool"] = pool_stats
+            except Exception as pool_error:
+                health_info["pool_error"] = str(pool_error)
+        
+        # Update health status
+        health_info.update({
+            "healthy": check_result,
+            "message": "Connection successful" if check_result else "Connection test failed",
+            "query_time_ms": round(query_time * 1000, 2),
+            "engine_type": str(_engine.url).split('://')[0],
+        })
+        
+        return health_info
+        
     except Exception as e:
-        logger.warning(f"Database health check failed: {e}")
+        # Update the last connection error
+        _last_connection_error = str(e)
+        _connection_error_time = datetime.now()
+        
+        # Return detailed error information
         return {
             "healthy": False,
-            "message": str(e),
-            "pool": None
+            "message": f"Connection error: {str(e)}",
+            "error_type": type(e).__name__,
+            "last_error": _last_connection_error,
+            "last_error_time": _connection_error_time.isoformat() if _connection_error_time else None
         }
 
 def check_database_status() -> Dict[str, Any]:
