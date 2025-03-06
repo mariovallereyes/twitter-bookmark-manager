@@ -58,14 +58,19 @@ def setup_database():
             _engine = create_engine(
                 DATABASE_URL,
                 poolclass=QueuePool,
-                pool_size=5,           # Starting pool size
-                max_overflow=10,       # Allow up to 10 connections beyond pool_size
-                pool_timeout=30,       # Seconds to wait before giving up on getting a connection
-                pool_recycle=600,      # Recycle connections after 10 minutes to prevent stale connections
+                pool_size=3,           # Reduced pool size to avoid too many connections
+                max_overflow=5,        # Reduced max overflow to prevent connection buildup
+                pool_timeout=10,       # Reduced timeout to fail faster
+                pool_recycle=300,      # Recycle connections after 5 minutes
                 pool_pre_ping=True,    # Verify connections before using them
                 connect_args={
-                    "connect_timeout": 10,         # Connection timeout in seconds
-                    "application_name": "TwitterBookmarkManager"  # Helps identify connections in pg_stat_activity
+                    "connect_timeout": 5,          # Reduced connection timeout to fail faster
+                    "application_name": "TwitterBookmarkManager",  # Helps identify connections in pg_stat_activity
+                    "keepalives": 1,               # Enable TCP keepalives
+                    "keepalives_idle": 30,         # Send keepalive packets after 30 seconds of inactivity
+                    "keepalives_interval": 10,     # Resend keepalives every 10 seconds
+                    "keepalives_count": 3,         # Consider connection dead after 3 failed keepalives
+                    "tcp_user_timeout": 30000      # Abort connection if not established within 30 seconds
                 }
             )
         else:
@@ -100,14 +105,19 @@ def setup_database():
             _engine = create_engine(
                 DATABASE_URI,
                 poolclass=QueuePool,
-                pool_size=5,
-                max_overflow=10,
-                pool_timeout=30,
-                pool_recycle=600,
+                pool_size=3,
+                max_overflow=5,
+                pool_timeout=10,
+                pool_recycle=300,
                 pool_pre_ping=True,
                 connect_args={
-                    "connect_timeout": 10,
-                    "application_name": "TwitterBookmarkManager"
+                    "connect_timeout": 5,
+                    "application_name": "TwitterBookmarkManager",
+                    "keepalives": 1,
+                    "keepalives_idle": 30,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 3,
+                    "tcp_user_timeout": 30000
                 }
             )
         
@@ -223,19 +233,51 @@ def get_vector_store():
 
 @contextmanager
 def db_session() -> Generator:
-    """Context manager for database sessions"""
-    session = get_session()
-    try:
-        yield session
-        session.commit()
-        logger.debug("Session committed successfully")
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Database session error, rolling back: {e}")
-        raise
-    finally:
-        session.close()
-        logger.debug("Session closed")
+    """Context manager for database sessions with retry logic and better error handling"""
+    session = None
+    max_retries = 3
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            session = get_session()
+            yield session
+            
+            # Try to commit changes
+            try:
+                session.commit()
+                logger.debug("Session committed successfully")
+                break  # Success, exit the retry loop
+            except Exception as commit_error:
+                session.rollback()
+                logger.warning(f"Commit failed (attempt {retry_count+1}/{max_retries}): {commit_error}")
+                last_error = commit_error
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"Failed to commit after {max_retries} attempts: {commit_error}")
+                    raise
+                # Short delay before retry
+                time.sleep(0.5 * retry_count)  # Exponential backoff
+                
+        except Exception as session_error:
+            last_error = session_error
+            logger.error(f"Session error (attempt {retry_count+1}/{max_retries}): {session_error}")
+            retry_count += 1
+            if retry_count >= max_retries:
+                logger.error(f"Failed to execute session after {max_retries} attempts: {session_error}")
+                raise
+            # Short delay before retry
+            time.sleep(0.5 * retry_count)  # Exponential backoff
+            
+        finally:
+            if session:
+                try:
+                    session.close()
+                    logger.debug("Session closed")
+                except Exception as close_error:
+                    logger.warning(f"Error closing session: {close_error}")
+                    # Don't raise here, as we may have already succeeded with the transaction
 
 def init_database():
     """Verify database connection for PythonAnywhere and initialize vector store"""
