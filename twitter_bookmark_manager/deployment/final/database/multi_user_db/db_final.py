@@ -120,15 +120,19 @@ def get_pg_direct_params() -> Dict[str, str]:
     Prioritizes PG* environment variables, then falls back to POSTGRES_* variables,
     and finally extracts from DATABASE_URL if needed.
     """
-    # Log which environment variables we have for debugging
-    db_variables = [
-        "PGUSER", "PGPASSWORD", "PGHOST", "PGPORT", "PGDATABASE",
-        "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-        "DATABASE_URL", "RAILWAY_PRIVATE_DOMAIN"
-    ]
+    # Log all environment variables related to Railway for debugging
+    RAILWAY_VARS = [var for var in os.environ.keys() if var.startswith('RAILWAY_')]
+    DB_VARS = ["PGUSER", "PGPASSWORD", "PGHOST", "PGPORT", "PGDATABASE",
+               "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DATABASE_URL"]
     
-    available_vars = [var for var in db_variables if os.environ.get(var)]
-    logging.info(f"Available database environment variables: {available_vars}")
+    # Log all relevant environment variables (without sensitive values)
+    logger.info("=== ENVIRONMENT VARIABLES DEBUG ===")
+    for var in sorted(RAILWAY_VARS + DB_VARS):
+        if var in os.environ:
+            if "PASSWORD" in var or "URL" in var:
+                logger.info(f"{var}: [REDACTED FOR SECURITY]")
+            else:
+                logger.info(f"{var}: {os.environ.get(var)}")
     
     # First try to use the PG* variables (Railway standard)
     params = {
@@ -143,29 +147,30 @@ def get_pg_direct_params() -> Dict[str, str]:
     if not params["user"]:
         params["user"] = os.environ.get("POSTGRES_USER")
         if params["user"]:
-            logging.info("Using POSTGRES_USER as fallback")
+            logger.info("Using POSTGRES_USER as fallback")
     
     if not params["password"]:
         params["password"] = os.environ.get("POSTGRES_PASSWORD")
         if params["password"]:
-            logging.info("Using POSTGRES_PASSWORD as fallback")
+            logger.info("Using POSTGRES_PASSWORD as fallback")
     
     if not params["database"]:
         params["database"] = os.environ.get("POSTGRES_DB")
         if params["database"]:
-            logging.info("Using POSTGRES_DB as fallback")
+            logger.info("Using POSTGRES_DB as fallback")
             
-    # For Railway, always prefer the internal domain when available
-    if os.environ.get("RAILWAY_PRIVATE_DOMAIN"):
+    # CRITICAL FIX: For Railway, ALWAYS use postgres.railway.internal as host
+    # Do not rely on any other environment variable for the hostname
+    if 'RAILWAY_PROJECT_ID' in os.environ:
         original_host = params["host"]
-        params["host"] = os.environ.get("RAILWAY_PRIVATE_DOMAIN")
-        logging.info(f"Using RAILWAY_PRIVATE_DOMAIN: {params['host']} (was: {original_host})")
+        params["host"] = "postgres.railway.internal"
+        logger.info(f"🔧 OVERRIDE: Using fixed internal PostgreSQL hostname: {params['host']} (was: {original_host})")
     
     # If we're still missing critical parameters, try to extract from DATABASE_URL
     if not all([params["user"], params["password"], params["host"], params["database"]]):
         db_url = os.environ.get("DATABASE_URL")
         if db_url:
-            logging.info("Extracting connection parameters from DATABASE_URL")
+            logger.info("Extracting connection parameters from DATABASE_URL")
             try:
                 # Extract credentials from DATABASE_URL
                 from urllib.parse import urlparse
@@ -177,8 +182,11 @@ def get_pg_direct_params() -> Dict[str, str]:
                 if not params["password"] and parsed_url.password:
                     params["password"] = parsed_url.password
                 
-                if not params["host"] and parsed_url.hostname:
+                # Don't extract host from DATABASE_URL in Railway - always use the internal endpoint
+                if not params["host"] and parsed_url.hostname and 'RAILWAY_PROJECT_ID' not in os.environ:
                     params["host"] = parsed_url.hostname
+                elif 'RAILWAY_PROJECT_ID' in os.environ:
+                    params["host"] = "postgres.railway.internal"
                 
                 if not params["port"] and parsed_url.port:
                     params["port"] = str(parsed_url.port)
@@ -186,19 +194,24 @@ def get_pg_direct_params() -> Dict[str, str]:
                 if not params["database"] and parsed_url.path:
                     params["database"] = parsed_url.path.lstrip('/')
             except Exception as e:
-                logging.error(f"Error parsing DATABASE_URL: {e}")
+                logger.error(f"Error parsing DATABASE_URL: {e}")
+    
+    # SAFETY CHECK - ensure we're always using postgres.railway.internal in Railway
+    if 'RAILWAY_PROJECT_ID' in os.environ and params["host"] != "postgres.railway.internal":
+        logger.warning(f"⚠️ Incorrect host detected: {params['host']}. Forcing to postgres.railway.internal")
+        params["host"] = "postgres.railway.internal"
     
     # Log which parameters we were able to resolve (without revealing the password)
     safe_params = {**params}
     if safe_params["password"]:
         safe_params["password"] = "******"
     
-    logging.info(f"Resolved database parameters: {safe_params}")
+    logger.info(f"Resolved database parameters: {safe_params}")
     
     # Verify we have all required parameters
     missing = [k for k, v in params.items() if not v and k != "port"]
     if missing:
-        logging.warning(f"Missing required database parameters: {missing}")
+        logger.warning(f"Missing required database parameters: {missing}")
     
     return params
 
@@ -210,7 +223,13 @@ def get_direct_connection():
     """
     try:
         params = get_pg_direct_params()
-        logging.info(f"Attempting direct psycopg2 connection to {params['host']}:{params['port']}/{params['database']} as {params['user']}")
+        logger.info(f"Attempting direct psycopg2 connection to {params['host']}:{params['port']}/{params['database']} as {params['user']}")
+        
+        # Extra logging to ensure correct parameters
+        if params['host'] == 'postgres.railway.internal':
+            logger.info("✅ Using correct Railway internal PostgreSQL hostname")
+        else:
+            logger.warning(f"⚠️ Not using Railway internal hostname. Using: {params['host']}")
         
         conn = psycopg2.connect(
             user=params["user"],
@@ -221,11 +240,15 @@ def get_direct_connection():
             connect_timeout=10  # 10 seconds timeout
         )
         
-        logging.info("Direct psycopg2 connection established successfully")
+        logger.info("Direct psycopg2 connection established successfully")
         return conn
     except Exception as e:
-        logging.error(f"Failed to establish direct psycopg2 connection: {e}")
-        logging.error(traceback.format_exc())
+        logger.error(f"Failed to establish direct psycopg2 connection: {e}")
+        logger.error(traceback.format_exc())
+        # Log raw connection details for debugging (without password)
+        safe_params = get_pg_direct_params()
+        safe_params["password"] = "******"
+        logger.error(f"Connection parameters used: {safe_params}")
         raise
 
 def get_db_url() -> str:
@@ -241,23 +264,27 @@ def get_db_url() -> str:
         # Construct URL from individual parameters
         params = get_pg_direct_params()
         
+        # CRITICAL: Always use postgres.railway.internal for Railway
+        if 'RAILWAY_PROJECT_ID' in os.environ:
+            params['host'] = 'postgres.railway.internal'
+        
         # Construct URL
         db_url = (
             f"postgresql://{params['user']}:{params['password']}@"
             f"{params['host']}:{params['port']}/{params['database']}"
         )
-        logging.info(f"Constructed database URL from parameters (host: {params['host']})")
+        logger.info(f"Constructed database URL from parameters (host: {params['host']})")
     else:
-        logging.info("Using DATABASE_URL from environment")
+        logger.info("Using DATABASE_URL from environment")
         
         # For Railway, always ensure we're using the internal endpoint
-        if os.environ.get("RAILWAY_PRIVATE_DOMAIN"):
+        if 'RAILWAY_PROJECT_ID' in os.environ:
             from urllib.parse import urlparse, urlunparse
             
             parsed_url = urlparse(db_url)
-            railway_host = os.environ.get("RAILWAY_PRIVATE_DOMAIN")
+            railway_host = "postgres.railway.internal"
             
-            # Only replace if we're not already using the Railway internal endpoint
+            # Force the hostname to be postgres.railway.internal
             if parsed_url.hostname != railway_host:
                 parts = list(parsed_url)
                 netloc = parsed_url.netloc
@@ -273,7 +300,26 @@ def get_db_url() -> str:
                     
                     parts[1] = '@'.join(netloc_parts)
                     db_url = urlunparse(parts)
-                    logging.info(f"Updated DATABASE_URL to use Railway internal endpoint: {railway_host}")
+                    logger.info(f"Updated DATABASE_URL to use Railway internal endpoint: {railway_host}")
+    
+    # Safety check to ensure we're always using postgres.railway.internal in Railway
+    if 'RAILWAY_PROJECT_ID' in os.environ:
+        from urllib.parse import urlparse
+        parsed_url = urlparse(db_url)
+        if parsed_url.hostname != "postgres.railway.internal":
+            logger.error(f"⚠️ URL still using incorrect hostname: {parsed_url.hostname}. This should not happen!")
+            # Force correct the URL by simple string replacement
+            if '@' in db_url:
+                prefix, suffix = db_url.split('@', 1)
+                if ':' in suffix:
+                    # Handle host:port case
+                    _, rest = suffix.split(':', 1)
+                    db_url = f"{prefix}@postgres.railway.internal:{rest}"
+                else:
+                    # Handle host/db case
+                    if '/' in suffix:
+                        _, rest = suffix.split('/', 1)
+                        db_url = f"{prefix}@postgres.railway.internal/{rest}"
     
     # Log the URL with password masked
     log_url = db_url
@@ -282,8 +328,11 @@ def get_db_url() -> str:
         if len(parts) >= 3:
             # Format: postgresql://user:password@host:port/database
             user_part = parts[1].lstrip("/")
-            masked_url = f"{parts[0]}://{user_part}:******@{parts[2].split('@', 1)[1]}"
-            logging.info(f"Using database URL: {masked_url}")
+            try:
+                masked_url = f"{parts[0]}://{user_part}:******@{parts[2].split('@', 1)[1]}"
+                logger.info(f"Using database URL: {masked_url}")
+            except:
+                logger.info("Using database URL: [ERROR MASKING URL]")
     
     return db_url
 
