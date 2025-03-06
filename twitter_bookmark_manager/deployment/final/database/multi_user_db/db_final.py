@@ -16,6 +16,7 @@ import traceback
 import threading
 import time
 import random
+import gc
 from sqlalchemy.pool import QueuePool, NullPool
 
 # Configure logging
@@ -26,9 +27,10 @@ _engine = None
 _session_factory = None
 _vector_store = None
 _connection_monitor = None
+_last_memory_usage = "0MB"
 
 # Simple retry decorator for database operations
-def with_retries(max_attempts=3, backoff_factor=0.5):
+def with_retries(max_attempts=2, backoff_factor=0.3):
     """Decorator to retry database operations that fail due to connection issues"""
     def decorator(func):
         def wrapper(*args, **kwargs):
@@ -65,12 +67,37 @@ def with_retries(max_attempts=3, backoff_factor=0.5):
         return wrapper
     return decorator
 
+def get_memory_usage():
+    """Get current memory usage of the process"""
+    global _last_memory_usage
+    try:
+        # Cross-platform memory usage
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        _last_memory_usage = f"{memory_mb:.1f}MB"
+        return _last_memory_usage
+    except Exception as e:
+        logger.warning(f"Could not get memory usage: {e}")
+        # Try using platform-specific approach as fallback
+        try:
+            if sys.platform == 'linux':
+                memory_usage = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
+                memory_mb = float(memory_usage) / 1024
+                _last_memory_usage = f"{memory_mb:.1f}MB"
+                return _last_memory_usage
+        except Exception:
+            pass
+        # Return last known value if we can't update
+        return _last_memory_usage
+
 def setup_database():
-    """Set up the database connection."""
+    """Set up the database connection with more aggressive connection settings."""
     global _engine, _session_factory, _vector_store
     
     try:
-        logger.info("Loading database module with standard connection settings from diagnostics")
+        logger.info("Loading database module with aggressive connection settings")
         
         # Load environment variables - try multiple possible locations
         env_paths = [
@@ -90,21 +117,33 @@ def setup_database():
         if not env_loaded:
             logger.warning("No .env.final file found in any expected location, using environment variables only")
         
+        # More aggressive connection pool settings
+        pool_size = 3  # Smaller pool size
+        max_overflow = 5  # Less overflow
+        pool_timeout = 10  # Shorter timeout
+        pool_recycle = 300  # Recycle connections more frequently
+        connect_timeout = 5  # Shorter connect timeout
+        
         # First check if DATABASE_URL is provided (Railway recommends this approach)
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL:
-            logger.info("Using DATABASE_URL for connection")
+            logger.info("Using DATABASE_URL for connection with aggressive settings")
             _engine = create_engine(
                 DATABASE_URL,
                 poolclass=QueuePool,
-                pool_size=5,
-                max_overflow=10,
-                pool_timeout=30,
-                pool_recycle=600,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                pool_timeout=pool_timeout,
+                pool_recycle=pool_recycle,
                 pool_pre_ping=True,
                 connect_args={
-                    "connect_timeout": 10,
-                    "application_name": "TwitterBookmarkManager"
+                    "connect_timeout": connect_timeout,
+                    "application_name": "TwitterBookmarkManager",
+                    # TCP keepalive settings to detect stale connections earlier
+                    "keepalives": 1,
+                    "keepalives_idle": 30,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 3
                 }
             )
         else:
@@ -134,23 +173,28 @@ def setup_database():
             # Create connection string from individual components
             DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=prefer"
             
-            # Create database engine with PostgreSQL and standard connection settings
-            logger.info(f"Creating PostgreSQL engine with standard connection settings")
+            # Create database engine with PostgreSQL and aggressive connection settings
+            logger.info(f"Creating PostgreSQL engine with aggressive connection settings")
             _engine = create_engine(
                 DATABASE_URI,
                 poolclass=QueuePool,
-                pool_size=5,
-                max_overflow=10,
-                pool_timeout=30,
-                pool_recycle=600,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                pool_timeout=pool_timeout,
+                pool_recycle=pool_recycle,
                 pool_pre_ping=True,
                 connect_args={
-                    "connect_timeout": 10,
-                    "application_name": "TwitterBookmarkManager"
+                    "connect_timeout": connect_timeout,
+                    "application_name": "TwitterBookmarkManager",
+                    # TCP keepalive settings to detect stale connections earlier
+                    "keepalives": 1,
+                    "keepalives_idle": 30,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 3
                 }
             )
         
-        logger.info("✅ Created PostgreSQL engine successfully")
+        logger.info("✅ Created PostgreSQL engine successfully with aggressive settings")
         
         # Test the connection
         with _engine.connect() as connection:
@@ -160,12 +204,18 @@ def setup_database():
         
         # Create session factory with standard settings
         _session_factory = scoped_session(sessionmaker(
-            bind=_engine
+            bind=_engine,
+            # Expire on commit for more predictable behavior
+            expire_on_commit=True
         ))
         logger.info("✅ Created session factory")
         
         # Start connection monitor with standard interval
         start_connection_monitor()
+        
+        # Log current memory usage
+        mem_usage = get_memory_usage()
+        logger.info(f"Current memory usage: {mem_usage}")
         
         # Import VectorStore
         try:
@@ -207,11 +257,27 @@ def connection_monitor_thread():
                     logger.debug("Database connection monitor: Connection healthy")
                 else:
                     logger.warning("Database connection monitor: Connection test returned unexpected result")
+            
+            # Log memory usage periodically too
+            mem_usage = get_memory_usage()
+            logger.debug(f"Memory usage: {mem_usage}")
+            
+            # Force garbage collection to help with memory management
+            gc.collect()
+            
         except Exception as e:
             logger.error(f"Database connection monitor: Connection test failed: {e}")
+            # Try to recreate the engine
+            try:
+                if _engine:
+                    _engine.dispose()
+                setup_database()
+                logger.info("Database engine recreated after monitor detected failure")
+            except Exception as re:
+                logger.error(f"Failed to recreate engine: {re}")
         
-        # Sleep for 5 minutes before next check (standard interval)
-        time.sleep(300)
+        # Sleep for 2 minutes before next check (more aggressive interval)
+        time.sleep(120)
 
 def start_connection_monitor():
     """Start the background connection monitoring thread"""
@@ -244,6 +310,7 @@ def get_engine():
         db_objects = setup_database()  # Try to set up again if not already done
     return _engine
 
+@with_retries(max_attempts=2)
 def get_session():
     """Get a new SQLAlchemy session with health check"""
     global _session_factory
@@ -275,8 +342,8 @@ def db_session() -> Generator:
     
     try:
         session = get_session()
-        # Set a short statement timeout
-        session.execute(text("SET statement_timeout = 3000"))  # Shorter timeout: 3 seconds
+        # Set a shorter statement timeout
+        session.execute(text("SET statement_timeout = 2000"))  # Even shorter timeout: 2 seconds
         yield session
         
         # Try to commit changes with a timeout
@@ -304,8 +371,7 @@ def db_session() -> Generator:
             except Exception as close_error:
                 logger.warning(f"Error closing session: {close_error}")
 
-# Apply retry decorator to check_engine_health function
-@with_retries(max_attempts=3)
+@with_retries(max_attempts=2)
 def check_engine_health():
     """Check if the engine/pool is healthy and recreate if needed"""
     global _engine, _session_factory
@@ -319,6 +385,8 @@ def check_engine_health():
         try:
             # Quick connection test
             with _engine.connect() as conn:
+                # Set a short timeout for the health check
+                conn.execute(text("SET statement_timeout = 1000"))  # 1 second timeout
                 result = conn.execute(text("SELECT 1")).scalar()
                 if result == 1:
                     return {"healthy": True, "message": "Connection test passed"}
@@ -344,8 +412,7 @@ def check_engine_health():
         logger.error(f"Error in check_engine_health: {e}")
         return {"healthy": False, "message": f"Error during health check: {str(e)}"}
 
-# Apply the retry decorator to get_db_connection
-@with_retries(max_attempts=3)
+@with_retries(max_attempts=2)
 def get_db_connection():
     """
     Get a PostgreSQL database connection.
@@ -437,6 +504,10 @@ def cleanup_db_connections():
                 logger.info("✓ Engine disposed")
             except Exception as e:
                 logger.error(f"Error disposing engine: {e}")
+                
+        # Force garbage collection
+        gc.collect()
+        logger.info("Forced garbage collection during cleanup")
     except Exception as e:
         logger.error(f"Unhandled exception in cleanup_db_connections: {e}")
         logger.error(traceback.format_exc())

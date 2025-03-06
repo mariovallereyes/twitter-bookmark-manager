@@ -98,7 +98,7 @@ def shutdown_cleanup(exception=None):
 def check_db_health():
     """Check database connection health before handling request"""
     # Skip for static files and non-db routes
-    if request.path.startswith('/static/'):
+    if request.path.startswith('/static/') or request.path.startswith('/favicon.ico'):
         return
         
     try:
@@ -304,226 +304,282 @@ def api_categories():
 
 # Upload bookmarks endpoint
 @app.route('/upload-bookmarks', methods=['POST'])
+@login_required
 def upload_bookmarks():
     """
-    Ultra simple endpoint for uploading bookmarks JSON file ONLY.
-    NO database operations, just file saving.
+    Handle bookmark JSON file upload with improved reliability.
+    This endpoint ONLY handles the file upload and validation,
+    without starting database processing.
     """
+    # Generate a unique session ID for tracking
+    session_id = str(uuid.uuid4())[:8]
+    user = UserContext.get_current_user()
+    user_id = user.id if user else None
+    
+    logger.info(f"🚀 [UPLOAD-{session_id}] Starting bookmark upload for user {user_id}")
+    
     try:
-        # Get current user's ID for the file path
-        user_id = get_current_user_id()
-        if not user_id:
-            return jsonify({"error": "User not authenticated"}), 401
-            
-        # Ensure a file was uploaded
+        # Validate that file was provided
         if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+            logger.error(f"❌ [UPLOAD-{session_id}] No file part in request")
+            return jsonify({'error': 'No file part', 'details': 'Please select a file to upload'}), 400
             
         file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No file selected"}), 400
-            
-        if not file.filename.endswith('.json'):
-            return jsonify({"error": "File must be a JSON file"}), 400
         
+        # Validate file name
+        if not file.filename:
+            logger.error(f"❌ [UPLOAD-{session_id}] No selected file")
+            return jsonify({'error': 'No file selected', 'details': 'Please select a file to upload'}), 400
+            
+        if not file.filename.lower().endswith('.json'):
+            logger.error(f"❌ [UPLOAD-{session_id}] Invalid file type: {file.filename}")
+            return jsonify({'error': 'Invalid file type', 'details': 'Only JSON files are allowed'}), 400
+            
+        # Validate file content is valid JSON
+        try:
+            file_content = file.read()
+            file.seek(0)  # Reset file pointer
+            json.loads(file_content)  # Just validate JSON syntax
+            logger.info(f"✅ [UPLOAD-{session_id}] JSON validation successful")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ [UPLOAD-{session_id}] Invalid JSON file: {str(e)}")
+            return jsonify({'error': 'Invalid JSON file', 'details': f'File is not a valid JSON: {str(e)}'}), 400
+            
         # Create user directory if it doesn't exist
-        from database.multi_user_db.update_bookmarks_final import get_user_directory
         user_dir = get_user_directory(user_id)
-        os.makedirs(user_dir, exist_ok=True)
+        if not os.path.exists(user_dir):
+            try:
+                os.makedirs(user_dir, exist_ok=True)
+                logger.info(f"📁 [UPLOAD-{session_id}] Created user directory: {user_dir}")
+            except Exception as e:
+                logger.error(f"❌ [UPLOAD-{session_id}] Error creating user directory: {str(e)}")
+                return jsonify({'error': 'Server error', 'details': 'Could not create user directory'}), 500
+                
+        # Determine file path
+        file_name = f"bookmarks_{session_id}.json"
+        file_path = os.path.join(user_dir, file_name)
         
         # Save the file
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(user_dir, filename)
-        file.save(filepath)
-        logger.info(f"File saved to {filepath}")
-        
-        # Generate a simple session ID
-        import uuid
-        session_id = f"upload_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        
-        # Create a simple status file to track progress
-        status_path = os.path.join(user_dir, f"status_{session_id}.json")
-        with open(status_path, 'w') as f:
-            json.dump({
-                "status": "uploaded",
-                "file": filepath,
-                "timestamp": time.time(),
-                "session_id": session_id
-            }, f)
+        try:
+            file.save(file_path)
+            logger.info(f"💾 [UPLOAD-{session_id}] File saved to: {file_path}")
+        except Exception as e:
+            logger.error(f"❌ [UPLOAD-{session_id}] Error saving file: {str(e)}")
+            return jsonify({'error': 'Failed to save file', 'details': str(e)}), 500
             
+        # Create status file
+        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+        status_data = {
+            'session_id': session_id,
+            'user_id': user_id,
+            'filename': file_name,
+            'file_path': file_path,
+            'status': 'uploaded',
+            'timestamp': datetime.now().isoformat(),
+            'size_bytes': os.path.getsize(file_path)
+        }
+        
+        try:
+            with open(status_file, 'w') as f:
+                json.dump(status_data, f)
+            logger.info(f"📝 [UPLOAD-{session_id}] Status file created: {status_file}")
+        except Exception as e:
+            logger.warning(f"⚠️ [UPLOAD-{session_id}] Error creating status file: {str(e)}")
+            # Non-critical error, continue
+            
+        # Return success with session ID for client to use in processing request
         return jsonify({
-            "success": True,
-            "message": "File uploaded successfully. Click 'Process File' to start processing.",
-            "filename": filename,
-            "session_id": session_id
+            'success': True,
+            'message': 'File uploaded successfully',
+            'session_id': session_id,
+            'filename': file_name,
+            'size_bytes': os.path.getsize(file_path),
+            'next_step': 'Call /process-bookmarks with this session_id to start processing'
         })
         
     except Exception as e:
-        logger.error(f"Error in upload_bookmarks: {e}")
+        logger.error(f"❌ [UPLOAD-{session_id}] Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
 @app.route('/process-bookmarks', methods=['POST'])
+@login_required
 def process_bookmarks():
     """
-    Separate endpoint JUST for processing the uploaded file.
+    Process previously uploaded bookmark file in the background.
+    This is separated from upload to avoid connection timeout issues.
     """
-    try:
-        # Get request parameters
+    user = UserContext.get_current_user()
+    user_id = user.id if user else None
+    
+    # Get session ID from request
+    if request.is_json:
         data = request.json
         session_id = data.get('session_id')
+    else:
+        session_id = request.form.get('session_id')
         
-        if not session_id:
-            return jsonify({"error": "No session ID provided"}), 400
-            
-        # Get current user's ID
-        user_id = get_current_user_id()
-        if not user_id:
-            return jsonify({"error": "User not authenticated"}), 401
-            
-        # Get user directory
-        from database.multi_user_db.update_bookmarks_final import get_user_directory
-        user_dir = get_user_directory(user_id)
+    if not session_id:
+        logger.error(f"❌ [PROCESS] No session ID provided")
+        return jsonify({'error': 'No session ID provided', 'details': 'Please provide the session_id from upload'}), 400
         
-        # Find status file
-        status_path = os.path.join(user_dir, f"status_{session_id}.json")
-        if not os.path.exists(status_path):
-            return jsonify({"error": "Invalid session ID or expired upload"}), 400
+    logger.info(f"🚀 [PROCESS-{session_id}] Starting bookmark processing for user {user_id}")
+    
+    # Find status file
+    user_dir = get_user_directory(user_id)
+    status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+    
+    if not os.path.exists(status_file):
+        logger.error(f"❌ [PROCESS-{session_id}] Status file not found: {status_file}")
+        return jsonify({'error': 'Session not found', 'details': 'Upload session not found'}), 404
+        
+    # Read status file
+    try:
+        with open(status_file, 'r') as f:
+            status_data = json.load(f)
             
-        # Read status file
-        with open(status_path, 'r') as f:
-            status = json.load(f)
+        # Check status
+        current_status = status_data.get('status')
+        if current_status == 'processing':
+            logger.info(f"⏳ [PROCESS-{session_id}] Processing already in progress")
+            return jsonify({
+                'success': True,
+                'message': 'Processing already in progress',
+                'session_id': session_id,
+                'status': current_status
+            })
+        elif current_status == 'completed':
+            logger.info(f"✅ [PROCESS-{session_id}] Processing already completed")
+            return jsonify({
+                'success': True,
+                'message': 'Processing already completed',
+                'session_id': session_id,
+                'status': current_status,
+                'results': status_data.get('results', {})
+            })
+        elif current_status == 'error':
+            logger.info(f"❌ [PROCESS-{session_id}] Previous processing error: {status_data.get('error')}")
+            # Allow retry by continuing
             
         # Get file path
-        filepath = status.get('file')
-        if not filepath or not os.path.exists(filepath):
-            return jsonify({"error": "Uploaded file not found"}), 400
+        file_path = status_data.get('file_path')
+        if not file_path or not os.path.exists(file_path):
+            logger.error(f"❌ [PROCESS-{session_id}] File not found: {file_path}")
+            return jsonify({'error': 'File not found', 'details': 'Uploaded file not found'}), 404
             
-        # Update status
-        status['status'] = 'processing'
-        with open(status_path, 'w') as f:
-            json.dump(status, f)
+        # Update status to processing
+        status_data['status'] = 'processing'
+        status_data['processing_start'] = datetime.now().isoformat()
+        
+        with open(status_file, 'w') as f:
+            json.dump(status_data, f)
             
         # Start background processing
         def background_process():
+            logger.info(f"🔄 [PROCESS-{session_id}] Starting background processing")
             try:
-                logger.info(f"Starting processing for session {session_id}, file {filepath}")
+                # Process bookmarks
+                result = final_update_bookmarks(
+                    user_id=user_id,
+                    json_file=file_path,
+                    session_id=session_id,
+                    status_file=status_file
+                )
                 
-                # Update status to processing
-                with open(status_path, 'w') as f:
-                    json.dump({
-                        "status": "processing",
-                        "file": filepath,
-                        "timestamp": time.time(),
-                        "session_id": session_id
-                    }, f)
+                # Update status file with results
+                with open(status_file, 'r') as f:
+                    current_status = json.load(f)
                     
-                # Process file
-                try:
-                    result = final_update_bookmarks(
-                        user_id=user_id,
-                        file_path=filepath,
-                        session_id=session_id,
-                        rebuild_vector_store=True,
-                        reset_progress=False
-                    )
+                current_status['status'] = 'completed' if result.get('success') else 'error'
+                current_status['completed_at'] = datetime.now().isoformat()
+                current_status['results'] = result
+                
+                with open(status_file, 'w') as f:
+                    json.dump(current_status, f)
                     
-                    # Update status to complete
-                    with open(status_path, 'w') as f:
-                        json.dump({
-                            "status": "completed",
-                            "file": filepath,
-                            "timestamp": time.time(),
-                            "session_id": session_id,
-                            "result": result
-                        }, f)
-                        
-                    logger.info(f"Processing completed for session {session_id}: {result}")
-                    
-                except Exception as process_error:
-                    logger.error(f"Error processing file: {process_error}")
-                    logger.error(traceback.format_exc())
-                    
-                    # Update status to error
-                    with open(status_path, 'w') as f:
-                        json.dump({
-                            "status": "error",
-                            "file": filepath,
-                            "timestamp": time.time(),
-                            "session_id": session_id,
-                            "error": str(process_error)
-                        }, f)
+                logger.info(f"✅ [PROCESS-{session_id}] Background processing completed")
                 
             except Exception as e:
-                logger.error(f"Error in background thread: {e}")
+                logger.error(f"❌ [PROCESS-{session_id}] Background processing error: {str(e)}")
                 logger.error(traceback.format_exc())
                 
-                # Try to update status to error
+                # Update status file with error
                 try:
-                    with open(status_path, 'w') as f:
-                        json.dump({
-                            "status": "error",
-                            "file": filepath,
-                            "timestamp": time.time(),
-                            "session_id": session_id,
-                            "error": str(e)
-                        }, f)
-                except:
-                    pass
+                    with open(status_file, 'r') as f:
+                        current_status = json.load(f)
+                        
+                    current_status['status'] = 'error'
+                    current_status['error'] = str(e)
+                    current_status['traceback'] = traceback.format_exc()
+                    current_status['error_time'] = datetime.now().isoformat()
                     
-        # Start background thread
-        thread = threading.Thread(target=background_process, daemon=True)
-        thread.start()
+                    with open(status_file, 'w') as f:
+                        json.dump(current_status, f)
+                except Exception as file_error:
+                    logger.error(f"❌ [PROCESS-{session_id}] Error updating status file: {str(file_error)}")
         
+        # Start processing in background thread
+        processing_thread = threading.Thread(
+            target=background_process,
+            daemon=True,
+            name=f"BookmarkProcessor-{session_id}"
+        )
+        processing_thread.start()
+        
+        # Return immediately with processing status
         return jsonify({
-            "success": True,
-            "message": "Processing started in background. Check status for updates.",
-            "session_id": session_id
+            'success': True,
+            'message': 'Processing started in background',
+            'session_id': session_id,
+            'status': 'processing',
+            'status_file': status_file,
+            'check_endpoint': f"/process-status?session_id={session_id}"
         })
         
     except Exception as e:
-        logger.error(f"Error starting processing: {e}")
+        logger.error(f"❌ [PROCESS-{session_id}] Error: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
 @app.route('/process-status', methods=['GET'])
+@login_required
 def process_status():
-    """
-    Check status of processing
-    """
-    try:
-        # Get session ID from query parameters
-        session_id = request.args.get('session_id')
-        if not session_id:
-            return jsonify({"error": "No session ID provided"}), 400
-            
-        # Get current user's ID
-        user_id = get_current_user_id()
-        if not user_id:
-            return jsonify({"error": "User not authenticated"}), 401
-            
-        # Get user directory
-        from database.multi_user_db.update_bookmarks_final import get_user_directory
-        user_dir = get_user_directory(user_id)
+    """Check status of background processing"""
+    user = UserContext.get_current_user()
+    user_id = user.id if user else None
+    
+    # Get session ID from request
+    session_id = request.args.get('session_id')
+    if not session_id:
+        logger.error(f"❌ [STATUS] No session ID provided")
+        return jsonify({'error': 'No session ID provided'}), 400
         
-        # Find status file
-        status_path = os.path.join(user_dir, f"status_{session_id}.json")
-        if not os.path.exists(status_path):
-            return jsonify({"error": "Invalid session ID or expired upload"}), 400
+    logger.info(f"🔍 [STATUS-{session_id}] Checking processing status for user {user_id}")
+    
+    # Find status file
+    user_dir = get_user_directory(user_id)
+    status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+    
+    if not os.path.exists(status_file):
+        logger.error(f"❌ [STATUS-{session_id}] Status file not found: {status_file}")
+        return jsonify({'error': 'Session not found'}), 404
+        
+    # Read status file
+    try:
+        with open(status_file, 'r') as f:
+            status_data = json.load(f)
             
-        # Read status file
-        with open(status_path, 'r') as f:
-            status = json.load(f)
-            
+        # Return status
         return jsonify({
-            "success": True,
-            "status": status
+            'success': True,
+            'session_id': session_id,
+            'status': status_data.get('status', 'unknown'),
+            'details': status_data
         })
         
     except Exception as e:
-        logger.error(f"Error checking status: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ [STATUS-{session_id}] Error: {str(e)}")
+        return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
 
 # Update database endpoint
 @app.route('/update-database', methods=['POST', 'GET'])

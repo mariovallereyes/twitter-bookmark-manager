@@ -732,281 +732,99 @@
         }
     }
 
-    function handleFileSelectDirect(input) {
-        console.log('File input changed');
-        const file = input.files[0];
+    function handleFileSelectDirect(fileInput) {
+        const fileName = fileInput.files[0] ? fileInput.files[0].name : 'No file selected';
+        document.getElementById('file-name').textContent = fileName;
         
-        if (file && file.name.endsWith('.json')) {
-            console.log('Selected file:', file.name);
-            document.getElementById('file-name').textContent = file.name;
-            // Show upload button
-            document.getElementById('upload-actions').style.display = 'flex';
-        } else {
-            console.log('Invalid or no file selected');
-            document.getElementById('file-name').textContent = 'Please select a JSON file';
-            document.getElementById('upload-actions').style.display = 'none';
-        }
+        // Show upload action buttons if a file was selected
+        const uploadActions = document.getElementById('upload-actions');
+        uploadActions.style.display = fileInput.files.length > 0 ? 'flex' : 'none';
     }
 
-    function updateProgress(step, status) {
-        const element = document.getElementById(`step-${step}`);
-        if (element) {
-            const icon = element.querySelector('.progress-icon');
-            switch(status) {
-                case 'processing':
-                    icon.textContent = '⚡';
-                    break;
-                case 'done':
-                    icon.textContent = '✅';
-                    break;
-                case 'error':
-                    icon.textContent = '❌';
-                    break;
-                default:
-                    icon.textContent = '⭕';
-            }
-        }
-    }
-
-    let updateInProgress = false;
-    let currentStartIndex = 0;
-    let maxRetries = 3;
-    let retryCount = 0;
-    let updateTimeout = null;
-
-    async function continueProcessing() {
-        if (!updateInProgress) return;
-        
-        try {
-            const response = await fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ start_index: currentStartIndex })
-            });
-            
-            const result = await response.json();
-            
-            if (response.status === 202) {  // Processing should continue
-                // Update progress
-                const progress = result.progress;
-                if (progress) {
-                    updateProgressUI(progress);
-                }
-                
-                // Schedule next batch
-                currentStartIndex = result.next_index;
-                retryCount = 0;  // Reset retry count on successful batch
-                
-                // Wait a bit before next batch to prevent overload
-                updateTimeout = setTimeout(continueProcessing, 1000);
-            } else if (response.status === 200) {  // Processing complete
-                updateInProgress = false;
-                
-                // Handle timeout cases
-                if (result.is_timeout) {
-                    const details = `Processing timed out after ${result.duration_seconds?.toFixed(1) || '?'} seconds. ${result.processed_this_session || '?'} bookmarks were processed. You can continue later.`;
-                    showSuccess("Processing partially completed due to timeout", details);
-                } else {
-                    updateProgressUI(result.progress, true);
-                    const details = result.message || `Processed ${result.processed_this_session || '?'} bookmarks in ${result.duration_seconds?.toFixed(1) || '?'} seconds.`;
-                    showSuccess("Processing completed successfully!", details);
-                }
-            } else {
-                // Handle error cases with more details
-                const errorMessage = result.error || 'Unknown error';
-                const errorDetails = result.traceback || result.message || 'No additional details available';
-                throw new Error(`${errorMessage}\n${errorDetails}`);
-            }
-        } catch (error) {
-            console.error('Error during processing:', error);
-            
-            if (retryCount < maxRetries) {
-                retryCount++;
-                // Exponential backoff
-                const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
-                console.log(`Retrying in ${delay}ms (retry ${retryCount}/${maxRetries})`);
-                updateTimeout = setTimeout(continueProcessing, delay);
-            } else {
-                updateInProgress = false;
-                showError(`Processing failed after ${maxRetries} retries`, error.toString());
-            }
-        }
-    }
-
-    function updateProgressUI(progress, isComplete = false) {
-        const {
-            total,
-            processed,
-            new: newCount,
-            updated: updatedCount,
-            errors,
-            percent_complete
-        } = progress;
-
-        // Update progress steps
-        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
-        document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
-        
-        const findNewStep = document.getElementById('step-find-new');
-        findNewStep.querySelector('.progress-icon').textContent = '🔄';
-        findNewStep.querySelector('span:last-child').textContent = 
-            `Finding new bookmarks... (${processed}/${total}, ${percent_complete.toFixed(1)}%)`;
-        
-        if (isComplete) {
-            findNewStep.querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-categories').querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-sync').querySelector('.progress-icon').textContent = '✅';
-        }
-    }
-
-    function showError(message, details = null) {
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'mt-4 p-4 bg-red-900 text-white rounded-lg';
-        
-        // Create a header div with important message
-        const headerDiv = document.createElement('div');
-        headerDiv.className = 'font-bold mb-2';
-        headerDiv.textContent = message;
-        errorDiv.appendChild(headerDiv);
-        
-        // Add details in smaller text if provided
-        if (details) {
-            const detailsDiv = document.createElement('div');
-            detailsDiv.className = 'text-sm text-red-200 mb-3';
-            detailsDiv.textContent = details;
-            errorDiv.appendChild(detailsDiv);
-        }
-        
-        // Add retry button
-        const retryButton = document.createElement('button');
-        retryButton.className = 'mt-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg mr-2';
-        retryButton.textContent = 'Retry';
-        retryButton.onclick = function() {
-            document.getElementById('progress-steps').removeChild(errorDiv);
-            updateInProgress = true;
-            currentStartIndex = 0;
-            retryCount = 0;
-            continueProcessing();
-        };
-        errorDiv.appendChild(retryButton);
-        
-        // Add cancel button
-        const cancelButton = document.createElement('button');
-        cancelButton.className = 'mt-2 px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg';
-        cancelButton.textContent = 'Cancel';
-        cancelButton.onclick = function() {
-            document.getElementById('progress-steps').removeChild(errorDiv);
-        };
-        errorDiv.appendChild(cancelButton);
-        
-        document.getElementById('progress-steps').appendChild(errorDiv);
-    }
-
-    function showSuccess(message, details = null) {
-        const successDiv = document.createElement('div');
-        successDiv.className = 'mt-4 p-4 bg-green-900 text-white rounded-lg';
-        
-        // Create a header div with important message
-        const headerDiv = document.createElement('div');
-        headerDiv.className = 'font-bold mb-2';
-        headerDiv.textContent = message;
-        successDiv.appendChild(headerDiv);
-        
-        // Add details in smaller text if provided
-        if (details) {
-            const detailsDiv = document.createElement('div');
-            detailsDiv.className = 'text-sm text-green-200';
-            detailsDiv.textContent = details;
-            successDiv.appendChild(detailsDiv);
-        }
-        
-        document.getElementById('progress-steps').appendChild(successDiv);
-    }
-
-    // Ensure handleUploadDirect is in global scope
-    window.handleUploadDirect = function() {
-        console.log("Starting ultra-simple upload function - NO DATABASE OPERATIONS");
-        
+    function handleUploadDirect() {
+        console.log('handleUploadDirect called');
         // Check if a file is selected
         const fileInput = document.getElementById('json-file');
-        if (!fileInput || !fileInput.files.length) {
-            alert('Please select a JSON file to upload');
+        if (!fileInput.files.length) {
+            alert('Please select a file to upload');
             return;
         }
         
-        // Show progress steps
-        document.getElementById('progress-steps').style.display = 'block';
+        // Reset progress indicators
+        const progressSteps = document.getElementById('progress-steps');
+        progressSteps.style.display = 'block';
         
-        // Reset all icons to pending
-        document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
+        // Reset all steps to pending
+        document.querySelectorAll('.progress-icon').forEach(icon => {
             icon.textContent = '⭕';
         });
         
-        // Set upload step to processing
-        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '⚡';
+        // Update upload step to in-progress
+        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '🔄';
         
-        // Create FormData
+        // Create FormData and append the file
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
         
-        // Display file name
-        document.getElementById('file-name').textContent = fileInput.files[0].name;
-        
-        // Super simple upload - just saves the file, NO database operations
+        // Send the file to the server
         fetch('/upload-bookmarks', {
             method: 'POST',
             body: formData
         })
-        .then(response => {
-            // Check if response is ok
-            if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-            }
-            return response.json();
-        })
+        .then(response => response.json())
         .then(data => {
-            console.log("Upload response:", data);
-            
-            // Mark upload step as completed
-            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-validate').querySelector('.progress-icon').textContent = '⚡';
-            
-            // Show success message
-            alert('File uploaded successfully! Click the "Process File" button to start processing your bookmarks.');
-            
-            // Show the process button
-            document.getElementById('process-button').style.display = 'block';
-            document.getElementById('process-button').setAttribute('data-session-id', data.session_id);
+            if (data.success) {
+                // Update UI to show success and enable process button
+                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
+                document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
+                
+                // Show the process button and store session ID on it
+                const processButton = document.getElementById('process-button');
+                processButton.dataset.sessionId = data.session_id;
+                processButton.style.display = 'block';
+                
+                // Hide upload button after successful upload
+                document.getElementById('upload-actions').style.display = 'none';
+                
+                console.log('Upload successful, session ID:', data.session_id);
+            } else {
+                // Show error
+                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
+                alert('Upload failed: ' + (data.error || 'Unknown error'));
+                console.error('Upload error:', data);
+            }
         })
         .catch(error => {
-            console.error("Upload error:", error);
-            
-            // Mark upload step as failed
             document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
-            
-            // Show error message
-            alert('Error uploading file: ' + error.message + '\n\nPlease try again later.');
+            alert('Error uploading file: ' + error.message);
+            console.error('Upload error:', error);
         });
-    };
-    
-    // Add function to start processing after upload
-    window.processBookmarks = function(button) {
-        // Get session ID from button
-        const sessionId = button.getAttribute('data-session-id');
+    }
+
+    function processBookmarks(buttonElement) {
+        // Get session ID from button's data attribute
+        const sessionId = buttonElement.dataset.sessionId;
         if (!sessionId) {
-            alert('No session ID found. Please upload a file first.');
+            alert('No session ID found. Please try uploading the file again.');
             return;
         }
         
-        // Show that processing is starting
-        document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
-        document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '⚡';
+        // Disable the process button to prevent multiple clicks
+        buttonElement.disabled = true;
+        buttonElement.textContent = 'Processing...';
         
-        // Send request to process bookmarks
+        // Reset progress indicators for processing steps
+        document.querySelectorAll('.progress-icon').forEach((icon, index) => {
+            // Skip upload and validate steps which are already marked as complete
+            if (index > 1) {
+                icon.textContent = '⭕';
+            }
+        });
+        
+        // Set finding new bookmarks step to in-progress
+        document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '🔄';
+        
+        // Send processing request to server
         fetch('/process-bookmarks', {
             method: 'POST',
             headers: {
@@ -1016,86 +834,149 @@
                 session_id: sessionId
             })
         })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-            }
-            return response.json();
-        })
+        .then(response => response.json())
         .then(data => {
-            console.log("Process response:", data);
-            
-            // Start polling for status
-            pollProcessStatus(sessionId);
-            
-            // Disable the process button
-            button.disabled = true;
-            button.textContent = 'Processing...';
+            if (data.success) {
+                console.log('Processing started:', data);
+                
+                // Start polling for status updates
+                pollProcessStatus(sessionId);
+            } else {
+                // Show error and enable button for retry
+                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+                buttonElement.disabled = false;
+                buttonElement.textContent = 'Process File';
+                alert('Failed to start processing: ' + (data.error || 'Unknown error'));
+                console.error('Processing error:', data);
+            }
         })
         .catch(error => {
-            console.error("Process error:", error);
+            document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+            buttonElement.disabled = false;
+            buttonElement.textContent = 'Process File';
+            alert('Error starting processing: ' + error.message);
+            console.error('Processing error:', error);
+        });
+    }
+    
+    function pollProcessStatus(sessionId) {
+        // Poll the status endpoint to check progress
+        fetch(`/process-status?session_id=${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const status = data.status;
+                const details = data.details || {};
+                
+                console.log('Processing status:', status, details);
+                
+                // Update UI based on status
+                updateProcessingUI(status, details);
+                
+                // Continue polling if still processing
+                if (status === 'processing' || status === 'rebuilding_vectors') {
+                    setTimeout(() => pollProcessStatus(sessionId), 2000);
+                } else if (status === 'completed') {
+                    // Processing completed successfully
+                    finishProcessingUI(true, details.results || {});
+                } else if (status === 'error') {
+                    // Processing encountered an error
+                    finishProcessingUI(false, details);
+                }
+            } else {
+                // Error checking status
+                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+                alert('Error checking processing status: ' + (data.error || 'Unknown error'));
+                console.error('Status error:', data);
+                
+                // Enable process button for retry
+                const processButton = document.getElementById('process-button');
+                processButton.disabled = false;
+                processButton.textContent = 'Process File';
+            }
+        })
+        .catch(error => {
+            console.error('Error polling status:', error);
             
-            // Mark find-new step as failed
+            // Retry polling a few times before giving up
+            if (window.pollRetryCount === undefined) {
+                window.pollRetryCount = 0;
+            }
+            
+            if (window.pollRetryCount < 3) {
+                window.pollRetryCount++;
+                setTimeout(() => pollProcessStatus(sessionId), 5000);
+            } else {
+                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+                alert('Error checking processing status: ' + error.message);
+                
+                // Enable process button for retry
+                const processButton = document.getElementById('process-button');
+                processButton.disabled = false;
+                processButton.textContent = 'Process File';
+                
+                // Reset retry count
+                window.pollRetryCount = 0;
+            }
+        });
+    }
+
+    function updateProcessingUI(status, details) {
+        // Update UI based on current processing status
+        if (status === 'processing') {
+            // Update find-new step with progress information
+            const stats = details.stats || {};
+            const total = stats.total_bookmarks || 0;
+            const processed = stats.processed || 0;
+            const percentComplete = total > 0 ? (processed / total * 100) : 0;
+            
+            const findNewStep = document.getElementById('step-find-new');
+            findNewStep.querySelector('.progress-icon').textContent = '🔄';
+            findNewStep.querySelector('span:last-child').textContent = 
+                `Finding new bookmarks... (${processed}/${total}, ${percentComplete.toFixed(1)}%)`;
+            
+            // Update SQL update step if we've made progress
+            if (processed > 0) {
+                document.getElementById('step-sql').querySelector('.progress-icon').textContent = '🔄';
+            }
+        } else if (status === 'rebuilding_vectors') {
+            // Mark database steps as complete
+            document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
+            
+            // Show vector rebuild in progress
+            document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '��';
+        }
+    }
+
+    function finishProcessingUI(success, results) {
+        // Update UI when processing is finished (either success or error)
+        const processButton = document.getElementById('process-button');
+        processButton.disabled = false;
+        processButton.textContent = 'Process File';
+        
+        if (success) {
+            // Mark all steps as complete
+            document.querySelectorAll('.progress-icon').forEach(icon => {
+                icon.textContent = '✅';
+            });
+            
+            // Show success message
+            const stats = results.stats || {};
+            const message = `Processing completed successfully! Added ${stats.new_count || 0} new bookmarks, ` +
+                `updated ${stats.updated_count || 0} existing bookmarks.`;
+            alert(message);
+        } else {
+            // Mark appropriate steps as error
             document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
             
             // Show error message
-            alert('Error starting processing: ' + error.message);
-        });
-    };
-    
-    // Add function to poll for process status
-    function pollProcessStatus(sessionId) {
-        console.log("Polling status for session:", sessionId);
+            alert('Processing failed: ' + (results.error || 'Unknown error'));
+            console.error('Processing failed:', results);
+        }
         
-        fetch(`/process-status?session_id=${sessionId}`)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-            }
-            return response.json();
-        })
-        .then(data => {
-            console.log("Status response:", data);
-            
-            const status = data.status.status;
-            
-            // Update UI based on status
-            if (status === 'processing') {
-                // Still processing, update UI and poll again
-                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '⚡';
-                setTimeout(() => pollProcessStatus(sessionId), 2000);
-            } else if (status === 'completed') {
-                // Processing completed
-                document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
-                    icon.textContent = '✅';
-                });
-                
-                // Show success message
-                alert('Processing completed successfully!');
-                
-                // Re-enable the process button
-                const button = document.getElementById('process-button');
-                button.disabled = false;
-                button.textContent = 'Process File';
-            } else if (status === 'error') {
-                // Processing error
-                document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
-                
-                // Show error message
-                alert('Error during processing: ' + (data.status.error || 'Unknown error'));
-                
-                // Re-enable the process button
-                const button = document.getElementById('process-button');
-                button.disabled = false;
-                button.textContent = 'Retry Processing';
-            }
-        })
-        .catch(error => {
-            console.error("Status polling error:", error);
-            
-            // Try again in 5 seconds
-            setTimeout(() => pollProcessStatus(sessionId), 5000);
-        });
+        // Reset retry count
+        window.pollRetryCount = 0;
     }
     </script>
 </body>
