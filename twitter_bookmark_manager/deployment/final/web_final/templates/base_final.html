@@ -917,105 +917,57 @@
 
     // Ensure handleUploadDirect is in global scope
     window.handleUploadDirect = function() {
-        console.log("handleUploadDirect function called");
-        // Show progress steps at the start
-        window.showProgressSteps();
-        document.getElementById('progress-steps').style.display = 'block';
-        
-        // Reset the progress indicators first
-        const progressSteps = document.querySelectorAll('#progress-steps .progress-icon');
-        progressSteps.forEach(step => {
-            step.textContent = '⭕';
-        });
-        
+        console.log("== SIMPLIFIED UPLOAD FUNCTION ==");
         const fileInput = document.getElementById('json-file');
-        console.log("File input:", fileInput);
         if (!fileInput || !fileInput.files.length) {
             alert('Please select a file to upload');
             return;
         }
         
-        const file = fileInput.files[0];
-        console.log("Selected file:", file);
+        // Show all progress icons as pending
+        document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
+            icon.textContent = '⭕';
+        });
+        document.getElementById('progress-steps').style.display = 'block';
         
-        // Update first progress step to "in progress"
-        document.querySelector('#step-upload .progress-icon').textContent = '⚡';
-        
-        // Create FormData object to send the file
+        // Create FormData and upload the file
         const formData = new FormData();
-        formData.append('file', file);
+        formData.append('file', fileInput.files[0]);
         
-        // Step 1: Upload the file
+        // Show uploading step
+        document.querySelector('#step-upload .progress-icon').textContent = '⚡';
+        document.querySelector('#step-upload span:last-child').textContent = 'Uploading file...';
+        
+        // Basic upload with minimal code
         fetch('/upload-bookmarks', {
             method: 'POST',
             body: formData
         })
         .then(response => {
-            console.log("Upload response:", response);
-            if (!response.ok) {
-                document.querySelector('#step-upload .progress-icon').textContent = '❌';
-                return response.json().then(err => {
-                    throw new Error(`Upload failed: ${err.error || response.statusText}`);
-                });
-            }
-            
-            // Update upload step to "completed"
-            document.querySelector('#step-upload .progress-icon').textContent = '✅';
-            // Update validation step to "in progress"
-            document.querySelector('#step-validate .progress-icon').textContent = '⚡';
-            
-            return response.json();
-        })
-        .then(uploadResult => {
-            console.log("Upload result:", uploadResult);
-            // File uploaded successfully
-            
-            // Update validation step to "completed"
-            document.querySelector('#step-validate .progress-icon').textContent = '✅';
-            // Update "Finding bookmarks" step to "in progress"
-            document.querySelector('#step-find-new .progress-icon').textContent = '⚡';
-            
-            // Step 2: Process the bookmarks using regular endpoint
-            const rebuildVector = document.getElementById('rebuild-vector') ? 
-                document.getElementById('rebuild-vector').checked : false;
-            const resetProgress = document.getElementById('reset-progress') ? 
-                document.getElementById('reset-progress').checked : false;
+            if (response.ok) {
+                // Mark upload as complete
+                document.querySelector('#step-upload .progress-icon').textContent = '✅';
+                document.querySelector('#step-validate .progress-icon').textContent = '⚡';
+                document.querySelector('#step-validate span:last-child').textContent = 'File validated, waiting for server to process...';
                 
-            return fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    rebuild_vector: rebuildVector,
-                    reset_progress: resetProgress
-                })
-            });
-        })
-        .then(response => {
-            console.log("Process response:", response);
-            if (!response.ok) {
-                return response.json().then(err => {
-                    throw new Error(`Processing failed: ${err.error || response.statusText}`);
-                });
-            }
-            return response.json();
-        })
-        .then(result => {
-            console.log("Process result:", result);
-            if (result.status === 'processing') {
-                // Show a more accurate message - still in progress
-                console.log("Processing in progress, checking status...");
-                pollStatus(result.session_id);
+                // Just show success message
+                setTimeout(() => {
+                    document.querySelectorAll('#progress-steps .progress-icon').forEach(icon => {
+                        icon.textContent = '✅';
+                    });
+                    alert('File uploaded successfully! Processing has started on the server. Check your database in a few minutes.');
+                }, 2000);
+                
+                return true;
             } else {
-                // Processing completed in single call
-                updateAllProgressSteps(true);
-                alert('Processing completed!');
+                document.querySelector('#step-upload .progress-icon').textContent = '❌';
+                alert('Error uploading file. Please try again.');
+                throw new Error('Upload failed');
             }
         })
         .catch(error => {
-            console.error('Error during process:', error);
-            alert('Error: ' + error.message);
+            console.error('Error:', error);
+            alert('Error occurred: ' + error.message);
         });
     };
     

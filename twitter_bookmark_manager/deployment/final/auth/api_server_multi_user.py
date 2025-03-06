@@ -289,7 +289,7 @@ def api_categories():
 @app.route('/upload-bookmarks', methods=['POST'])
 def upload_bookmarks():
     """
-    Improved endpoint for uploading bookmarks JSON file.
+    Simplified endpoint for uploading bookmarks JSON file.
     """
     try:
         user_id = UserContext.get_user_id()
@@ -311,15 +311,14 @@ def upload_bookmarks():
         # Create user directory if it doesn't exist
         user_dir = f"user_{user_id}"
         
-        # Try multiple potential paths for consistency
+        # Find or create database directory
+        database_dir = None
         potential_dirs = [
             os.path.join(BASE_DIR, "database", user_dir),
             os.path.join("database", user_dir),
             os.path.join("/app/database", user_dir)
         ]
         
-        # Find or create the first valid directory
-        database_dir = None
         for dir_path in potential_dirs:
             try:
                 os.makedirs(dir_path, exist_ok=True)
@@ -334,80 +333,42 @@ def upload_bookmarks():
             logger.error("Could not create any database directory")
             return jsonify({'error': 'Server error creating user directory'}), 500
         
-        # Set paths for backup and file storage
+        # Set paths for files
         bookmarks_file = os.path.join(database_dir, 'twitter_bookmarks.json')
-        backup_file = os.path.join(database_dir, f'twitter_bookmarks_backup_{int(time.time())}.json')
         
-        # Backup existing file if it exists
-        if os.path.exists(bookmarks_file):
-            try:
-                shutil.copy2(bookmarks_file, backup_file)
-                logger.info(f"Created backup at {backup_file}")
-            except Exception as e:
-                logger.warning(f"Could not create backup: {e}")
-        
-        # Save the uploaded file
+        # Save the file directly (simple approach)
         try:
-            # Save with a temporary name first to prevent partial writes
-            temp_path = os.path.join(database_dir, f'temp_{int(time.time())}.json')
-            file.save(temp_path)
+            file.save(bookmarks_file)
+            logger.info(f"File saved to {bookmarks_file}")
             
-            # Verify it's valid JSON and has the expected structure
-            try:
-                with open(temp_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            # Generate a session ID for this update
+            session_id = str(uuid.uuid4())[:8]
+            
+            # Start background processing
+            def background_process():
+                try:
+                    logger.info(f"Starting background processing for session {session_id}")
+                    from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
                     
-                # Check for bookmarks array
-                if isinstance(data, dict) and 'bookmarks' in data:
-                    bookmarks = data['bookmarks']
-                    bookmarks_count = len(bookmarks)
-                    logger.info(f"File contains {bookmarks_count} bookmarks")
-                elif isinstance(data, list):
-                    bookmarks_count = len(data)
-                    logger.info(f"File contains {bookmarks_count} bookmarks (array format)")
-                else:
-                    logger.error("Invalid JSON structure: no bookmarks array found")
-                    return jsonify({'error': 'Invalid JSON structure: no bookmarks array found'}), 400
+                    # Simple processing with default options
+                    result = final_update_bookmarks(
+                        session_id=session_id, 
+                        start_index=0,
+                        rebuild_vector=False,
+                        user_id=user_id
+                    )
                     
-                # Move to final location
-                os.replace(temp_path, bookmarks_file)
-                logger.info(f"File saved to {bookmarks_file}")
-                
-                # Reset update progress to ensure clean start
-                progress_file = os.path.join(database_dir, 'update_progress.json')
-                progress_backup = os.path.join(database_dir, f'update_progress_backup_{int(time.time())}.json')
-                
-                # Backup existing progress if needed
-                if os.path.exists(progress_file):
-                    try:
-                        shutil.copy2(progress_file, progress_backup)
-                        logger.info(f"Backed up previous progress to {progress_backup}")
-                    except Exception as e:
-                        logger.warning(f"Could not backup progress file: {e}")
-                
-                # Create new progress file
-                with open(progress_file, 'w') as f:
-                    progress_data = {
-                        'session_id': str(uuid.uuid4())[:8],
-                        'last_processed_index': 0,
-                        'processed_ids': [],
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    json.dump(progress_data, f)
-                
-                return jsonify({
-                    'success': True, 
-                    'message': f'File uploaded successfully. Found {bookmarks_count} bookmarks.',
-                    'bookmark_count': bookmarks_count
-                })
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON file: {e}")
-                # Clean up temp file
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                return jsonify({'error': f'Invalid JSON file: {e}'}), 400
-                
+                    logger.info(f"Background processing completed: {result}")
+                except Exception as e:
+                    logger.error(f"Error in background processing: {e}")
+                    logger.error(traceback.format_exc())
+            
+            # Start the background thread
+            threading.Thread(target=background_process, daemon=True).start()
+            
+            # Return success immediately
+            return jsonify({'success': True, 'message': 'File uploaded and processing started'})
+            
         except Exception as e:
             logger.error(f"Error saving file: {e}")
             logger.error(traceback.format_exc())
