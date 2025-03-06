@@ -14,6 +14,7 @@ import functools
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 import traceback
+import psycopg2  # Add direct psycopg2 import
 
 import sqlalchemy
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text
@@ -39,6 +40,7 @@ _session_factory = None  # Session factory
 _vector_store = None  # Vector store instance
 _last_connection_error = None  # Track last connection error
 _connection_error_time = None  # When the last error occurred
+_direct_conn = None  # Direct psycopg2 connection for emergency access
 
 # Thread-local storage for sessions
 _local_storage = threading.local()
@@ -111,52 +113,99 @@ def with_db_retry(max_tries=5, backoff_in_seconds=1):
         return wrapper
     return decorator
 
+# Get direct PostgreSQL connection parameters from environment
+def get_pg_direct_params() -> Dict[str, str]:
+    """Get PostgreSQL connection parameters directly from environment variables"""
+    return {
+        'dbname': os.environ.get('PGDATABASE', 'railway'),
+        'user': os.environ.get('PGUSER', 'postgres'),
+        'password': os.environ.get('PGPASSWORD', ''),
+        'host': 'postgres.railway.internal',  # Always use internal endpoint
+        'port': '5432',
+        'connect_timeout': '10',
+        'application_name': 'twitter_bookmark_manager_direct'
+    }
+
+# Get a direct psycopg2 connection - useful as a fallback
+def get_direct_connection():
+    """
+    Get a direct psycopg2 connection to PostgreSQL without using SQLAlchemy.
+    This serves as a backup when SQLAlchemy pool has issues.
+    """
+    global _direct_conn
+    
+    # If we already have a connection, check if it's still valid
+    if _direct_conn:
+        try:
+            # Test connection with a simple query
+            cur = _direct_conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.close()
+            logger.debug("Reusing existing direct psycopg2 connection")
+            return _direct_conn
+        except Exception as e:
+            logger.warning(f"Existing direct connection failed: {e}")
+            try:
+                _direct_conn.close()
+            except:
+                pass
+            _direct_conn = None
+    
+    # Create a new connection
+    try:
+        # Get connection parameters
+        params = get_pg_direct_params()
+        logger.info(f"Creating direct psycopg2 connection to {params['host']}:{params['port']}/{params['dbname']}")
+        
+        # Create the connection
+        conn = psycopg2.connect(**params)
+        conn.autocommit = True  # Set autocommit mode
+        
+        # Test the connection
+        cur = conn.cursor()
+        cur.execute("SELECT version()")
+        version = cur.fetchone()[0]
+        cur.close()
+        
+        logger.info(f"✅ Direct PostgreSQL connection established: {version}")
+        _direct_conn = conn
+        return conn
+    except Exception as e:
+        logger.error(f"❌ Direct PostgreSQL connection failed: {e}")
+        return None
+
 def get_db_url() -> str:
     """
     Get the database URL from environment variables or use SQLite as fallback.
     Always prioritizes internal Railway PostgreSQL endpoint when in Railway environment.
     """
-    # First check for complete DATABASE_URL environment variable
-    database_url = os.environ.get('DATABASE_URL')
-    
-    # Flag to know if we're running in Railway
-    is_railway = 'RAILWAY_PROJECT_ID' in os.environ
-    
-    # If in Railway, always use the internal endpoint
-    if is_railway:
-        logger.info("Detected Railway environment, prioritizing internal connection")
-        
-        # Get credentials from environment variables
+    # Always use the internal endpoint for Railway PostgreSQL
+    if 'RAILWAY_PROJECT_ID' in os.environ:
         db_user = os.environ.get('PGUSER')
         db_password = os.environ.get('PGPASSWORD')
         db_name = os.environ.get('PGDATABASE', 'railway')
         
         if db_user and db_password:
-            # Always use internal endpoint in Railway
+            # Construct internal URL
             internal_url = f"postgresql://{db_user}:{db_password}@postgres.railway.internal:5432/{db_name}"
-            logger.info(f"Using Railway internal endpoint: postgresql://{db_user}:****@postgres.railway.internal:5432/{db_name}")
+            logger.info(f"Using Railway internal PostgreSQL URL: {internal_url.replace(db_password, '****')}")
             return internal_url
     
-    # If DATABASE_URL exists but contains proxy.rlwy.net, ignore it and build from components
-    if database_url and 'proxy.rlwy.net' in database_url:
-        logger.warning("⚠️ Ignoring DATABASE_URL with proxy domain and building connection from individual credentials")
-        database_url = None
+    # Fallback to other methods if not in Railway or missing credentials
+    database_url = os.environ.get('DATABASE_URL')
     
-    if database_url:
-        # Make sure we're using the internal endpoint for Railway
-        if 'railway.app' in database_url or 'proxy.rlwy.net' in database_url:
-            logger.warning("⚠️ Converting external Railway URL to internal network URL")
-            # Replace external endpoints with internal ones
-            database_url = database_url.replace('postgresql://', '')
-            # Extract credentials and database name
-            credentials, rest = database_url.split('@', 1)
-            # Replace the host:port with internal endpoint
-            database_url = f"postgresql://{credentials}@postgres.railway.internal:5432/railway"
-            
-        logger.info(f"Using provided DATABASE_URL (sanitized): postgresql://user:****@{database_url.split('@')[1]}")
+    # If DATABASE_URL exists but contains proxy.rlwy.net, fix it
+    if database_url and 'proxy.rlwy.net' in database_url:
+        logger.warning("⚠️ Found external proxy URL, converting to internal endpoint")
+        database_url = database_url.replace('postgresql://', '')
+        credentials, rest = database_url.split('@', 1)
+        host_port, db_name = rest.split('/', 1)
+        database_url = f"postgresql://{credentials}@postgres.railway.internal:5432/{db_name}"
+        logger.info(f"Converted to internal URL: postgresql://user:****@postgres.railway.internal:5432/{db_name}")
         return database_url
-            
-    # Try getting PostgreSQL connection info from Railway environment variables
+    
+    # Use individual connection parameters as another fallback
     db_user = os.environ.get('PGUSER') or os.environ.get('DB_USER')
     db_password = os.environ.get('PGPASSWORD') or os.environ.get('DB_PASSWORD')
     db_host = os.environ.get('PGHOST') or os.environ.get('DB_HOST')
@@ -165,23 +214,23 @@ def get_db_url() -> str:
     
     # Check if we have all required PostgreSQL environment variables
     if all([db_user, db_password, db_host, db_name]):
-        # Force internal Railway hostname if we're in Railway environment
-        if is_railway and db_host != 'postgres.railway.internal':
-            logger.warning(f"⚠️ Overriding provided host {db_host} with internal Railway endpoint")
+        # Force internal Railway hostname in Railway environment
+        if 'RAILWAY_PROJECT_ID' in os.environ and db_host != 'postgres.railway.internal':
             db_host = 'postgres.railway.internal'
-            db_port = '5432'  # Always use standard port with internal endpoint
+            db_port = '5432'
             
-        logger.info(f"Using PostgreSQL database at {db_host}:{db_port}/{db_name}")
-        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    else:
-        logger.warning("⚠️ No PostgreSQL credentials found in environment, defaulting to SQLite")
-        # Use SQLite as fallback
-        db_path = os.environ.get('SQLITE_PATH', 'twitter_bookmarks.db')
-        return f"sqlite:///{db_path}"
+        url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        logger.info(f"Using constructed PostgreSQL URL: postgresql://user:****@{db_host}:{db_port}/{db_name}")
+        return url
+    
+    # Final fallback to SQLite
+    logger.warning("⚠️ No PostgreSQL credentials found, defaulting to SQLite")
+    db_path = os.environ.get('SQLITE_PATH', 'twitter_bookmarks.db')
+    return f"sqlite:///{db_path}"
 
 def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Engine:
     """
-    Set up the database connection with optimized parameters for reliability.
+    Simple and robust database connection setup optimized for Railway.
     
     Args:
         force_reconnect: Whether to force recreation of the engine
@@ -192,110 +241,82 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
     """
     global _engine, _session_factory
     
-    # Use lock to prevent race conditions during engine setup/reset
+    # Use lock to prevent race conditions
     with _engine_lock:
         if _engine is not None and not force_reconnect:
-            # Test the existing connection before reusing it
+            # Quick validation of existing engine
             try:
-                # Simple connection test
                 with _engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
-                logger.info("Verified existing database connection is healthy")
                 return _engine
             except Exception as e:
-                logger.warning(f"Existing connection failed health check: {e}")
-                # Continue to reconnect
+                logger.warning(f"Existing engine failed validation: {e}")
+                # Continue to create a new engine
+        
+        # Try to establish a direct connection first as a validation
+        direct_conn = get_direct_connection()
+        if not direct_conn:
+            logger.warning("Direct connection failed, but will attempt SQLAlchemy anyway")
             
         try:
             # Get database URL
             db_url = get_db_url()
-            db_type = 'postgresql' if 'postgresql' in db_url else 'sqlite'
+            is_postgresql = 'postgresql' in db_url
             
-            # Log connection attempt with sanitized URL
-            sanitized_url = db_url.replace('postgresql://', 'postgresql://user:****@')
-            if 'sqlite' in db_url:
-                sanitized_url = db_url
-            logger.info(f"Connecting to database: {sanitized_url}")
-            
-            # Engine parameters dict - base settings
+            # ULTRA SIMPLIFIED APPROACH for Railway
+            # Fewer parameters, less complexity = fewer points of failure
             engine_params = {
                 'echo': show_sql,
-                'pool_pre_ping': True,  # Test connections before use
+                'pool_pre_ping': True,
             }
             
-            # Add settings for PostgreSQL - optimized for Railway
-            if db_type == 'postgresql':
-                # Determine if we're in Railway - adjust settings accordingly
-                is_railway = 'RAILWAY_PROJECT_ID' in os.environ
-                
-                # Pool settings - more aggressive for Railway
-                pool_size = 3 if is_railway else 5
-                max_overflow = 7 if is_railway else 10
-                
+            if is_postgresql:
                 engine_params.update({
-                    # Use QueuePool with adjusted settings
                     'poolclass': QueuePool,
-                    'pool_size': pool_size,
-                    'max_overflow': max_overflow,
-                    'pool_timeout': 20,  # Wait up to 20 seconds for a connection
-                    'pool_recycle': 300,  # Recycle connections after 5 minutes in Railway
+                    'pool_size': 3,                 # Small pool size
+                    'max_overflow': 5,              # Limited overflow
+                    'pool_timeout': 10,             # Short timeout
+                    'pool_recycle': 300,            # 5 minute recycle
                     'connect_args': {
-                        'connect_timeout': 10,  # Connection timeout (10 seconds)
-                        'keepalives': 1,  # Enable TCP keepalives
-                        'keepalives_idle': 30,  # Time between keepalives
-                        'keepalives_interval': 10,  # Interval between keepalives
-                        'keepalives_count': 3,  # Number of keepalives before giving up
-                        'application_name': 'twitter_bookmark_manager',  # Identify in pg_stat_activity
-                        'options': '-c timezone=UTC'  # Set timezone to UTC
+                        'connect_timeout': 10,
+                        'application_name': 'twitter_bookmark_manager_sqlalchemy'
                     }
                 })
-                
-                logger.info(f"Configured PostgreSQL pool: size={pool_size}, max_overflow={max_overflow}, recycle=300s")
-                
-            # Dispose of existing engine if forcing reconnect
-            if force_reconnect and _engine is not None:
+            
+            # Dispose of existing engine
+            if _engine is not None:
                 try:
                     _engine.dispose()
-                    logger.info("Disposed existing engine for reconnection")
                 except Exception as e:
                     logger.warning(f"Error disposing engine: {e}")
-                    
-            # Close all active sessions before creating a new engine
+            
+            # Clear all active sessions
             close_all_sessions()
             
-            # Starting engine creation
-            logger.info(f"Creating new database engine for {db_type}")
+            # Create the engine
+            logger.info("Creating new SQLAlchemy engine")
             _engine = create_engine(db_url, **engine_params)
             
-            # Set up statement timeout and other session parameters for PostgreSQL
-            if db_type == 'postgresql':
+            # Set basic statement timeout for PostgreSQL
+            if is_postgresql:
                 @event.listens_for(_engine, "connect")
-                def set_pg_parameters(dbapi_connection, connection_record):
+                def set_pg_timeout(dbapi_connection, connection_record):
                     cursor = dbapi_connection.cursor()
-                    # Set reasonable timeouts to prevent hanging operations
-                    cursor.execute("SET statement_timeout = '20s';")  # 20 second statement timeout
-                    cursor.execute("SET lock_timeout = '10s';")  # 10 second lock timeout
-                    cursor.execute("SET idle_in_transaction_session_timeout = '60s';")  # 1 minute idle timeout
+                    cursor.execute("SET statement_timeout = '20s'")
                     cursor.close()
             
             # Create session factory
             _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
             
-            # Test connection before returning
+            # Verify connection
             with _engine.connect() as conn:
-                result = conn.execute(text("SELECT 1"))
-                if result.scalar() != 1:
-                    raise Exception("Database connection test failed")
+                conn.execute(text("SELECT 1"))
             
-            logger.info(f"✅ Database connection established and verified: {db_type}")
-            
-            # Initialize tables
-            create_tables()
-            
+            logger.info(f"✅ SQLAlchemy engine created successfully")
             return _engine
             
         except Exception as e:
-            logger.error(f"❌ Database connection error: {e}")
+            logger.error(f"❌ SQLAlchemy engine creation failed: {e}")
             logger.error(traceback.format_exc())
             raise
 
@@ -442,10 +463,28 @@ def db_session():
         if session:
             close_session(session)
 
+# Get a database connection for multi-purpose use
 @with_db_retry(max_tries=5, backoff_in_seconds=1)
 def get_db_connection():
-    """Create and return a database session with retry"""
-    return create_session()
+    """
+    Get a database connection with improved reliability.
+    Tries both SQLAlchemy and direct psycopg2 approaches.
+    """
+    try:
+        # First try SQLAlchemy
+        engine = get_engine()
+        
+        # Create SQLAlchemy connection
+        return engine.connect()
+    except Exception as e:
+        logger.warning(f"SQLAlchemy connection failed: {e}, trying direct psycopg2 connection")
+        
+        # Fallback to direct psycopg2 connection
+        conn = get_direct_connection()
+        if conn:
+            return conn
+        else:
+            raise Exception("Both SQLAlchemy and direct connection methods failed")
 
 # Alias for backward compatibility
 def get_db_session():
@@ -453,68 +492,148 @@ def get_db_session():
     return create_session()
 
 def create_tables():
-    """Create database tables if they don't exist"""
-    from sqlalchemy import (Table, Column, Integer, String, Boolean, 
-                          Text, DateTime, MetaData, ForeignKey, 
-                          JSON, Float, SmallInteger, UniqueConstraint)
+    """Create database tables if they don't already exist using the most reliable available method"""
+    logger.info("Initializing database tables")
     
-    # Get the engine
-    engine = get_engine()
-    metadata = MetaData()
-    
-    # Users table for multi-user support
-    users = Table('users', metadata,
-        Column('id', Integer, primary_key=True),
-        Column('username', String(100), unique=True, nullable=False),
-        Column('email', String(255), unique=True, nullable=False),
-        Column('password_hash', String(255), nullable=False),
-        Column('is_admin', Boolean, default=False),
-        Column('created_at', DateTime, default=datetime.utcnow),
-        Column('last_login', DateTime),
-        Column('is_active', Boolean, default=True)
-    )
-    
-    # Bookmarks table
-    bookmarks = Table('bookmarks', metadata,
-        Column('id', Integer, primary_key=True),
-        Column('text', Text),
-        Column('created_at', DateTime),
-        Column('author_name', String(100)),
-        Column('author_username', String(100)),
-        Column('media_files', Text),
-        Column('raw_data', JSON),
-        Column('user_id', Integer, ForeignKey('users.id')),
-        Column('processed', Boolean, default=False),
-        Column('retried', SmallInteger, default=0)
-    )
-    
-    # Categories table
-    categories = Table('categories', metadata,
-        Column('id', Integer, primary_key=True),
-        Column('name', String(100)),
-        Column('description', Text),
-        Column('user_id', Integer, ForeignKey('users.id')),
-        Column('created_at', DateTime, default=datetime.utcnow),
-        Column('updated_at', DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
-        UniqueConstraint('name', 'user_id', name='uix_category_name_user_id')
-    )
-    
-    # BookmarkCategories table - many-to-many relationship
-    bookmark_categories = Table('bookmark_categories', metadata,
-        Column('id', Integer, primary_key=True),
-        Column('bookmark_id', Integer, ForeignKey('bookmarks.id')),
-        Column('category_id', Integer, ForeignKey('categories.id')),
-        Column('user_id', Integer, ForeignKey('users.id')),
-        Column('created_at', DateTime, default=datetime.utcnow),
-        UniqueConstraint('bookmark_id', 'category_id', name='uix_bookmark_category')
-    )
-    
-    # Create tables
+    # Try to get a connection - first attempt with SQLAlchemy
     try:
-        metadata.create_all(engine)
-        logger.info("✅ Database tables created or already exist")
+        # Get engine and metadata
+        engine = get_engine()
+        metadata = MetaData()
+        
+        # Define tables using SQLAlchemy constructs
+        # Users table
+        users = Table('users', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('username', String(100), unique=True),
+            Column('email', String(255), unique=True),
+            Column('twitter_id', String(100), unique=True),
+            Column('auth_provider', String(50)),
+            Column('created_at', DateTime, default=datetime.utcnow),
+            Column('last_login', DateTime),
+            Column('profile_data', Text)
+        )
+        
+        # Bookmarks table
+        bookmarks = Table('bookmarks', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('bookmark_id', String(100), unique=True),
+            Column('text', Text),
+            Column('created_at', String(50)),
+            Column('author', String(100)),
+            Column('author_id', String(100)),
+            Column('media_files', Text),
+            Column('raw_data', Text),  # Use Text for compatibility instead of JSON
+            Column('user_id', Integer, ForeignKey('users.id')),
+            Column('processed', Boolean, default=False),
+            Column('retried', Integer, default=0)
+        )
+        
+        # Categories table
+        categories = Table('categories', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('name', String(100)),
+            Column('description', Text),
+            Column('user_id', Integer, ForeignKey('users.id')),
+            Column('created_at', DateTime, default=datetime.utcnow),
+            Column('updated_at', DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+        )
+        
+        # BookmarkCategories table - many-to-many relationship
+        bookmark_categories = Table('bookmark_categories', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('bookmark_id', Integer, ForeignKey('bookmarks.id')),
+            Column('category_id', Integer, ForeignKey('categories.id')),
+            Column('user_id', Integer, ForeignKey('users.id')),
+            Column('created_at', DateTime, default=datetime.utcnow)
+        )
+        
+        # Attempt to create tables using SQLAlchemy
+        try:
+            # Create tables
+            metadata.create_all(engine)
+            logger.info("✅ Database tables created or already exist via SQLAlchemy")
+            return
+        except Exception as sqlalchemy_error:
+            logger.warning(f"SQLAlchemy table creation failed: {sqlalchemy_error}")
+            # Fall through to direct method
     except Exception as e:
-        logger.error(f"❌ Error creating tables: {e}")
+        logger.warning(f"Unable to create tables via SQLAlchemy: {e}")
+        
+    # If SQLAlchemy fails, try direct psycopg2 connection for PostgreSQL
+    try:
+        # Get direct connection
+        conn = get_direct_connection()
+        if not conn:
+            logger.error("Failed to get direct connection for table creation")
+            raise Exception("No database connection available for table creation")
+        
+        # Create tables directly with SQL
+        cursor = conn.cursor()
+        
+        # Create tables if they don't exist
+        # 1. Users table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE,
+            email VARCHAR(255) UNIQUE,
+            twitter_id VARCHAR(100) UNIQUE,
+            auth_provider VARCHAR(50),
+            created_at TIMESTAMP DEFAULT NOW(),
+            last_login TIMESTAMP,
+            profile_data TEXT
+        )
+        """)
+        
+        # 2. Bookmarks table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id SERIAL PRIMARY KEY,
+            bookmark_id VARCHAR(100) UNIQUE,
+            text TEXT,
+            created_at VARCHAR(50),
+            author VARCHAR(100),
+            author_id VARCHAR(100),
+            media_files TEXT,
+            raw_data TEXT,
+            user_id INTEGER REFERENCES users(id),
+            processed BOOLEAN DEFAULT FALSE,
+            retried INTEGER DEFAULT 0
+        )
+        """)
+        
+        # 3. Categories table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100),
+            description TEXT,
+            user_id INTEGER REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """)
+        
+        # 4. BookmarkCategories table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bookmark_categories (
+            id SERIAL PRIMARY KEY,
+            bookmark_id INTEGER REFERENCES bookmarks(id),
+            category_id INTEGER REFERENCES categories(id),
+            user_id INTEGER REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(bookmark_id, category_id)
+        )
+        """)
+        
+        # Commit the changes
+        conn.commit()
+        cursor.close()
+        
+        logger.info("✅ Database tables created or already exist via direct SQL")
+    except Exception as direct_error:
+        logger.error(f"❌ Direct SQL table creation failed: {direct_error}")
         raise
 
 def check_engine_health() -> Dict[str, Any]:
