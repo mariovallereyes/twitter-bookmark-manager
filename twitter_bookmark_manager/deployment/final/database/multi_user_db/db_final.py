@@ -6,7 +6,7 @@ import os
 import sys
 import logging
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker, scoped_session, Session
 from contextlib import contextmanager
 from typing import Generator
 from dotenv import load_dotenv
