@@ -9,6 +9,7 @@ import logging
 import json
 import time
 import secrets
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g
@@ -21,7 +22,6 @@ import glob
 import requests
 import hashlib
 import platform
-import threading
 from sqlalchemy import text, create_engine
 
 # Import user context features
@@ -657,8 +657,211 @@ def update_database():
         logger.info(f"🏁 [UPDATE-{session_id}] Database update process completed at {datetime.now().isoformat()}")
         logger.info("="*80)
 
-# Other API endpoints would be similarly updated with user_id filtering
-# Including upload-bookmarks, update-database, etc.
+# Async update database endpoint - resistant to connection timeouts
+@app.route('/async-update-database', methods=['POST'])
+def async_update_database():
+    """Start bookmark update in background thread to prevent connection timeouts"""
+    # Get current user
+    user = UserContext.get_current_user()
+    
+    # Redirect to login if not authenticated
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    # Generate a unique ID for this update session
+    session_id = str(uuid.uuid4())[:8]
+    logger.info("="*80)
+    logger.info(f"🚀 [ASYNC-UPDATE-{session_id}] User {user.id} starting background update at {datetime.now().isoformat()}")
+    
+    # Get parameters from request
+    if request.is_json:
+        start_index = request.json.get('start_index', 0)
+        force_rebuild = request.json.get('rebuild_vector', False)
+        skip_database = request.json.get('skip_database', False)
+        reset_progress = request.json.get('reset_progress', False)
+    else:
+        start_index = request.args.get('start_index', 0, type=int)
+        force_rebuild = request.args.get('rebuild_vector', 'false').lower() == 'true'
+        skip_database = request.args.get('skip_database', 'false').lower() == 'true'
+        reset_progress = request.args.get('reset_progress', 'false').lower() == 'true'
+        
+    logger.info(f"📋 [ASYNC-UPDATE-{session_id}] Parameters: start_index={start_index}, force_rebuild={force_rebuild}, skip_database={skip_database}, reset_progress={reset_progress}")
+    
+    # Define user-specific paths
+    base_dir = Path(app.root_path).parent.parent
+    database_dir = base_dir / "database" / f"user_{user.id}"
+    progress_file = database_dir / 'update_progress.json'
+    status_file = database_dir / 'update_status.json'
+    
+    # Ensure the database directory exists
+    database_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Reset progress if requested
+    if reset_progress and progress_file.exists():
+        try:
+            # Create a backup first
+            backup_file = progress_file.with_suffix(f'.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+            shutil.copy2(str(progress_file), str(backup_file))
+            logger.info(f"✅ [ASYNC-UPDATE-{session_id}] Created backup of progress file at {backup_file}")
+            
+            # Delete the progress file
+            progress_file.unlink()
+            logger.info(f"✅ [ASYNC-UPDATE-{session_id}] Reset progress file as requested")
+        except Exception as e:
+            logger.error(f"❌ [ASYNC-UPDATE-{session_id}] Error resetting progress: {str(e)}")
+    
+    # Create initial status file
+    status_data = {
+        'session_id': session_id,
+        'user_id': user.id,
+        'status': 'starting',
+        'start_time': datetime.now().isoformat(),
+        'last_update': datetime.now().isoformat(),
+        'progress': {
+            'total_processed': 0,
+            'new_count': 0,
+            'updated_count': 0,
+            'errors': 0
+        },
+        'is_complete': False,
+        'message': 'Update process starting in background'
+    }
+    
+    with open(status_file, 'w') as f:
+        json.dump(status_data, f, indent=2)
+    
+    # Define the background function
+    def background_update():
+        try:
+            from database.multi_user_db.update_bookmarks_final import final_update_bookmarks, rebuild_vector_store
+            
+            # Update status to running
+            status_data['status'] = 'running'
+            status_data['message'] = 'Processing bookmarks...'
+            with open(status_file, 'w') as f:
+                json.dump(status_data, f, indent=2)
+                
+            # Run the update process
+            if not skip_database:
+                logger.info(f"🔄 [ASYNC-UPDATE-{session_id}] Running bookmark update in background")
+                result = final_update_bookmarks(session_id=session_id, start_index=start_index, rebuild_vector=force_rebuild, user_id=user.id)
+            
+                status_data['update_result'] = result
+                
+                # If vector rebuild was not done during update but requested, do it now
+                if force_rebuild and not result.get('vector_rebuilt', False):
+                    logger.info(f"🔄 [ASYNC-UPDATE-{session_id}] Running vector rebuild in background")
+                    rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user.id)
+                    status_data['rebuild_result'] = rebuild_result
+            else:
+                # Skip database update, only rebuild vector
+                logger.info(f"🔄 [ASYNC-UPDATE-{session_id}] Skipping database update, only rebuilding vector store")
+                rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user.id)
+                status_data['rebuild_result'] = rebuild_result
+                status_data['update_result'] = {'success': True, 'message': 'Database update skipped as requested'}
+                
+            # Update final status
+            status_data['status'] = 'completed'
+            status_data['message'] = 'Update process completed successfully'
+            status_data['is_complete'] = True
+            status_data['end_time'] = datetime.now().isoformat()
+            status_data['last_update'] = datetime.now().isoformat()
+            
+            # If we have progress info, add it to the status
+            if progress_file.exists():
+                try:
+                    with open(progress_file, 'r') as f:
+                        progress_data = json.load(f)
+                        if 'stats' in progress_data:
+                            status_data['progress'] = progress_data['stats']
+                except Exception as e:
+                    logger.error(f"❌ [ASYNC-UPDATE-{session_id}] Error reading progress file: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"❌ [ASYNC-UPDATE-{session_id}] Background update error: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Update status to error
+            status_data['status'] = 'error'
+            status_data['message'] = f'Error during update: {str(e)}'
+            status_data['error'] = str(e)
+            status_data['traceback'] = traceback.format_exc()
+            status_data['is_complete'] = True
+            status_data['end_time'] = datetime.now().isoformat()
+            status_data['last_update'] = datetime.now().isoformat()
+        
+        finally:
+            # Save final status
+            try:
+                with open(status_file, 'w') as f:
+                    json.dump(status_data, f, indent=2)
+            except Exception as e:
+                logger.error(f"❌ [ASYNC-UPDATE-{session_id}] Error saving final status: {str(e)}")
+            
+            logger.info(f"🏁 [ASYNC-UPDATE-{session_id}] Background process completed at {datetime.now().isoformat()}")
+            logger.info("="*80)
+    
+    # Start the background thread
+    update_thread = threading.Thread(target=background_update)
+    update_thread.daemon = True  # Allow the thread to be terminated when the main thread exits
+    update_thread.start()
+    
+    # Return success immediately with the session_id
+    return jsonify({
+        'success': True,
+        'message': 'Update process started in background',
+        'session_id': session_id,
+        'status_endpoint': f'/update-status?session_id={session_id}',
+        'user_id': user.id
+    }), 202  # 202 Accepted indicates the request was accepted but processing is not complete
+
+# Update status endpoint to check progress
+@app.route('/update-status', methods=['GET'])
+def update_status():
+    """Get status of background update process"""
+    # Get current user
+    user = UserContext.get_current_user()
+    
+    # Redirect to login if not authenticated
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    # Get session_id from query parameter
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return jsonify({'error': 'Missing session_id parameter'}), 400
+    
+    # Define user-specific paths
+    base_dir = Path(app.root_path).parent.parent
+    database_dir = base_dir / "database" / f"user_{user.id}"
+    status_file = database_dir / 'update_status.json'
+    
+    # Check if status file exists
+    if not status_file.exists():
+        return jsonify({
+            'success': False,
+            'message': 'No status file found for this session',
+            'session_id': session_id,
+            'user_id': user.id
+        }), 404
+    
+    # Read status file
+    try:
+        with open(status_file, 'r') as f:
+            status_data = json.load(f)
+            
+        # Add some useful info
+        status_data['user_id'] = user.id  # Ensure user_id is in the response
+        return jsonify(status_data), 200
+    
+    except Exception as e:
+        logger.error(f"❌ [STATUS] Error reading status file for session {session_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error reading status file: {str(e)}',
+            'session_id': session_id,
+            'user_id': user.id
+        }), 500
 
 @app.route('/admin/monitor', methods=['GET'])
 def monitoring_dashboard():

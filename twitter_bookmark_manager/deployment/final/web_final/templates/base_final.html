@@ -434,27 +434,48 @@
                             <details class="text-sm">
                                 <summary class="cursor-pointer text-gray-300 hover:text-white">Advanced Options</summary>
                                 <div class="mt-3 flex flex-col gap-3">
-                                    <div>
-                                        <button 
-                                            type="button"
-                                            onclick="rebuildVectorStore()"
-                                            class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
-                                            Rebuild Vector Store
-                                        </button>
-                                        <p class="text-xs text-gray-400 mt-1">
-                                            Use this if search results are incorrect or missing. This rebuilds the search index from the database.
-                                        </p>
+                                    <div class="flex items-center">
+                                        <input 
+                                            type="checkbox" 
+                                            id="rebuild-vector" 
+                                            class="mr-2 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-600"
+                                        >
+                                        <label for="rebuild-vector" class="text-gray-300">Rebuild Vector Store</label>
                                     </div>
-                                    <div>
-                                        <button 
-                                            type="button"
-                                            onclick="resetUpdateProgress()"
-                                            class="px-4 py-2 bg-yellow-600 text-white rounded-lg text-sm hover:bg-yellow-700">
-                                            Reset Update Progress
-                                        </button>
-                                        <p class="text-xs text-gray-400 mt-1">
-                                            Use this if database updates are stuck in a loop or not completing.
-                                        </p>
+                                    <p class="text-xs text-gray-400 ml-6 -mt-1">
+                                        Use this if search results are incorrect or missing. This rebuilds the search index from the database.
+                                    </p>
+                                    
+                                    <div class="flex items-center mt-2">
+                                        <input 
+                                            type="checkbox" 
+                                            id="reset-progress" 
+                                            class="mr-2 rounded bg-gray-700 border-gray-600 text-yellow-500 focus:ring-yellow-600"
+                                        >
+                                        <label for="reset-progress" class="text-gray-300">Reset Update Progress</label>
+                                    </div>
+                                    <p class="text-xs text-gray-400 ml-6 -mt-1">
+                                        Use this if database updates are stuck in a loop or not completing. This will start the process from the beginning.
+                                    </p>
+                                    
+                                    <!-- Legacy buttons - keep for backward compatibility but hide with JavaScript -->
+                                    <div id="legacy-buttons" style="display: none;">
+                                        <div>
+                                            <button 
+                                                type="button"
+                                                onclick="rebuildVectorStore()"
+                                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+                                                Rebuild Vector Store
+                                            </button>
+                                        </div>
+                                        <div>
+                                            <button 
+                                                type="button"
+                                                onclick="resetUpdateProgress()"
+                                                class="px-4 py-2 bg-yellow-600 text-white rounded-lg text-sm hover:bg-yellow-700">
+                                                Reset Update Progress
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </details>
@@ -570,29 +591,40 @@
         this.progressSteps = [
             { status: 'processing', message: 'Starting database update...' }
         ];
+        
+        // Get form data
+        const rebuildVector = document.getElementById('rebuild-vector') ? 
+            document.getElementById('rebuild-vector').checked : false;
+        const resetProgress = document.getElementById('reset-progress') ? 
+            document.getElementById('reset-progress').checked : false;
 
         try {
-            const response = await fetch('/update-database', {
-                method: 'POST'
+            // Use the async endpoint instead
+            const response = await fetch('/async-update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rebuild_vector: rebuildVector,
+                    reset_progress: resetProgress
+                })
             });
             
             const result = await response.json();
             
             if (response.ok) {
                 this.progressSteps = [
-                    { status: 'done', message: 'File validated' },
-                    { status: 'done', message: 'SQL database updated' },
-                    { status: 'done', message: 'Vector store rebuilt' },
-                    { status: 'done', message: 'Update completed successfully!' }
+                    { status: 'done', message: 'Processing started in background' },
+                    { status: 'processing', message: 'Update running in background...' }
                 ];
                 
-                // Wait 3 seconds before allowing close
-                await new Promise(resolve => setTimeout(resolve, 3000));
-                this.isProcessing = false;
-                
+                // Start polling for updates
+                const sessionId = result.session_id;
+                this.pollStatus(sessionId);
             } else {
                 this.progressSteps.push(
-                    { status: 'error', message: result.error || 'Error updating database' }
+                    { status: 'error', message: result.error || 'Error starting database update' }
                 );
                 this.isProcessing = false;
             }
@@ -602,6 +634,73 @@
                 { status: 'error', message: 'Error connecting to server' }
             );
             this.isProcessing = false;
+        }
+    }
+    
+    // New function to poll status
+    async function pollStatus(sessionId) {
+        try {
+            const response = await fetch(`/update-status?session_id=${sessionId}`);
+            const result = await response.json();
+            
+            if (response.ok) {
+                // Update progress UI based on status
+                updateProgressFromStatus(result);
+                
+                // If not complete, continue polling
+                if (!result.is_complete) {
+                    setTimeout(() => this.pollStatus(sessionId), 2000); // Poll every 2 seconds
+                } else {
+                    // Process completed
+                    this.progressSteps = [
+                        { status: 'done', message: 'File validated' },
+                        { status: 'done', message: 'SQL database updated' },
+                        { status: 'done', message: 'Vector store rebuilt' },
+                        { status: 'done', message: result.message || 'Update completed successfully!' }
+                    ];
+                    
+                    // Wait 3 seconds before allowing close
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    this.isProcessing = false;
+                }
+            } else {
+                // Handle error in status check
+                this.progressSteps.push(
+                    { status: 'error', message: result.error || 'Error checking update status' }
+                );
+                this.isProcessing = false;
+            }
+        } catch (error) {
+            console.error('Status polling error:', error);
+            this.progressSteps.push(
+                { status: 'error', message: 'Error connecting to server during status check' }
+            );
+            this.isProcessing = false;
+        }
+    }
+    
+    // Function to update progress UI from status response
+    function updateProgressFromStatus(status) {
+        // Update step messages based on status
+        const progress = status.progress || {};
+        const totalProcessed = progress.total_processed || 0;
+        const newCount = progress.new_count || 0;
+        const updatedCount = progress.updated_count || 0;
+        const errors = progress.errors || 0;
+        
+        this.progressSteps = [
+            { status: 'done', message: 'Processing started in background' },
+            { status: 'processing', message: `Processing bookmarks: ${totalProcessed} total, ${newCount} new, ${updatedCount} updated, ${errors} errors` }
+        ];
+        
+        if (status.status === 'completed') {
+            this.progressSteps.push(
+                { status: 'done', message: 'Update completed successfully!' }
+            );
+        } else if (status.status === 'error') {
+            this.progressSteps.push(
+                { status: 'error', message: status.message || 'Error during update' }
+            );
         }
     }
 
@@ -824,28 +923,117 @@
         const formData = new FormData();
         formData.append('file', file);
 
+        // Show progress steps
+        document.getElementById('progress-steps').style.display = 'block';
+        
+        // Get the values of the checkboxes
+        const rebuildVector = document.getElementById('rebuild-vector') ? 
+            document.getElementById('rebuild-vector').checked : false;
+        const resetProgress = document.getElementById('reset-progress') ? 
+            document.getElementById('reset-progress').checked : false;
+
         try {
+            // Update UI for upload step
+            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '🔄';
+            
             // Upload file first
             const uploadResponse = await fetch('/upload-bookmarks', {
                 method: 'POST',
                 body: formData
             });
 
-            if (!uploadResponse.ok) {
-                throw new Error('File upload failed');
-            }
-
-            // Start processing
-            updateInProgress = true;
-            currentStartIndex = 0;
-            retryCount = 0;
-            document.getElementById('progress-steps').style.display = 'block';
+            const uploadResult = await uploadResponse.json();
             
-            // Begin processing
-            await continueProcessing();
+            if (!uploadResponse.ok) {
+                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
+                throw new Error(uploadResult.error || 'File upload failed');
+            }
+            
+            // Update UI for successful upload
+            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
+            document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
+            
+            // Start the background processing 
+            document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '🔄';
+            
+            // Use the async endpoint for processing 
+            const processResponse = await fetch('/async-update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rebuild_vector: rebuildVector,
+                    reset_progress: resetProgress
+                })
+            });
+
+            const processResult = await processResponse.json();
+            
+            if (!processResponse.ok) {
+                throw new Error(processResult.error || 'Process initialization failed');
+            }
+            
+            // Start polling for status
+            const sessionId = processResult.session_id;
+            pollUpdateStatus(sessionId);
+            
         } catch (error) {
             console.error('Error:', error);
             showError(error.message);
+        }
+    }
+    
+    // Function to poll for update status
+    async function pollUpdateStatus(sessionId) {
+        try {
+            const response = await fetch(`/update-status?session_id=${sessionId}`);
+            const result = await response.json();
+            
+            if (response.ok) {
+                // Update progress steps based on status
+                const progress = result.progress || {};
+                
+                // Update steps UI
+                document.getElementById('step-find-new').querySelector('span:last-child').textContent = 
+                    `Finding new bookmarks... (${progress.total_processed || 0} processed, ${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
+                
+                // Check status for next steps
+                if (result.status === 'running') {
+                    // Processing in progress
+                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '🔄';
+                    document.getElementById('step-sql').querySelector('.progress-icon').textContent = '🔄';
+                    
+                    // Continue polling
+                    setTimeout(() => pollUpdateStatus(sessionId), 2000);
+                } else if (result.status === 'completed') {
+                    // Processing completed successfully
+                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '✅';
+                    document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
+                    document.getElementById('step-categories').querySelector('.progress-icon').textContent = '✅';
+                    
+                    // Check if vector was rebuilt
+                    if (result.rebuild_result && result.rebuild_result.success) {
+                        document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '✅';
+                        document.getElementById('step-sync').querySelector('.progress-icon').textContent = '✅';
+                    }
+                    
+                    // Show success message
+                    const details = `Processed ${progress.total_processed || 0} bookmarks (${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
+                    showSuccess("Processing completed successfully!", details);
+                } else if (result.status === 'error') {
+                    // Processing encountered an error
+                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
+                    showError("Processing failed", result.message || "Unknown error during processing");
+                }
+            } else {
+                throw new Error(result.message || "Error getting status update");
+            }
+        } catch (error) {
+            console.error('Status polling error:', error);
+            
+            // Continue polling even if there was an error
+            setTimeout(() => pollUpdateStatus(sessionId), 5000);
         }
     }
 
@@ -960,125 +1148,6 @@
             console.error("Progress reset failed", error);
             addProgressStep({
                 message: `Error: ${error.message || "Failed to reset progress"}`,
-                status: "error"
-            });
-        }
-    }
-    
-    // Enhance the existing updateDatabase function to handle vector store rebuilding
-    async function updateDatabase(filePath, startIndex = 0) {
-        try {
-            startProgressStep('sql');
-            
-            const response = await fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    file_path: filePath,
-                    start_index: startIndex
-                })
-            });
-            
-            const result = await response.json();
-            console.log("Update result:", result);
-            
-            if (result.success) {
-                completeProgressStep('sql');
-                
-                // Add progress message
-                const total = result.progress?.total || 0;
-                const processed = result.progress?.processed || 0;
-                const percentComplete = result.progress?.percent_complete || 0;
-                
-                addProgressStep({
-                    message: `Updated ${processed}/${total} bookmarks (${percentComplete.toFixed(1)}%)`,
-                    status: "done"
-                });
-                
-                // If complete, start vector store update
-                if (result.is_complete) {
-                    startProgressStep('vectors');
-                    
-                    if (result.vector_store_updated) {
-                        // Vector store was automatically updated
-                        completeProgressStep('vectors');
-                        
-                        const vectorResult = result.vector_rebuild_result || {};
-                        addProgressStep({
-                            message: `Vector store updated with ${vectorResult.vector_count || 0} entries`,
-                            status: "done"
-                        });
-                        
-                        startProgressStep('sync');
-                        completeProgressStep('sync');
-                        
-                        if (vectorResult.is_in_sync) {
-                            addProgressStep({
-                                message: "Database synchronization verified ✓",
-                                status: "done"
-                            });
-                        } else {
-                            addProgressStep({
-                                message: `Count mismatch: Database has ${vectorResult.postgres_count || 0} records, vector store has ${vectorResult.vector_count || 0} entries`,
-                                status: "warning"
-                            });
-                        }
-                    } else {
-                        // Need to manually update vector store
-                        startProgressStep('vectors');
-                        addProgressStep({
-                            message: "Manually rebuilding vector store...",
-                            status: "processing"
-                        });
-                        
-                        // Call the rebuild endpoint
-                        await rebuildVectorStore();
-                        completeProgressStep('vectors');
-                    }
-                    
-                    addProgressStep({
-                        message: "Database update completed successfully!",
-                        status: "done"
-                    });
-                } else {
-                    // Not complete, continue processing
-                    addProgressStep({
-                        message: `Continuing with next batch (starting at index ${result.next_index})...`,
-                        status: "processing"
-                    });
-                    
-                    // Continue with next batch
-                    await updateDatabase(filePath, result.next_index);
-                }
-            } else {
-                // Handle error
-                failProgressStep('sql');
-                
-                if (result.error) {
-                    addProgressStep({
-                        message: `Error: ${result.error}`,
-                        status: "error"
-                    });
-                }
-                
-                if (result.should_continue && result.next_index) {
-                    addProgressStep({
-                        message: `Attempting to continue from index ${result.next_index}...`,
-                        status: "processing"
-                    });
-                    
-                    // Try to continue with next batch
-                    await updateDatabase(filePath, result.next_index);
-                }
-            }
-        } catch (error) {
-            console.error("Database update failed", error);
-            failProgressStep('sql');
-            
-            addProgressStep({
-                message: `Error: ${error.message || "Unknown error during database update"}`,
                 status: "error"
             });
         }
