@@ -70,7 +70,7 @@ def setup_database():
     global _engine, _session_factory, _vector_store
     
     try:
-        logger.info("Loading database module with NullPool to prevent connection leaks")
+        logger.info("Loading database module with standard connection settings from diagnostics")
         
         # Load environment variables - try multiple possible locations
         env_paths = [
@@ -93,23 +93,23 @@ def setup_database():
         # First check if DATABASE_URL is provided (Railway recommends this approach)
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL:
-            logger.info("Using DATABASE_URL for connection with NullPool")
+            logger.info("Using DATABASE_URL for connection")
             _engine = create_engine(
                 DATABASE_URL,
-                poolclass=NullPool,  # CRITICAL: Use NullPool to avoid connection pooling issues
+                poolclass=QueuePool,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=600,
+                pool_pre_ping=True,
                 connect_args={
-                    "connect_timeout": 3,            # Very short connection timeout
-                    "application_name": "TwitterBookmarkManager",
-                    "keepalives": 1,                 # Enable TCP keepalives
-                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle
-                    "keepalives_interval": 1,        # Check every 1 second (REDUCED further)
-                    "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
-                    "options": "-c statement_timeout=5000"  # 5 second statement timeout
+                    "connect_timeout": 10,
+                    "application_name": "TwitterBookmarkManager"
                 }
             )
         else:
             # Fall back to individual components
-            logger.info("DATABASE_URL not found, using individual connection parameters with NullPool")
+            logger.info("DATABASE_URL not found, using individual connection parameters")
             # Get database connection settings with fallbacks
             DB_USER = os.getenv("DB_USER")
             DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -134,19 +134,19 @@ def setup_database():
             # Create connection string from individual components
             DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=prefer"
             
-            # Create database engine with PostgreSQL and no connection pooling
-            logger.info(f"Creating PostgreSQL engine with NO connection pooling (NullPool)")
+            # Create database engine with PostgreSQL and standard connection settings
+            logger.info(f"Creating PostgreSQL engine with standard connection settings")
             _engine = create_engine(
                 DATABASE_URI,
-                poolclass=NullPool,  # CRITICAL: Use NullPool to avoid connection pooling issues
+                poolclass=QueuePool,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=600,
+                pool_pre_ping=True,
                 connect_args={
-                    "connect_timeout": 3,            # Very short connection timeout
-                    "application_name": "TwitterBookmarkManager",
-                    "keepalives": 1,                 # Enable TCP keepalives
-                    "keepalives_idle": 5,            # Send keepalive after 5 seconds idle
-                    "keepalives_interval": 1,        # Check every 1 second (REDUCED further)
-                    "keepalives_count": 2,           # Only need 2 failed keepalives to consider dead
-                    "options": "-c statement_timeout=5000"  # 5 second statement timeout
+                    "connect_timeout": 10,
+                    "application_name": "TwitterBookmarkManager"
                 }
             )
         
@@ -158,14 +158,13 @@ def setup_database():
             assert result.scalar() == 1
             logger.info("✅ Database connection test successful")
         
-        # Create session factory with immediate expiry
+        # Create session factory with standard settings
         _session_factory = scoped_session(sessionmaker(
-            bind=_engine,
-            expire_on_commit=False  # Don't keep objects around after commit
+            bind=_engine
         ))
         logger.info("✅ Created session factory")
         
-        # Start connection monitor with more frequent checks
+        # Start connection monitor with standard interval
         start_connection_monitor()
         
         # Import VectorStore
@@ -208,20 +207,11 @@ def connection_monitor_thread():
                     logger.debug("Database connection monitor: Connection healthy")
                 else:
                     logger.warning("Database connection monitor: Connection test returned unexpected result")
-                    # Force engine recreation on unexpected result
-                    _engine.dispose()
-                    setup_database()
         except Exception as e:
             logger.error(f"Database connection monitor: Connection test failed: {e}")
-            # Try to recreate engine on any failure
-            try:
-                _engine.dispose()
-                setup_database()
-            except Exception as recreate_error:
-                logger.error(f"Failed to recreate engine: {recreate_error}")
         
-        # Sleep for 60 seconds (more frequent checks - REDUCED from 300)
-        time.sleep(60)
+        # Sleep for 5 minutes before next check (standard interval)
+        time.sleep(300)
 
 def start_connection_monitor():
     """Start the background connection monitoring thread"""
