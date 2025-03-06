@@ -1,396 +1,402 @@
 """
-Vector store implementation for PythonAnywhere using Qdrant.
+Vector store implementation for Railway based on PythonAnywhere's implementation.
+This version uses Qdrant for vector storage and SentenceTransformer for embeddings.
 """
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
-from typing import List, Dict, Any
-import logging
+
 import os
+import sys
+import logging
+import json
 import time
-import glob
+import traceback
 from pathlib import Path
-import uuid
-import hashlib
-import random
-import string
-import gc
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple, Union
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# Import sentence transformers for embeddings
+from sentence_transformers import SentenceTransformer
 
-# Shared embedding model at module level to prevent multiple loading
-_embedding_model = None
-_model_load_count = 0
+# Import Qdrant for vector storage
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as rest
+from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
-def get_embedding_model():
-    """Get the shared embedding model instance"""
-    global _embedding_model, _model_load_count
-    
-    if _embedding_model is None:
-        try:
-            # Load the model and track the load count
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading sentence transformer model...")
-            _embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-            _model_load_count = 1
-            logger.info(f"Loaded model with dimension {_embedding_model.get_sentence_embedding_dimension()}")
-            # Force garbage collection after model loading to free memory
-            gc.collect()
-        except Exception as e:
-            logger.error(f"Error loading embedding model: {e}")
-            raise
-    else:
-        _model_load_count += 1
-        logger.info(f"Reusing existing sentence transformer model (use count: {_model_load_count})")
-    
-    return _embedding_model
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('vector_store_final')
 
 class VectorStore:
-    def __init__(self, persist_directory: str = None, user_id: str = None):
-        """Initialize Qdrant client in memory mode to avoid lock issues
+    """
+    Vector Store implementation for searching similar bookmarks.
+    Uses SentenceTransformer for embeddings and Qdrant for vector storage.
+    """
+    
+    def __init__(self, persist_directory: Optional[str] = None):
+        """
+        Initialize the vector store with a specified persist directory.
         
         Args:
-            persist_directory: Directory where vector store data will be persisted
-            user_id: User ID for multi-user support to create user-specific collections
+            persist_directory: Directory to persist the vector store. If None,
+                              a default location in the user's directory is used.
         """
+        self.model = None
+        self.client = None
+        self.collection_name = "bookmark_embeddings"
+        self.vector_size = 384  # BERT embedding size
+        
+        # Set default persist directory for Railway if not specified
+        if persist_directory is None:
+            # Check environment variables first
+            base_dir = os.environ.get('VECTOR_STORE_DIR', '/app/vector_store')
+            self.persist_directory = base_dir
+        else:
+            self.persist_directory = persist_directory
+            
+        # Ensure directory exists
+        os.makedirs(self.persist_directory, exist_ok=True)
+        
+        # Initialize the embedding model
         try:
-            # Define config locally to avoid dependency on pythonanywhere directory
-            VECTOR_STORE_CONFIG = {
-                'persist_directory': os.environ.get('VECTOR_STORE_PATH', './vector_db'),
-                'collection_name': 'bookmarks',
-                'embedding_dimension': 384
-            }
-            
-            # Store path for later use (may be used for backup/restore)
-            self.vector_db_path = VECTOR_STORE_CONFIG['persist_directory']
-            
-            # Store user_id for filtering operations
-            self.user_id = user_id
-            
-            # Initialize with retry logic
-            retry_count = 0
-            max_retries = 3
-            last_error = None
-            
-            # Generate a unique instance ID to prevent collisions
-            instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-            logger.info(f"Creating Qdrant in-memory instance with ID: {instance_id}")
-            
-            while retry_count < max_retries:
-                try:
-                    # Initialize Qdrant client in MEMORY mode to avoid lock issues
-                    self.client = QdrantClient(
-                        location=":memory:",  # Use in-memory storage
-                        timeout=10.0,  # Add timeout for operations
-                        prefer_grpc=False  # Use HTTP instead of gRPC for better compatibility
-                    )
-                    
-                    # Use the shared embedding model instead of loading a new one
-                    self.model = get_embedding_model()
-                    
-                    # Create collection with a unique name since we're in memory mode
-                    # If user_id is provided, include it in the collection name
-                    if user_id:
-                        self.collection_name = f"bookmarks_user_{user_id}_{instance_id}"
-                        logger.info(f"Creating user-specific collection for user_id: {user_id}")
-                    else:
-                        self.collection_name = f"bookmarks_{instance_id}"
-                    
-                    self.vector_size = self.model.get_sentence_embedding_dimension()
-                    
-                    # Always create a new collection since we're in memory mode
-                    self.client.create_collection(
-                        collection_name=self.collection_name,
-                        vectors_config=models.VectorParams(
-                            size=self.vector_size,
-                            distance=models.Distance.COSINE
-                        )
-                    )
-                    
-                    logger.info(f"✅ VectorStore initialized with Qdrant in-memory backend (collection: {self.collection_name})")
-                    # Force garbage collection after initialization
-                    gc.collect()
-                    return  # Success, exit the retry loop
-                    
-                except Exception as e:
-                    last_error = str(e)
-                    logger.warning(f"Attempt {retry_count+1}/{max_retries} to initialize Qdrant failed: {last_error}")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        time.sleep(2)  # Wait before retrying
-            
-            # If we get here, all retries failed
-            error_msg = f"Error initializing VectorStore: {last_error}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-            
+            logger.info(f"Initializing SentenceTransformer model for vector embeddings")
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info(f"Model initialized successfully")
         except Exception as e:
-            logger.error(f"Error initializing VectorStore: {e}")
+            logger.error(f"Failed to initialize SentenceTransformer model: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
-    
-    def __del__(self):
-        """Cleanup when object is destroyed"""
-        try:
-            # Close Qdrant client if it exists
-            if hasattr(self, 'client'):
-                self.client = None
             
-            # Force garbage collection
-            gc.collect()
-        except Exception as e:
-            logger.error(f"Error during VectorStore cleanup: {e}")
-
-    def _generate_uuid(self, bookmark_id: str) -> str:
-        """Generate a deterministic UUID from bookmark ID"""
-        # Create a namespace UUID (using URL namespace)
-        namespace = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
-        # Create a UUID using the namespace and bookmark ID
-        return str(uuid.uuid5(namespace, str(bookmark_id)))
-
-    def add_bookmark(self, 
-                    bookmark_id: str,
-                    text: str,
-                    metadata: Dict[str, Any] = None):
-        """Add a single bookmark to the vector store"""
+        # Initialize Qdrant client
         try:
-            # Skip empty text
-            if not text or len(text.strip()) == 0:
-                logger.warning(f"Skipping empty text for bookmark {bookmark_id}")
-                return False
-                
-            # Truncate very long text to prevent memory issues
-            max_text_length = 2048  # SentenceTransformer can handle this length easily
-            if len(text) > max_text_length:
-                logger.debug(f"Truncating long text ({len(text)} chars) for bookmark {bookmark_id}")
-                text = text[:max_text_length]
+            logger.info(f"Initializing Qdrant client with persist directory: {self.persist_directory}")
+            self.client = QdrantClient(path=self.persist_directory)
+            logger.info(f"Qdrant client initialized successfully")
             
-            # Generate embedding with error handling
+            # Create collection if it doesn't exist
             try:
-                embedding = self.model.encode(text, show_progress_bar=False).tolist()
+                collection_info = self.client.get_collection(self.collection_name)
+                logger.info(f"Found existing collection: {self.collection_name}")
             except Exception as e:
-                logger.error(f"Error generating embedding for bookmark {bookmark_id}: {e}")
-                # Try with shorter text if original failed
-                if len(text) > 500:
-                    logger.info(f"Retrying with shorter text for bookmark {bookmark_id}")
-                    text = text[:500]
-                    embedding = self.model.encode(text, show_progress_bar=False).tolist()
-                else:
-                    raise
+                logger.info(f"Collection {self.collection_name} does not exist, creating...")
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=self.vector_size,
+                        distance=Distance.COSINE
+                    ),
+                    optimizers_config=rest.OptimizersConfigDiff(
+                        indexing_threshold=0,  # Index immediately
+                    )
+                )
+                logger.info(f"Created collection: {self.collection_name}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Qdrant client: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
             
-            # Generate UUID from bookmark ID
-            point_id = self._generate_uuid(bookmark_id)
+    def add_bookmark(self, bookmark_id: int, text: str, user_id: int) -> bool:
+        """
+        Add a bookmark to the vector store.
+        
+        Args:
+            bookmark_id: ID of the bookmark
+            text: Text content of the bookmark
+            user_id: User ID who owns the bookmark
             
-            # Store original ID in metadata
-            if metadata is None:
-                metadata = {}
-            metadata['original_id'] = bookmark_id
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.model or not self.client:
+            logger.error("Vector store not properly initialized")
+            return False
             
-            # Add to collection
+        try:
+            # Generate embedding
+            embedding = self.model.encode(text)
+            
+            # Create point with metadata
+            point = PointStruct(
+                id=bookmark_id,
+                vector=embedding.tolist(),
+                payload={
+                    "bookmark_id": bookmark_id,
+                    "text": text[:1000] if text else "",  # Limit text size in payload
+                    "user_id": user_id,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            
+            # Upsert point to collection
             self.client.upsert(
                 collection_name=self.collection_name,
-                points=[
-                    models.PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload={"text": text, **(metadata or {})}
-                    )
-                ]
+                points=[point]
             )
+            
+            logger.info(f"Added bookmark {bookmark_id} to vector store for user {user_id}")
             return True
+            
         except Exception as e:
-            logger.error(f"Error adding bookmark to vector store: {e}")
+            logger.error(f"Error adding bookmark {bookmark_id} to vector store: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
-
-    def search(self, 
-               query_text: str, 
-               limit: int = 10, 
-               exclude_ids: List[str] = None) -> List[Dict[str, Any]]:
-        """Search for bookmarks similar to the query text
+            
+    def find_similar(self, query: str, user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Find bookmarks similar to the query text.
         
         Args:
-            query_text: Text to search for
+            query: Query text to find similar bookmarks
+            user_id: User ID to filter results by
             limit: Maximum number of results to return
-            exclude_ids: List of bookmark IDs to exclude from results
             
         Returns:
-            List of dictionaries containing bookmarks and their similarity scores
+            List of dictionaries containing bookmark IDs and scores
         """
+        if not self.model or not self.client:
+            logger.error("Vector store not properly initialized")
+            return []
+            
         try:
-            # Embed the query
-            query_embedding = self.model.encode(query_text).tolist()
+            # Generate embedding for query
+            query_embedding = self.model.encode(query)
             
-            # Convert exclude_ids to UUIDs
-            exclude_uuids = [self._generate_uuid(id) for id in exclude_ids] if exclude_ids else []
-            
-            # Prepare filter for excluding specific IDs
-            id_filter = None
-            if exclude_uuids:
-                id_filter = models.Filter(
-                    should_not=[
-                        models.FieldCondition(
-                            key="id",
-                            match=models.MatchAny(any=exclude_uuids)
-                        )
-                    ]
-                )
-            
-            # Add user_id filter if provided during initialization
-            if self.user_id:
-                user_filter = models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.user_id",
-                            match=models.MatchValue(value=self.user_id)
-                        )
-                    ]
-                )
-                
-                # Combine filters if we have both
-                if id_filter:
-                    # Combine user_filter and id_filter
-                    combined_filter = models.Filter(
-                        must=[
-                            models.NestedCondition(filter=user_filter.must[0])
-                        ],
-                        should_not=[
-                            models.NestedCondition(filter=id_filter.should_not[0])
-                        ]
-                    )
-                    search_filter = combined_filter
-                else:
-                    search_filter = user_filter
-            else:
-                search_filter = id_filter
-            
-            # Perform search
+            # Search for similar vectors
             search_result = self.client.search(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
-                limit=limit,
-                filter=search_filter
+                query_vector=query_embedding.tolist(),
+                query_filter=rest.Filter(
+                    must=[
+                        rest.FieldCondition(
+                            key="user_id",
+                            match=rest.MatchValue(value=user_id)
+                        )
+                    ]
+                ),
+                limit=limit
             )
             
-            # Process and return results
+            # Format results
             results = []
-            for scored_point in search_result:
-                result = {
-                    'id': scored_point.payload.get('original_id', ''),
-                    'score': scored_point.score,
-                    'distance': 1.0 - scored_point.score,  # Convert cosine similarity to distance
-                    'metadata': scored_point.payload.get('metadata', {})
-                }
-                results.append(result)
-            
+            for hit in search_result:
+                results.append({
+                    "bookmark_id": hit.id,
+                    "score": hit.score,
+                    "text": hit.payload.get("text", "")[:100] + "..." if hit.payload.get("text") else ""
+                })
+                
+            logger.info(f"Found {len(results)} similar bookmarks for user {user_id}")
             return results
-        
+            
         except Exception as e:
-            logger.error(f"Error searching in vector store: {e}")
+            logger.error(f"Error finding similar bookmarks: {str(e)}")
+            logger.error(traceback.format_exc())
             return []
-
-    def delete_bookmark(self, bookmark_id: str):
-        """Delete a bookmark from the vector store"""
-        try:
-            point_id = self._generate_uuid(bookmark_id)
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=models.PointIdsList(points=[point_id])
-            )
-            logger.debug(f"Deleted bookmark {bookmark_id} from vector store")
-        except Exception as e:
-            logger.error(f"Error deleting bookmark from vector store: {e}")
-            raise
-
-    def get_collection_info(self) -> Dict[str, Any]:
-        """Get detailed information about the collection"""
-        try:
-            collection = self.client.get_collection(self.collection_name)
-            return {
-                'name': self.collection_name,
-                'vectors_count': collection.vectors_count,
-                'status': collection.status
-            }
-        except Exception as e:
-            logger.error(f"Error getting collection info: {e}")
-            return {'error': str(e)}
-
-    def query_similar(self, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar bookmarks"""
-        return self.search(query=query, n_results=n_results)
-
-    def search_with_exclusions(self, 
-                              query_embedding: List[float] = None,
-                              query: str = None,
-                              limit: int = 100,
-                              excluded_ids: List[str] = None) -> List[Dict[str, Any]]:
+            
+    def rebuild_user_vectors(self, user_id: int, bookmarks: List[Dict[str, Any]], 
+                           batch_size: int = 100) -> Tuple[int, int]:
         """
-        Search that supports excluding specific bookmark IDs from results.
+        Rebuild vector store for a specific user.
         
         Args:
-            query_embedding: Optional pre-computed embedding
-            query: Text query (will be encoded if query_embedding not provided)
-            limit: Maximum number of results to return
-            excluded_ids: List of bookmark IDs to exclude from results
+            user_id: User ID whose vectors to rebuild
+            bookmarks: List of bookmark dictionaries with 'id' and 'text' fields
+            batch_size: Number of vectors to add in a single batch
             
         Returns:
-            List of processed search results with excluded IDs filtered out
+            Tuple of (success_count, error_count)
         """
+        if not self.model or not self.client:
+            logger.error("Vector store not properly initialized")
+            return (0, 0)
+            
         try:
-            # Convert excluded_ids to a set for faster lookups
-            excluded_set = set(excluded_ids or [])
+            # First delete existing vectors for this user
+            self._delete_user_vectors(user_id)
             
-            # Handle both embedding and text-based search
-            if query_embedding is None and query is not None:
-                query_embedding = self.model.encode(query).tolist()
-            elif query_embedding is None and query is None:
-                raise ValueError("Either query_embedding or query must be provided")
+            # Process in batches
+            success_count = 0
+            error_count = 0
             
-            # Request more results than needed to account for exclusions
-            # For Qdrant, we'll use a multiplication factor to ensure enough results
-            buffer_size = min(limit * 3, 1000)  # Increased cap from 300 to 1000 to allow more search results
-            
-            logger.info(f"Performing Qdrant search with exclusions: limit={limit}, buffer={buffer_size}, excluded={len(excluded_set)}")
-            
-            # Generate UUIDs for all excluded IDs
-            excluded_uuids = [self._generate_uuid(bookmark_id) for bookmark_id in excluded_set]
-            
-            # Perform the search with the buffer size
-            results = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_embedding,
-                limit=buffer_size,
-                # Qdrant doesn't support direct filtering by excluded IDs, so we'll filter after
-            )
-            
-            # Process results, excluding specified IDs
-            processed_results = []
-            for result in results:
-                try:
-                    # Get the original bookmark ID from payload
-                    bookmark_id = result.payload.get('original_id')
-                    
-                    # Skip excluded IDs
-                    if bookmark_id in excluded_set:
-                        continue
+            for i in range(0, len(bookmarks), batch_size):
+                batch = bookmarks[i:i+batch_size]
+                points = []
+                
+                for bookmark in batch:
+                    try:
+                        bookmark_id = bookmark.get('id')
+                        text = bookmark.get('text', "")
                         
-                    processed_results.append({
-                        'bookmark_id': bookmark_id,
-                        'score': result.score,
-                        'distance': 1.0 - result.score,  # Convert score to distance for compatibility
-                        'metadata': {k: v for k, v in result.payload.items() if k not in ['text', 'original_id']},
-                        'text': result.payload.get('text')
-                    })
-                    
-                    # Stop if we have enough results after filtering
-                    if len(processed_results) >= limit:
-                        break
+                        if not text or not bookmark_id:
+                            logger.warning(f"Skipping bookmark {bookmark_id} with empty text")
+                            error_count += 1
+                            continue
+                            
+                        # Generate embedding
+                        embedding = self.model.encode(text)
                         
-                except Exception as e:
-                    logger.warning(f"Error processing result: {e}")
-                    continue
+                        # Create point
+                        point = PointStruct(
+                            id=bookmark_id,
+                            vector=embedding.tolist(),
+                            payload={
+                                "bookmark_id": bookmark_id,
+                                "text": text[:1000] if text else "",  # Limit text size in payload
+                                "user_id": user_id,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        )
+                        
+                        points.append(point)
+                        success_count += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing bookmark {bookmark.get('id', 'unknown')}: {str(e)}")
+                        error_count += 1
+                
+                if points:
+                    try:
+                        # Upsert batch
+                        self.client.upsert(
+                            collection_name=self.collection_name,
+                            points=points
+                        )
+                        logger.info(f"Added batch of {len(points)} bookmarks to vector store for user {user_id}")
+                    except Exception as e:
+                        logger.error(f"Error upserting batch: {str(e)}")
+                        # Mark all as errors
+                        error_count += len(points)
+                        success_count -= len(points)
             
-            logger.info(f"Qdrant search with exclusions found {len(processed_results)} results after filtering")
-            return processed_results
+            logger.info(f"Rebuilt vector store for user {user_id}: {success_count} successful, {error_count} errors")
+            return (success_count, error_count)
             
         except Exception as e:
-            logger.error(f"Search with exclusions error in VectorStore: {e}")
-            return [] 
+            logger.error(f"Error rebuilding vector store for user {user_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return (0, 0)
+            
+    def _delete_user_vectors(self, user_id: int) -> bool:
+        """
+        Delete all vectors for a specific user.
+        
+        Args:
+            user_id: User ID whose vectors to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.client:
+            logger.error("Vector store client not initialized")
+            return False
+            
+        try:
+            # Delete points with filter
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=rest.Filter(
+                    must=[
+                        rest.FieldCondition(
+                            key="user_id",
+                            match=rest.MatchValue(value=user_id)
+                        )
+                    ]
+                )
+            )
+            
+            logger.info(f"Deleted vectors for user {user_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting vectors for user {user_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+            
+    def delete_bookmark(self, bookmark_id: int) -> bool:
+        """
+        Delete a specific bookmark from the vector store.
+        
+        Args:
+            bookmark_id: ID of the bookmark to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.client:
+            logger.error("Vector store client not initialized")
+            return False
+            
+        try:
+            # Delete point by ID
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=rest.PointIdsList(
+                    points=[bookmark_id]
+                )
+            )
+            
+            logger.info(f"Deleted bookmark {bookmark_id} from vector store")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting bookmark {bookmark_id} from vector store: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+            
+    def get_collection_info(self) -> Dict[str, Any]:
+        """
+        Get information about the vector collection.
+        
+        Returns:
+            Dictionary with collection information
+        """
+        if not self.client:
+            logger.error("Vector store client not initialized")
+            return {"error": "Vector store not initialized"}
+            
+        try:
+            # Get collection info
+            collection_info = self.client.get_collection(self.collection_name)
+            
+            # Format response
+            info = {
+                "name": self.collection_name,
+                "vector_size": collection_info.config.params.vector_size,
+                "distance": collection_info.config.params.distance,
+                "points_count": collection_info.vectors_count,
+                "status": "ready"
+            }
+            
+            return info
+            
+        except Exception as e:
+            logger.error(f"Error getting collection info: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {"error": str(e)}
+
+# Create a singleton instance
+_vector_store_instance = None
+
+def get_vector_store(persist_directory=None):
+    """
+    Get a singleton instance of the vector store.
+    
+    Args:
+        persist_directory: Optional directory to persist vectors
+        
+    Returns:
+        VectorStore instance
+    """
+    global _vector_store_instance
+    
+    if _vector_store_instance is None:
+        try:
+            _vector_store_instance = VectorStore(persist_directory)
+        except Exception as e:
+            logger.error(f"Error initializing vector store: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+            
+    return _vector_store_instance 
