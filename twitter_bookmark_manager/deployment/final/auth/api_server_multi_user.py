@@ -248,7 +248,7 @@ def upload_bookmarks():
     Improved endpoint for uploading bookmarks JSON file.
     """
     try:
-        user_id = get_user_id()
+        user_id = UserContext.get_user_id()
         logger.info(f"Upload bookmarks request received for user {user_id}")
         
         if 'file' not in request.files:
@@ -364,7 +364,7 @@ def update_database():
     Supports sync processing for small databases and async for larger ones.
     """
     try:
-        user_id = get_user_id()
+        user_id = UserContext.get_user_id()
         logger.info(f"Update database request received for user {user_id}")
         
         # Get parameters
@@ -479,7 +479,7 @@ def async_update_database():
     This prevents timeouts during long-running updates.
     """
     try:
-        user_id = get_user_id()
+        user_id = UserContext.get_user_id()
         logger.info(f"Async update database request received for user {user_id}")
         
         # Get parameters from JSON or form data
@@ -604,7 +604,7 @@ def update_status():
     Check the status of an async database update.
     """
     try:
-        user_id = get_user_id()
+        user_id = UserContext.get_user_id()
         session_id = request.args.get('session_id')
         
         if not session_id:
