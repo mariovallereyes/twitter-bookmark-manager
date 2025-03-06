@@ -11,6 +11,7 @@ import json
 import time
 import secrets
 import threading
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
@@ -50,16 +51,6 @@ from auth.user_api_final import user_api_bp
 from auth.user_context_final import UserContextMiddleware, UserContext, with_user_context
 from database.multi_user_db.user_model_final import get_user_by_id
 
-# Define login_required decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        user = UserContext.get_current_user()
-        if user is None:
-            return redirect(url_for('auth.login', next=request.url))
-        return f(*args, **kwargs)
-    return decorated_function
-
 # Import database modules
 from database.multi_user_db.db_final import (
     get_db_connection, 
@@ -69,7 +60,8 @@ from database.multi_user_db.db_final import (
     close_all_sessions, 
     get_engine,
     db_session,
-    check_database_status
+    check_database_status,
+    init_database
 )
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.update_bookmarks_final import (
@@ -90,17 +82,22 @@ UPLOADS_DIR = os.environ.get('UPLOADS_DIR', os.path.join(BASE_DIR, 'uploads'))
 for directory in [DATABASE_DIR, MEDIA_DIR, UPLOADS_DIR]:
     os.makedirs(directory, exist_ok=True)
 
-# Set up logging
+# Set up logging with absolute paths
+LOG_DIR = os.environ.get('LOG_DIR', os.path.join(BASE_DIR, 'logs'))
+os.makedirs(LOG_DIR, exist_ok=True)  # Ensure log directory exists
+LOG_FILE = os.path.join(LOG_DIR, 'api_server_multi_user.log')
+
+# Configure logging to write to both console and file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('api_server_multi_user.log')
+        logging.FileHandler(LOG_FILE)
     ]
 )
 logger = logging.getLogger('api_server_multi_user')
-logger.info("Starting multi-user API server with PythonAnywhere improvements...")
+logger.info(f"Starting multi-user API server with PythonAnywhere improvements... Log file: {LOG_FILE}")
 
 # Create Flask app
 app = Flask(__name__, 
@@ -157,6 +154,16 @@ app.register_blueprint(user_api_bp)
 
 # Initialize user context middleware
 UserContextMiddleware(app, lambda user_id: get_user_by_id(get_db_connection(), user_id))
+
+# Define login_required decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = UserContext.get_current_user()
+        if user is None:
+            return redirect(url_for('auth.login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Home page
 @app.route('/')
@@ -597,5 +604,34 @@ def update_database():
         logger.error(traceback.format_exc())
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
-# Continue with the rest of the existing API server implementation
-# ... existing code ... 
+# Add error handlers to capture all exceptions
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Handle all unhandled exceptions"""
+    # Log the error and stacktrace
+    logger.error(f"Unhandled exception: {e}")
+    logger.exception(e)
+    
+    # Return a generic server error response
+    return jsonify({
+        'error': 'Internal Server Error',
+        'message': str(e)
+    }), 500
+
+# Run the app if this file is executed directly
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('DEBUG', 'False').lower() == 'true'
+    
+    logger.info(f"Starting server on port {port} with debug={debug}")
+    
+    try:
+        # Initialize the database
+        init_database()
+        logger.info("Database initialized successfully")
+        
+        # Run the app
+        app.run(host='0.0.0.0', port=port, debug=debug)
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
+        logger.exception(e) 
