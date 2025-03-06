@@ -1,6 +1,6 @@
 """
-SQLAlchemy database module for multi-user support.
-This is the core database module for the Railway environment.
+SQLAlchemy database module for multi-user support with robust connection handling.
+Optimized for Railway PostgreSQL with aggressive error handling and retry mechanisms.
 """
 
 import os
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 import sqlalchemy
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text
 from sqlalchemy.orm import sessionmaker, scoped_session, Session
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import QueuePool, NullPool
 from sqlalchemy import exc, event
 from sqlalchemy.engine import Engine
 
@@ -36,14 +36,17 @@ logger = logging.getLogger('db_final')
 _engine = None  # SQLAlchemy engine
 _session_factory = None  # Session factory
 _vector_store = None  # Vector store instance
+_last_connection_error = None  # Track last connection error
+_connection_error_time = None  # When the last error occurred
 
 # Thread-local storage for sessions
 _local_storage = threading.local()
 _sessions_lock = threading.RLock()
 _active_sessions = set()  # Track all active sessions
+_engine_lock = threading.RLock()  # Lock for engine operations
 
 # Retry decorator for database operations
-def with_db_retry(max_tries=3, backoff_in_seconds=1):
+def with_db_retry(max_tries=5, backoff_in_seconds=1):
     """
     Retry decorator for database operations that may fail due to connection issues.
     
@@ -57,6 +60,8 @@ def with_db_retry(max_tries=3, backoff_in_seconds=1):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            global _last_connection_error, _connection_error_time
+            
             retry_count = 0
             last_exception = None
             
@@ -66,6 +71,20 @@ def with_db_retry(max_tries=3, backoff_in_seconds=1):
                 except (exc.OperationalError, exc.DisconnectionError) as e:
                     retry_count += 1
                     last_exception = e
+                    error_message = str(e).lower()
+                    
+                    # Record connection error
+                    _last_connection_error = str(e)
+                    _connection_error_time = datetime.now()
+                    
+                    # Determine if this is a connection closed error
+                    is_connection_closed = any(msg in error_message for msg in [
+                        "connection closed", 
+                        "server closed the connection", 
+                        "connection reset",
+                        "broken pipe",
+                        "timeout"
+                    ])
                     
                     if retry_count < max_tries:
                         # Calculate backoff time with exponential backoff
@@ -73,10 +92,12 @@ def with_db_retry(max_tries=3, backoff_in_seconds=1):
                         logger.warning(f"Database operation failed, retrying in {wait_time}s (attempt {retry_count}/{max_tries}): {e}")
                         time.sleep(wait_time)
                         
-                        # Force reconnect on retry
-                        if 'connection' in str(e).lower() or 'timeout' in str(e).lower():
+                        # Force reconnect on connection issues
+                        if is_connection_closed:
                             try:
-                                setup_database(force_reconnect=True)
+                                logger.info("Connection closed unexpectedly, forcing reconnection...")
+                                with _engine_lock:
+                                    setup_database(force_reconnect=True)
                                 logger.info("Forced database reconnection for retry")
                             except Exception as reconnect_error:
                                 logger.error(f"Failed to reconnect to database: {reconnect_error}")
@@ -124,79 +145,83 @@ def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Eng
     """
     global _engine, _session_factory
     
-    if _engine is not None and not force_reconnect:
-        logger.info("Using existing database connection")
-        return _engine
-        
-    try:
-        # Get database URL
-        db_url = get_db_url()
-        db_type = 'postgresql' if 'postgresql' in db_url else 'sqlite'
-        
-        # Extra conservative connection pool parameters for Railway
-        # Small pool size and limited overflow to avoid hitting connection limits
-        pool_size = int(os.environ.get('DB_POOL_SIZE', '1'))
-        max_overflow = int(os.environ.get('DB_MAX_OVERFLOW', '2'))
-        pool_timeout = int(os.environ.get('DB_POOL_TIMEOUT', '10'))
-        pool_recycle = int(os.environ.get('DB_POOL_RECYCLE', '60'))  # Recycle connections more frequently
-        
-        # Engine parameters dict
-        engine_params = {
-            'echo': show_sql,
-            'pool_pre_ping': True,  # Test connections before use
-            'pool_timeout': pool_timeout,
-            'pool_recycle': pool_recycle
-        }
-        
-        # Add pool settings for PostgreSQL
-        if db_type == 'postgresql':
-            engine_params.update({
-                'poolclass': QueuePool,
-                'pool_size': pool_size,
-                'max_overflow': max_overflow,
-                'connect_args': {
-                    'connect_timeout': 5,  # Shorter connection timeout
-                    'keepalives': 1,  # Enable TCP keepalives
-                    'keepalives_idle': 30,  # Time between keepalives (shorter)
-                    'keepalives_interval': 5,  # Interval between keepalives (shorter)
-                    'keepalives_count': 5,  # More keepalives before giving up
-                    'application_name': 'twitter_bookmark_manager'  # Identify in pg_stat_activity
-                }
-            })
+    # Use lock to prevent race conditions during engine setup/reset
+    with _engine_lock:
+        if _engine is not None and not force_reconnect:
+            logger.info("Using existing database connection")
+            return _engine
             
-        # Dispose of existing engine if forcing reconnect
-        if force_reconnect and _engine is not None:
-            try:
-                _engine.dispose()
-                logger.info("Disposed existing engine for reconnection")
-            except Exception as e:
-                logger.warning(f"Error disposing engine: {e}")
+        try:
+            # Get database URL
+            db_url = get_db_url()
+            db_type = 'postgresql' if 'postgresql' in db_url else 'sqlite'
+            
+            # Ultra-conservative connection pool parameters for Railway
+            pool_size = int(os.environ.get('DB_POOL_SIZE', '1'))  # Single connection
+            max_overflow = int(os.environ.get('DB_MAX_OVERFLOW', '1'))  # At most one overflow connection
+            pool_timeout = int(os.environ.get('DB_POOL_TIMEOUT', '5'))  # Quick timeout
+            pool_recycle = int(os.environ.get('DB_POOL_RECYCLE', '30'))  # Very frequent recycling
+            
+            # Engine parameters dict
+            engine_params = {
+                'echo': show_sql,
+                'pool_pre_ping': True,  # Test connections before use
+                'pool_timeout': pool_timeout,
+                'pool_recycle': pool_recycle
+            }
+            
+            # Add pool settings for PostgreSQL
+            if db_type == 'postgresql':
+                engine_params.update({
+                    'poolclass': QueuePool,
+                    'pool_size': pool_size,
+                    'max_overflow': max_overflow,
+                    'connect_args': {
+                        'connect_timeout': 3,  # Very short connection timeout
+                        'keepalives': 1,  # Enable TCP keepalives
+                        'keepalives_idle': 10,  # Shorter time between keepalives
+                        'keepalives_interval': 2,  # Shorter interval between keepalives
+                        'keepalives_count': 5,  # More keepalives before giving up
+                        'application_name': 'twitter_bookmark_manager'  # Identify in pg_stat_activity
+                    }
+                })
                 
-        # Create engine
-        _engine = create_engine(db_url, **engine_params)
-        
-        # Set up statement timeout for PostgreSQL to prevent hangs
-        if db_type == 'postgresql':
-            @event.listens_for(_engine, "connect")
-            def set_pg_statement_timeout(dbapi_connection, connection_record):
-                # Set statement timeout to 15 seconds (shorter)
-                cursor = dbapi_connection.cursor()
-                cursor.execute("SET statement_timeout = '15s';")
-                cursor.close()
-        
-        # Create session factory
-        _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
-        
-        logger.info(f"✅ Database connection established: {db_type}")
-        
-        # Initialize tables
-        create_tables()
-        
-        return _engine
-        
-    except Exception as e:
-        logger.error(f"❌ Database connection error: {e}")
-        raise
+            # Dispose of existing engine if forcing reconnect
+            if force_reconnect and _engine is not None:
+                try:
+                    _engine.dispose()
+                    logger.info("Disposed existing engine for reconnection")
+                except Exception as e:
+                    logger.warning(f"Error disposing engine: {e}")
+                    
+            # Close all active sessions before creating a new engine
+            close_all_sessions()
+                    
+            # Create engine
+            _engine = create_engine(db_url, **engine_params)
+            
+            # Set up statement timeout for PostgreSQL to prevent hangs
+            if db_type == 'postgresql':
+                @event.listens_for(_engine, "connect")
+                def set_pg_statement_timeout(dbapi_connection, connection_record):
+                    # Set statement timeout to 10 seconds (even shorter)
+                    cursor = dbapi_connection.cursor()
+                    cursor.execute("SET statement_timeout = '10s';")
+                    cursor.close()
+            
+            # Create session factory
+            _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
+            
+            logger.info(f"✅ Database connection established: {db_type}")
+            
+            # Initialize tables
+            create_tables()
+            
+            return _engine
+            
+        except Exception as e:
+            logger.error(f"❌ Database connection error: {e}")
+            raise
 
 @event.listens_for(Engine, "connect")
 def receive_connect(dbapi_connection, connection_record):
@@ -221,18 +246,22 @@ def receive_checkin(dbapi_connection, connection_record):
     """Log when a connection is returned to the pool"""
     logger.debug(f"Connection {id(dbapi_connection)} returned to pool")
 
+@with_db_retry(max_tries=5, backoff_in_seconds=1)
 def get_engine() -> Engine:
     """Get the SQLAlchemy engine, initializing if necessary"""
     global _engine
-    if _engine is None:
-        setup_database()
-    return _engine
+    with _engine_lock:
+        if _engine is None:
+            setup_database()
+        return _engine
 
+@with_db_retry(max_tries=5, backoff_in_seconds=1)
 def create_session() -> Session:
-    """Create a new SQLAlchemy session"""
+    """Create a new SQLAlchemy session with retry"""
     global _session_factory, _active_sessions
-    if _session_factory is None:
-        setup_database()
+    with _engine_lock:
+        if _session_factory is None:
+            setup_database()
     
     # Create new session
     session = _session_factory()
@@ -280,7 +309,7 @@ def db_session():
     try:
         # Create session with retry
         retry_count = 0
-        max_retries = 3
+        max_retries = 5
         last_exception = None
         
         while retry_count < max_retries:
@@ -298,7 +327,8 @@ def db_session():
                     
                     # Force reconnect
                     try:
-                        setup_database(force_reconnect=True)
+                        with _engine_lock:
+                            setup_database(force_reconnect=True)
                     except Exception as reconnect_error:
                         logger.error(f"Failed to reconnect to database: {reconnect_error}")
                 else:
@@ -336,7 +366,7 @@ def db_session():
         if session:
             close_session(session)
 
-@with_db_retry(max_tries=3, backoff_in_seconds=1)
+@with_db_retry(max_tries=5, backoff_in_seconds=1)
 def get_db_connection():
     """Create and return a database session with retry"""
     return create_session()

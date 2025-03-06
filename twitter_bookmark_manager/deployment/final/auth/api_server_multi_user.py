@@ -195,6 +195,7 @@ def login_required(f):
 @app.route('/')
 def index():
     """Home page - now aware of user context"""
+    logger.info("Home page requested")
     user = UserContext.get_current_user()
     
     # Choose template based on authentication
@@ -202,21 +203,58 @@ def index():
         template = 'index_final.html'
     else:
         # Show login page for unauthenticated users
+        logger.info("User not authenticated, redirecting to login")
         return redirect(url_for('auth.login'))
     
     # Get categories for the current user
-    conn = get_db_connection()
-    try:
-        searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-        # Don't pass user_id again, it's already in the searcher instance
-        categories = searcher.get_categories()
-        
-        # Check if user is admin
-        is_admin = getattr(user, 'is_admin', False)
-        
-        return render_template(template, categories=categories, user=user, is_admin=is_admin)
-    finally:
-        conn.close()
+    retry_count = 0
+    max_retries = 5
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            conn = get_db_connection()
+            try:
+                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                # Don't pass user_id again, it's already in the searcher instance
+                categories = searcher.get_categories()
+                
+                # Check if user is admin
+                is_admin = getattr(user, 'is_admin', False)
+                
+                logger.info(f"Successfully loaded categories for user {user.id}")
+                return render_template(template, categories=categories, user=user, is_admin=is_admin)
+            except Exception as e:
+                logger.error(f"Error in index route with connection: {e}")
+                last_error = e
+                raise  # Let our retry handler catch this
+            finally:
+                conn.close()
+        except Exception as e:
+            retry_count += 1
+            last_error = e
+            
+            if retry_count < max_retries:
+                wait_time = 1 * (2 ** (retry_count - 1))
+                logger.warning(f"Database error in index route, retrying in {wait_time}s (attempt {retry_count}/{max_retries}): {e}")
+                time.sleep(wait_time)
+                
+                # Force reconnect for specific errors
+                error_str = str(e).lower()
+                if "connection" in error_str or "server closed" in error_str or "reset" in error_str:
+                    try:
+                        from database.multi_user_db.db_final import setup_database
+                        setup_database(force_reconnect=True)
+                        logger.info(f"Forced database reconnection on index page retry #{retry_count}")
+                    except Exception as reconnect_error:
+                        logger.error(f"Failed to reconnect for index page: {reconnect_error}")
+            else:
+                # Last attempt failed, show error page
+                logger.error(f"All retries for index route failed: {e}")
+                return render_template('error_final.html', 
+                                      error_title="Database Connection Issue", 
+                                      error_message="We're having trouble connecting to our database. Please try again in a few moments.",
+                                      user=user, is_admin=getattr(user, 'is_admin', False)), 500
 
 # Upload bookmarks endpoint
 @app.route('/upload-bookmarks', methods=['POST'])
