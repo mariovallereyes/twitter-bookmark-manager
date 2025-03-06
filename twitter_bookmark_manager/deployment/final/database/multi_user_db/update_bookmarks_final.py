@@ -41,6 +41,9 @@ LOG_FILE = os.path.join(LOG_DIR, 'final_update_log.txt')
 # Ensure log directory exists
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Initialize global variable for memory monitoring
+_last_memory_usage = "0MB"
+
 def setup_logger(name, log_file):
     """Set up a logger with both file and console handlers"""
     logger = logging.getLogger(name)
@@ -64,339 +67,388 @@ def setup_logger(name, log_file):
 
 logger = setup_logger('final_update', LOG_FILE)
 
-def map_bookmark_data(data, user_id=None):
-    """Map JSON data to Bookmark model fields with improved error tolerance"""
+def map_bookmark_data(bookmark_data, user_id=None):
+    """
+    Map the bookmark JSON data to Bookmark model fields with improved error handling.
+    
+    Args:
+        bookmark_data (dict): Raw bookmark data from JSON
+        user_id (int, optional): User ID for multi-user support
+        
+    Returns:
+        dict or None: Mapped data dictionary or None if mapping failed
+    """
     try:
-        # Extract tweet ID from URL or directly from data
-        tweet_url = data.get('tweet_url', '')
+        # Ensure we have a dictionary
+        if not isinstance(bookmark_data, dict):
+            logger.error(f"Bookmark data is not a dictionary: {type(bookmark_data)}")
+            return None
+            
+        # Extract tweet URL (this is our primary way to identify a bookmark)
+        tweet_url = bookmark_data.get('tweet_url')
+        
+        # Try to extract tweet ID from various sources
         tweet_id = None
         
-        # Try multiple ways to get the tweet ID
-        if tweet_url:
-            # Extract from URL
-            tweet_id = tweet_url.split('/')[-1] if tweet_url else None
+        # 1. Try direct 'id' field
+        if 'id' in bookmark_data:
+            tweet_id = str(bookmark_data['id'])
         
-        # If no tweet ID from URL, try to find it directly in the data
-        if not tweet_id:
-            # Try common ID field names
-            for id_field in ['id', 'id_str', 'tweet_id', 'status_id']:
-                if id_field in data and data[id_field]:
-                    tweet_id = str(data[id_field])
-                    break
-        
-        # If still no ID, generate one from content hash
-        if not tweet_id and (text := (data.get('full_text') or data.get('text'))):
-            import hashlib
-            # Create a consistent ID based on content hash
-            hash_input = (text + (data.get('screen_name', '') or ''))
-            tweet_id = 'gen_' + hashlib.md5(hash_input.encode('utf-8')).hexdigest()[:16]
-            logger.warning(f"Generated ID {tweet_id} for bookmark with no ID")
-        
-        # If we still don't have an ID, we have to skip
-        if not tweet_id:
-            logger.error("Could not determine an ID for bookmark")
-            return None
-        
-        # Parse datetime with fallback
-        created_at = None
-        tweeted_at = data.get('tweeted_at')
-        if tweeted_at:
-            # Try multiple datetime formats
-            datetime_formats = [
-                "%Y-%m-%dT%H:%M:%S.%fZ",
-                "%Y-%m-%dT%H:%M:%SZ",
-                "%Y-%m-%d %H:%M:%S",
-                "%a %b %d %H:%M:%S %z %Y"  # Twitter API format
+        # 2. Try to extract from URL if available
+        elif tweet_url:
+            # Extract ID from URL
+            match = re.search(r'/status/(\d+)', tweet_url)
+            if match:
+                tweet_id = match.group(1)
+                
+        # If we still don't have an ID but have a URL, try alternative patterns
+        if not tweet_id and tweet_url:
+            # Try other URL patterns
+            patterns = [
+                r'twitter\.com/\w+/status/(\d+)',
+                r'x\.com/\w+/status/(\d+)',
+                r'/status/(\d+)',
+                r'statuses/(\d+)',
+                r'i/status/(\d+)'
             ]
             
-            for dt_format in datetime_formats:
-                try:
-                    created_at = datetime.strptime(tweeted_at, dt_format)
+            for pattern in patterns:
+                match = re.search(pattern, tweet_url)
+                if match:
+                    tweet_id = match.group(1)
                     break
-                except ValueError:
-                    continue
         
-        # If no datetime, use current time
-        if not created_at:
-            created_at = datetime.now()
-            logger.warning(f"Using current time for bookmark with ID {tweet_id}")
-
-        # Extract text, preferring full_text over text
-        text = data.get('full_text') or data.get('text') or ''
-        
-        # Make sure we have a tweet_url for referencing
-        if not tweet_url and tweet_id:
+        # If we still don't have an ID or URL, log and skip
+        if not tweet_id and not tweet_url:
+            logger.error(f"Could not extract tweet ID or URL from bookmark data: {bookmark_data}")
+            return None
+            
+        # If we have an ID but no URL, create a standard URL
+        if tweet_id and not tweet_url:
             tweet_url = f"https://twitter.com/i/status/{tweet_id}"
-            # Also add it to the original data
-            data['tweet_url'] = tweet_url
-            logger.info(f"Generated tweet_url for bookmark ID {tweet_id}")
+            bookmark_data['tweet_url'] = tweet_url
         
-        # Map the data, ensuring we have at least minimal values for required fields
+        # Format tweet_id properly
+        if tweet_id:
+            # Ensure it's a string
+            tweet_id = str(tweet_id).strip()
+            
+            # Remove any non-numeric characters
+            tweet_id = re.sub(r'\D', '', tweet_id)
+            
+            # Validate the ID is numeric and reasonable length
+            if not tweet_id.isdigit() or len(tweet_id) < 5 or len(tweet_id) > 30:
+                logger.error(f"Invalid tweet ID format: {tweet_id}")
+                # If we have a URL, try again with different pattern
+                if tweet_url:
+                    tweet_id = None
+                    for pattern in patterns:
+                        match = re.search(pattern, tweet_url)
+                        if match:
+                            tweet_id = match.group(1)
+                            if tweet_id.isdigit() and 5 <= len(tweet_id) <= 30:
+                                break
+                            else:
+                                tweet_id = None
+                
+                # If still invalid, use a fallback approach
+                if not tweet_id or not tweet_id.isdigit() or len(tweet_id) < 5 or len(tweet_id) > 30:
+                    logger.warning(f"Could not extract valid tweet ID from bookmark, generating a UUID-based ID")
+                    import hashlib
+                    import uuid
+                    
+                    # Generate a consistent ID based on content or URL
+                    if tweet_url:
+                        tweet_id = "gen_" + hashlib.md5(tweet_url.encode()).hexdigest()[:16]
+                    else:
+                        content = str(bookmark_data.get('tweet_content', '')) + str(bookmark_data.get('author_name', ''))
+                        if content:
+                            tweet_id = "gen_" + hashlib.md5(content.encode()).hexdigest()[:16]
+                        else:
+                            tweet_id = "gen_" + str(uuid.uuid4())[:16]
+        
+        # Parse the tweeted_at datetime
+        tweeted_at = None
+        date_str = bookmark_data.get('created_at') or bookmark_data.get('tweeted_at') or bookmark_data.get('date')
+        
+        if date_str:
+            try:
+                # Try multiple datetime formats
+                for fmt in [
+                    '%Y-%m-%dT%H:%M:%S.%fZ',  # ISO format with microseconds 
+                    '%Y-%m-%dT%H:%M:%SZ',     # ISO format without microseconds
+                    '%a %b %d %H:%M:%S %z %Y',  # Twitter format
+                    '%Y-%m-%d %H:%M:%S',      # Simple format
+                    '%Y-%m-%d'                # Date only
+                ]:
+                    try:
+                        tweeted_at = datetime.strptime(date_str, fmt)
+                        break
+                    except ValueError:
+                        continue
+                        
+                # If none of the formats worked, try dateutil
+                if not tweeted_at:
+                    import dateutil.parser
+                    tweeted_at = dateutil.parser.parse(date_str)
+            except Exception as e:
+                logger.warning(f"Could not parse date '{date_str}': {e}")
+                # Use current time as fallback
+                tweeted_at = datetime.now()
+        else:
+            # No date provided, use current time
+            tweeted_at = datetime.now()
+            
+        # Map the data to our model fields
         mapped_data = {
             'id': tweet_id,
-            'text': text or '[No Text Available]',
-            'created_at': created_at,
-            'author_name': data.get('name') or data.get('author_name') or '[Unknown]',
-            'author_username': data.get('screen_name') or data.get('author_username') or '[Unknown]',
-            'media_files': data.get('media_files') or data.get('extended_media') or {},
-            'raw_data': data,
-            'user_id': user_id
+            'raw_data': bookmark_data,
+            'tweeted_at': tweeted_at
         }
         
+        # Add user_id if provided
+        if user_id:
+            mapped_data['user_id'] = user_id
+            
         return mapped_data
         
     except Exception as e:
         logger.error(f"Error mapping bookmark data: {e}")
+        logger.error(traceback.format_exc())
         return None
 
-def rebuild_vector_store(session_id=None, user_id=None, batch_size=25, force_full_rebuild=False, max_duration_minutes=30):
-    """Rebuild the vector store from the database
-    
-    This function rebuilds the vector store by adding all bookmarks from the 
-    PostgreSQL database to the Qdrant vector store.
+def get_user_directory(user_id):
+    """
+    Find a valid user directory for storing user-specific files.
     
     Args:
-        session_id: Optional session identifier for logging purposes
-        user_id: Optional user ID for multi-user support
-        batch_size: Number of bookmarks to process in a batch (smaller = less memory)
-        force_full_rebuild: Force a full rebuild even if incremental is possible
-        max_duration_minutes: Maximum duration in minutes before timing out
+        user_id: User ID for multi-user support
         
     Returns:
-        Dict with rebuild results and status
+        str: Path to user directory or None if not found
     """
-    if not session_id:
-        session_id = str(uuid.uuid4())[:8]
+    if not user_id:
+        return DATABASE_DIR
         
-    logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store (Qdrant) rebuild process")
-    monitor_memory("at start of vector store rebuild")
+    user_dir = f"user_{user_id}"
     
-    if user_id:
-        logger.info(f"👤 [REBUILD-{session_id}] Processing for user_id: {user_id}")
-    start_time = datetime.now()
+    # Try multiple potential paths
+    potential_dirs = [
+        os.path.join(BASE_DIR, "database", user_dir),
+        os.path.join("database", user_dir),
+        os.path.join("/app/database", user_dir),
+        os.path.join(DATABASE_DIR, user_dir)
+    ]
     
-    # Create progress file path
-    rebuild_progress_file = os.path.join(LOG_DIR, f'rebuild_progress_{session_id}.json')
-    if isinstance(rebuild_progress_file, Path):
-        rebuild_progress_exists = rebuild_progress_file.exists()
-    else:
-        rebuild_progress_exists = os.path.exists(rebuild_progress_file)
-    
-    # Load previous progress if exists
-    processed_ids = set()
-    last_processed_index = 0
-    
-    if rebuild_progress_exists and not force_full_rebuild:
-        try:
-            with open(rebuild_progress_file, 'r') as f:
-                progress_data = json.load(f)
-                processed_ids = set(progress_data.get('processed_ids', []))
-                last_processed_index = progress_data.get('last_processed_index', 0)
-                logger.info(f"📊 [REBUILD-{session_id}] Resuming from index {last_processed_index} with {len(processed_ids)} already processed")
-        except Exception as e:
-            logger.warning(f"⚠️ [REBUILD-{session_id}] Could not load progress file: {e}. Starting fresh.")
-            processed_ids = set()
-            last_processed_index = 0
-    
+    # Find first existing directory
+    for dir_path in potential_dirs:
+        if os.path.exists(dir_path) and os.path.isdir(dir_path):
+            return dir_path
+            
+    # Try to create directory if none found
     try:
-        # Initialize a new vector store with user_id if provided
-        monitor_memory("before vector store initialization")
-        vector_store = VectorStore(user_id=user_id)
-        logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
-        monitor_memory("after vector store initialization")
+        os.makedirs(potential_dirs[0], exist_ok=True)
+        return potential_dirs[0]
+    except Exception as e:
+        logger.error(f"Error creating user directory: {e}")
+        return None
+
+def rebuild_vector_store(session_id=None, user_id=None, batch_size=50, force_full_rebuild=False):
+    """
+    Rebuild vector store for bookmark embeddings with improved robustness.
+    
+    Args:
+        session_id (str, optional): Session ID for tracking progress
+        user_id (int, optional): User ID for multi-user support
+        batch_size (int, optional): Batch size for vector processing. Defaults to 50.
+        force_full_rebuild (bool, optional): Whether to force a full rebuild. Defaults to False.
         
-        # Get all bookmarks from PostgreSQL, filtered by user_id if provided
-        with get_db_session() as session:
-            # Create query that filters by user_id if provided
-            query = session.query(Bookmark)
-            if user_id:
-                query = query.filter(Bookmark.user_id == user_id)
+    Returns:
+        dict: Result dictionary with information about the rebuild process
+    """
+    try:
+        logger.info(f"Starting vector store rebuild for user {user_id} with session {session_id}")
+        
+        if not session_id:
+            session_id = str(uuid.uuid4())[:8]
+        
+        start_time = time.time()
+        monitor_memory("at start of rebuild_vector_store")
+        
+        # Initialize embedding model with reduced resources
+        try:
+            from langchain.embeddings import HuggingFaceEmbeddings
+            
+            logger.info("Initializing embedding model with reduced resources")
+            model_kwargs = {'device': 'cpu'}
+            embedding_model = HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs=model_kwargs
+            )
+            logger.info("Embedding model initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing embedding model: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                'success': False,
+                'error': f"Error initializing embedding model: {str(e)}",
+                'session_id': session_id
+            }
+        
+        # Set up document store path
+        try:
+            # Get bookmarks from database
+            with get_db_session() as session:
+                query = session.query(Bookmark)
                 
-            # Count total bookmarks first for logging
-            total_count = query.count()
-            logger.info(f"📊 [REBUILD-{session_id}] Found {total_count} bookmarks in PostgreSQL database")
-            
-            if total_count == 0:
-                logger.warning(f"⚠️ [REBUILD-{session_id}] No bookmarks found in database, nothing to rebuild")
-                return {
-                    "success": True,
-                    "message": "No bookmarks found in database",
-                    "postgres_count": 0,
-                    "vector_count": 0,
-                    "duration_seconds": (datetime.now() - start_time).total_seconds(),
-                    "user_id": user_id
-                }
-            
-            # Process bookmarks in smaller batches to avoid memory issues
-            BATCH_SIZE = min(batch_size, 25)  # Cap at 25 for safety
-            processed_count = 0
-            success_count = len(processed_ids)  # Count previously processed
-            error_count = 0
-            processed_this_session = 0
-            
-            # Calculate timeout time
-            timeout_time = start_time + timedelta(minutes=max_duration_minutes)
-            
-            # Use batched query to reduce memory pressure
-            for i in range(last_processed_index, total_count, BATCH_SIZE):
-                # Check if we've exceeded the maximum allowed time
-                current_time = datetime.now()
-                if current_time > timeout_time:
-                    logger.warning(f"⚠️ [REBUILD-{session_id}] Reached maximum allowed time ({max_duration_minutes} minutes). Stopping with progress saved.")
-                    # Save progress and return partial success
-                    duration = (current_time - start_time).total_seconds()
+                # Filter by user_id if provided
+                if user_id:
+                    query = query.filter(Bookmark.user_id == user_id)
+                    
+                # Get count first to determine batches
+                total_bookmarks = query.count()
+                logger.info(f"Found {total_bookmarks} bookmarks to process for vector rebuild")
+                
+                if total_bookmarks == 0:
+                    logger.warning("No bookmarks found to rebuild vectors")
                     return {
-                        "success": True,
-                        "message": f"Timeout after {duration:.1f} seconds, progress saved",
-                        "postgres_count": total_count,
-                        "vector_count": success_count,
-                        "successful_additions": success_count,
-                        "processed_this_session": processed_this_session,
-                        "errors": error_count,
-                        "duration_seconds": duration,
-                        "is_complete": False,
-                        "is_timeout": True,
-                        "next_index": i,
-                        "user_id": user_id
+                        'success': True,
+                        'message': "No bookmarks found to rebuild vectors",
+                        'session_id': session_id
                     }
                 
-                # Clear any previous batch data from memory
-                import gc
-                gc.collect()
+                # Find valid base directory
+                base_dir = get_user_directory(user_id)
+                if not base_dir:
+                    logger.error(f"Could not find valid base directory for user {user_id}")
+                    return {
+                        'success': False,
+                        'error': f"Could not find valid base directory for user {user_id}",
+                        'session_id': session_id
+                    }
                 
-                monitor_memory(f"before loading batch {i // BATCH_SIZE + 1}")
-                batch = query.limit(BATCH_SIZE).offset(i).all()
-                batch_size = len(batch)
+                # Set up paths
+                document_store_dir = os.path.join(base_dir, "document_store")
+                os.makedirs(document_store_dir, exist_ok=True)
                 
-                logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i // BATCH_SIZE + 1}: {batch_size} bookmarks")
+                document_store_path = os.path.join(document_store_dir, "faiss_index")
                 
-                batch_success = 0
-                batch_errors = 0
-                batch_skipped = 0
-                
-                # Process each bookmark in the batch
-                for j, bookmark in enumerate(batch):
+                # Back up existing index if it exists
+                if os.path.exists(document_store_path) and not os.path.isdir(document_store_path):
+                    backup_path = f"{document_store_path}_backup_{int(time.time())}"
                     try:
-                        # Extract the tweet URL and ID
-                        tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
-                        tweet_id = tweet_url.split('/')[-1] if tweet_url else None
-                        
-                        # Skip if already processed (for incremental rebuilds)
-                        if tweet_id in processed_ids or tweet_url in processed_ids:
-                            batch_skipped += 1
-                            continue
-                        
-                        # Prepare metadata for the vector store
-                        metadata = {
-                            'tweet_url': tweet_url,
-                            'screen_name': bookmark.author_username or '',
-                            'author_name': bookmark.author_name or '',
-                            'user_id': user_id if user_id else bookmark.user_id
-                        }
-                        
-                        # Skip empty text
-                        if not bookmark.text or len(bookmark.text.strip()) == 0:
-                            logger.warning(f"⚠️ [REBUILD-{session_id}] Skipping bookmark {tweet_id} with empty text")
-                            continue
-                        
-                        # Add bookmark to vector store using its ID
-                        vector_store.add_bookmark(
-                            bookmark_id=tweet_id,
-                            text=bookmark.text or '',
-                            metadata=metadata
-                        )
-                        
-                        processed_ids.add(tweet_id)
-                        processed_ids.add(tweet_url) 
-                        success_count += 1
-                        batch_success += 1
-                        processed_this_session += 1
-                        
+                        shutil.copy2(document_store_path, backup_path)
+                        logger.info(f"Backed up existing index to {backup_path}")
                     except Exception as e:
-                        error_msg = f"Error adding bookmark {tweet_id} to vector store: {str(e)}"
-                        logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
-                        error_count += 1
-                        batch_errors += 1
+                        logger.warning(f"Could not back up existing index: {e}")
                 
-                processed_count = i + batch_size
-                last_processed_index = i + batch_size
+                # Process bookmarks in batches
+                total_processed = 0
+                documents = []
                 
-                # Log batch completion with progress
-                progress = (processed_count / total_count) * 100
-                logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i // BATCH_SIZE + 1}: {batch_success} success, {batch_errors} errors, {batch_skipped} skipped")
-                logger.info(f"✅ [REBUILD-{session_id}] Overall progress: {processed_count}/{total_count} ({progress:.1f}%)")
+                # Use query batching to avoid loading all bookmarks at once
+                for bookmark_offset in range(0, total_bookmarks, batch_size):
+                    batch = query.limit(batch_size).offset(bookmark_offset).all()
+                    batch_documents = []
+                    
+                    for bookmark in batch:
+                        try:
+                            # Extract text content from bookmark
+                            tweet_text = ""
+                            if bookmark.raw_data:
+                                raw_data = bookmark.raw_data
+                                tweet_text = raw_data.get('full_text') or raw_data.get('text') or ""
+                                
+                                # Add author info if available
+                                author = raw_data.get('author_name') or raw_data.get('name')
+                                if author:
+                                    tweet_text = f"Author: {author}\n{tweet_text}"
+                                    
+                            # Skip empty content
+                            if not tweet_text.strip():
+                                logger.warning(f"Empty content for bookmark {bookmark.id}, skipping")
+                                continue
+                            
+                            # Create document with metadata
+                            from langchain.schema import Document
+                            document = Document(
+                                page_content=tweet_text,
+                                metadata={
+                                    "id": bookmark.id,
+                                    "user_id": bookmark.user_id,
+                                    "source": "twitter_bookmark"
+                                }
+                            )
+                            batch_documents.append(document)
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing bookmark {bookmark.id} for vector embedding: {e}")
+                            continue
+                    
+                    # Add batch to documents
+                    documents.extend(batch_documents)
+                    total_processed += len(batch_documents)
+                    
+                    # Log progress
+                    progress_percent = min(100, (total_processed / total_bookmarks) * 100)
+                    logger.info(f"Vector rebuild progress: {progress_percent:.1f}% ({total_processed}/{total_bookmarks})")
+                    
+                    # Force garbage collection to free memory
+                    import gc
+                    gc.collect()
+                    
+                    # Monitor memory
+                    monitor_memory(f"after processing batch of {len(batch_documents)} documents")
                 
-                # Save progress to file for potential resuming
-                progress_data = {
-                    'session_id': session_id,
-                    'last_processed_index': last_processed_index,
-                    'processed_ids': list(processed_ids),
-                    'success_count': success_count,
-                    'error_count': error_count,
-                    'last_update': datetime.now().isoformat()
-                }
-                
-                with open(rebuild_progress_file, 'w') as f:
-                    json.dump(progress_data, f)
-                
-                # Memory checkpoint - force garbage collection and log memory usage
-                gc.collect()
-                monitor_memory(f"after batch {i // BATCH_SIZE + 1}")
-            
-            # Final verification - get collection info
-            collection_info = vector_store.get_collection_info()
-            vector_count = collection_info.get('vectors_count', 0)
-            
-            # Clear progress file after successful completion
-            if os.path.exists(rebuild_progress_file):
+                # Create vector store with batching and better error handling
                 try:
-                    os.remove(rebuild_progress_file)
-                    logger.info(f"🧹 [REBUILD-{session_id}] Removed progress file after successful completion")
+                    from langchain.vectorstores import FAISS
+                    
+                    logger.info(f"Creating FAISS vector store with {len(documents)} documents")
+                    vector_store = FAISS.from_documents(documents, embedding_model)
+                    
+                    # Save vector store
+                    logger.info(f"Saving vector store to {document_store_path}")
+                    vector_store.save_local(document_store_path)
+                    
+                    # Calculate duration
+                    duration_seconds = time.time() - start_time
+                    logger.info(f"Vector store rebuild completed in {duration_seconds:.2f} seconds")
+                    
+                    return {
+                        'success': True,
+                        'message': f"Vector store rebuilt successfully with {total_processed} documents",
+                        'total_processed': total_processed,
+                        'duration_seconds': duration_seconds,
+                        'session_id': session_id
+                    }
+                    
                 except Exception as e:
-                    logger.warning(f"⚠️ [REBUILD-{session_id}] Could not remove progress file: {e}")
-            
-            # Log summary
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed in {duration:.2f} seconds")
-            logger.info(f"📊 [REBUILD-{session_id}] Summary:")
-            logger.info(f"  - User ID: {user_id if user_id else 'All users'}")
-            logger.info(f"  - PostgreSQL bookmark count: {total_count}")
-            logger.info(f"  - Vector store count: {vector_count}")
-            logger.info(f"  - Successful additions: {success_count}")
-            logger.info(f"  - Processed this session: {processed_this_session}")
-            logger.info(f"  - Errors: {error_count}")
-            monitor_memory("at end of vector store rebuild")
-            
-            # Check for count mismatch
-            if success_count != vector_count:
-                mismatch_msg = f"Count mismatch! Added: {success_count}, Vector count: {vector_count}"
-                logger.warning(f"⚠️ [REBUILD-{session_id}] {mismatch_msg}")
-            
+                    logger.error(f"Error creating or saving vector store: {e}")
+                    logger.error(traceback.format_exc())
+                    return {
+                        'success': False,
+                        'error': f"Error creating or saving vector store: {str(e)}",
+                        'session_id': session_id
+                    }
+        
+        except Exception as e:
+            logger.error(f"Error during vector store rebuild: {e}")
+            logger.error(traceback.format_exc())
             return {
-                "success": True,
-                "postgres_count": total_count,
-                "vector_count": vector_count,
-                "successful_additions": success_count,
-                "processed_this_session": processed_this_session,
-                "errors": error_count,
-                "duration_seconds": duration,
-                "is_complete": True,
-                "is_timeout": False,
-                "is_in_sync": success_count == vector_count,
-                "user_id": user_id
+                'success': False,
+                'error': f"Error during vector store rebuild: {str(e)}",
+                'session_id': session_id
             }
             
     except Exception as e:
-        error_msg = f"Error during vector store rebuild: {str(e)}"
-        logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
+        logger.error(f"Unexpected error in rebuild_vector_store: {e}")
         logger.error(traceback.format_exc())
-        
         return {
-            "success": False,
-            "error": error_msg,
-            "traceback": traceback.format_exc(),
-            "duration_seconds": (datetime.now() - start_time).total_seconds(),
-            "user_id": user_id
+            'success': False,
+            'error': f"Unexpected error in rebuild_vector_store: {str(e)}",
+            'session_id': session_id
         }
 
 def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
@@ -480,458 +532,359 @@ def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
 # Enhance the update_bookmarks function with better debugging and vector store updates
 def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
     """
-    Update bookmarks database from the JSON file
+    Update bookmarks database from JSON file with improved ORM approach.
     
     Args:
-        session_id: Optional session identifier for tracking
-        start_index: Optional starting index for batch processing
-        rebuild_vector: Whether to rebuild the vector store after updating
-        user_id: Optional user ID for multi-user support
+        session_id (str, optional): Unique ID for this update session. Generated if not provided.
+        start_index (int, optional): Index to start/resume processing from. Defaults to 0.
+        rebuild_vector (bool, optional): Whether to rebuild the vector store. Defaults to False.
+        user_id (int, optional): User ID for multi-user support. Defaults to None.
         
     Returns:
-        Dict with update results and status
+        dict: Result dictionary with progress information and success status
     """
-    # Generate a session ID if not provided
-    if not session_id:
-        session_id = str(uuid.uuid4())[:8]
-    
-    # Monitor initial memory state
-    monitor_memory("at start of update_bookmarks")
-        
-    # Set up user-specific paths
-    if user_id:
-        logger.info(f"👤 [UPDATE-{session_id}] Processing for user_id: {user_id}")
-        
-        # Define user-specific directories
-        from pathlib import Path
-        user_dir = f"user_{user_id}"
-        
-        # Use absolute paths for Railway deployment
-        # There appears to be a path inconsistency where upload uses /database/user_X but update looks in /app/database/user_X
-        app_prefix = '/app'
-        
-        # First try with app prefix (Railway production environment)
-        base_dir = Path(os.path.join(app_prefix, DATABASE_DIR.lstrip('/')))
-        database_dir = base_dir / user_dir
-        
-        # Ensure directories exist
-        database_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Set up user-specific files with Path objects
-        progress_file = database_dir / 'update_progress.json'
-        bookmarks_file = database_dir / 'twitter_bookmarks.json'
-        
-        # Check if file exists
-        if not bookmarks_file.exists():
-            # If not found with app prefix, try without app prefix
-            base_dir_no_prefix = Path(DATABASE_DIR)
-            database_dir_no_prefix = base_dir_no_prefix / user_dir
-            bookmarks_file_no_prefix = database_dir_no_prefix / 'twitter_bookmarks.json'
-            
-            if bookmarks_file_no_prefix.exists():
-                # Use the path without prefix if file exists there
-                logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file without app prefix: {bookmarks_file_no_prefix}")
-                bookmarks_file = bookmarks_file_no_prefix
-                progress_file = database_dir_no_prefix / 'update_progress.json'
-                database_dir = database_dir_no_prefix
-    else:
-        # Use default paths
-        progress_file = os.path.join(LOG_DIR, f'update_progress_{session_id}.json')
-        bookmarks_file = os.path.join(DATABASE_DIR, 'twitter_bookmarks.json')
-    
-    logger.info(f"Starting final environment bookmark update process for session {session_id} from index {start_index}")
-    logger.info(f"Using bookmarks file: {bookmarks_file}")
-    
-    # Check if file exists - final check
-    if isinstance(bookmarks_file, Path):
-        file_exists = bookmarks_file.exists()
-    else:
-        file_exists = os.path.exists(bookmarks_file)
-        
-    if not file_exists:
-        # Try a few more path combinations as a last resort
-        possible_paths = [
-            os.path.join('/app', DATABASE_DIR.lstrip('/'), user_dir, 'twitter_bookmarks.json'),
-            os.path.join('/app/database', user_dir, 'twitter_bookmarks.json'),
-            os.path.join(DATABASE_DIR, user_dir, 'twitter_bookmarks.json'),
-            os.path.join('/database', user_dir, 'twitter_bookmarks.json')
-        ]
-        
-        for alt_path in possible_paths:
-            if os.path.exists(alt_path):
-                logger.info(f"✅ [UPDATE-{session_id}] Found bookmarks file at alternative path: {alt_path}")
-                bookmarks_file = alt_path
-                file_exists = True
-                break
-                
-    if not file_exists:
-        logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found: {bookmarks_file}")
-        # Log additional debugging info
-        logger.error(f"❌ [UPDATE-{session_id}] DATABASE_DIR setting: {DATABASE_DIR}")
-        logger.error(f"❌ [UPDATE-{session_id}] Tried multiple path combinations but none worked")
-        
-        # List files in potential directories to help debug
-        for dir_to_check in ['/app/database', '/database', DATABASE_DIR]:
-            if os.path.exists(dir_to_check):
-                logger.info(f"📁 [UPDATE-{session_id}] Contents of {dir_to_check}:")
-                try:
-                    for item in os.listdir(dir_to_check):
-                        logger.info(f"   - {item}")
-                except Exception as e:
-                    logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {dir_to_check}: {str(e)}")
-                    
-            user_specific_dir = os.path.join(dir_to_check, user_dir)
-            if os.path.exists(user_specific_dir):
-                logger.info(f"📁 [UPDATE-{session_id}] Contents of {user_specific_dir}:")
-                try:
-                    for item in os.listdir(user_specific_dir):
-                        logger.info(f"   - {item}")
-                except Exception as e:
-                    logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {user_specific_dir}: {str(e)}")
-        
-        return {
-            'success': False,
-            'error': f'Bookmarks file not found: {bookmarks_file}',
-            'session_id': session_id,
-            'user_id': user_id
-        }
-    
-    # If rebuild_vector is True, only rebuild vector store and return
-    if rebuild_vector:
-        logger.info("Rebuild vector flag is set, rebuilding vector store")
-        rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15)
-        return {
-            'success': rebuild_result["success"],
-            'message': 'Vector store rebuild complete',
-            'details': rebuild_result,
-            'session_id': session_id,
-            'user_id': user_id
-        }
-        
-    # Check for update loops
-    is_in_loop, loop_data = detect_update_loop(progress_file, user_id=user_id)
-    if is_in_loop:
-        logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
-        # Force a vector rebuild to break the loop
-        rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15, force_full_rebuild=True)
-        
-        # Reset progress file to start fresh
-        if isinstance(progress_file, Path):
-            exists = progress_file.exists()
-        else:
-            exists = os.path.exists(progress_file)
-        
-        if exists:
-            try:
-                # Backup the file first
-                backup_file = f"{progress_file}.loop_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                shutil.copy2(progress_file, backup_file)
-                logger.info(f"✅ [UPDATE-{session_id}] Created backup of progress file at {backup_file}")
-                
-                # Reset the progress file
-                os.remove(progress_file)
-                logger.info(f"✅ [UPDATE-{session_id}] Removed progress file to break update loop")
-            except Exception as e:
-                logger.error(f"❌ [UPDATE-{session_id}] Error handling progress file during loop recovery: {e}")
-        
-        return {
-            'success': True,
-            'message': 'Update loop detected and resolved with vector rebuild',
-            'loop_data': loop_data,
-            'session_id': session_id,
-            'user_id': user_id
-        }
-            
-    # Track processed IDs to avoid duplicates
-    processed_ids = set()
-    
-    # Statistics for reporting
-    stats = {
-        'total_processed': 0,
-        'new_count': 0,
-        'updated_count': 0,
-        'errors': 0
-    }
-    
-    # Check for existing progress to resume
-    current_progress = {}
-    
-    if isinstance(progress_file, Path):
-        progress_exists = progress_file.exists()
-    else:
-        progress_exists = os.path.exists(progress_file)
-        
-    if progress_exists and start_index > 0:
-        try:
-            with open(progress_file, 'r') as f:
-                current_progress = json.load(f)
-                # Get processed IDs from progress file
-                if 'processed_ids' in current_progress:
-                    processed_ids = set(current_progress['processed_ids'])
-                    logger.info(f"📊 [UPDATE-{session_id}] Resuming from index {start_index} with {len(processed_ids)} already processed IDs")
-        except Exception as e:
-            logger.error(f"❌ [UPDATE-{session_id}] Error reading progress: {e}")
-    
-    logger.info(f"📋 [UPDATE-{session_id}] STEP 3: Initiating database update with pa_update_bookmarks")
-    
-    # Load the bookmark data from the JSON file
     try:
-        # Monitor memory before loading bookmarks
-        monitor_memory("before loading bookmarks.json")
+        # Track execution time
+        start_time = time.time()
         
-        with open(bookmarks_file, 'r', encoding='utf-8') as f:
-            bookmark_data = json.load(f)
+        # Generate a session ID if none provided
+        if not session_id:
+            session_id = str(uuid.uuid4())[:8]
             
-        # Get bookmark array and count for logging
-        if isinstance(bookmark_data, dict) and 'bookmarks' in bookmark_data:
-            new_bookmarks = bookmark_data['bookmarks']
-            total_bookmarks = len(new_bookmarks)
+        # Monitor memory at start
+        monitor_memory(f"start of update session {session_id}")
+        
+        # Set up user directory
+        user_dir = f"user_{user_id}" if user_id else ""
+        
+        # Find the bookmark file using our robust path finder
+        bookmarks_file = find_file_in_possible_paths(
+            'twitter_bookmarks.json', 
+            user_id=user_id,
+            additional_paths=[
+                os.path.join('/app', str(DATABASE_DIR).lstrip('/'), user_dir, 'twitter_bookmarks.json'),
+                os.path.join('/app/database', user_dir, 'twitter_bookmarks.json'),
+                os.path.join(DATABASE_DIR, user_dir, 'twitter_bookmarks.json'),
+                os.path.join('/database', user_dir, 'twitter_bookmarks.json')
+            ]
+        )
+        
+        # Find or create the base directory for this user
+        database_dir = get_user_directory(user_id)
+        if not database_dir:
+            logger.error(f"Could not find or create valid database directory for user {user_id}")
+            return {
+                'success': False, 
+                'error': 'Could not find or create valid database directory',
+                'session_id': session_id,
+                'user_id': user_id
+            }
+        
+        # Set up paths for progress tracking
+        progress_file = os.path.join(database_dir, 'update_progress.json')
+        
+        logger.info(f"Starting bookmark update process for session {session_id} from index {start_index}")
+        if bookmarks_file:
+            logger.info(f"Using bookmarks file: {bookmarks_file}")
         else:
-            # Try handling as a direct array
-            new_bookmarks = bookmark_data
-            total_bookmarks = len(new_bookmarks)
+            logger.error(f"❌ [UPDATE-{session_id}] Bookmarks file not found")
+            logger.error(f"❌ [UPDATE-{session_id}] DATABASE_DIR setting: {DATABASE_DIR}")
             
-        logger.info(f"Loaded {total_bookmarks} bookmarks from JSON file")
-        monitor_memory("after loading bookmarks.json")
-        
-        # Validate and adjust start_index
-        if start_index >= total_bookmarks:
-            error_msg = f"Start index {start_index} exceeds total bookmarks {total_bookmarks}"
-            logger.error(error_msg)
-            return {'success': False, 'error': error_msg}
-        
-        # Process bookmarks in smaller batches
-        BATCH_SIZE = 10  # Reduced batch size for better error handling
-        current_batch = []
-        
-        # Get existing bookmarks once using raw SQL instead of ORM
-        existing_bookmarks = {}
-        
-        try:
-            with get_db_session() as session:
-                # First attempt to get just id and data, which are the minimum we need
-                bookmark_query = """
-                    SELECT id, raw_data, user_id
-                    FROM bookmarks
-                """
-                params = {}
-                
-                # Add user_id filter if provided
-                if user_id:
-                    bookmark_query += " WHERE user_id = :user_id"
-                    params["user_id"] = user_id
-                    
-                # Execute the query and create Bookmark objects
-                result = session.execute(text(bookmark_query), params)
-                for row in result:
-                    # Create simplified bookmark object with minimal data
-                    bookmark_data = {
-                        'id': row[0],
-                        'raw_data': json.loads(row[1]) if row[1] else {}
-                    }
-                    
-                    # Only add user_id if it's available
-                    if len(row) > 2:
-                        bookmark_data['user_id'] = row[2]
-                    
-                    bookmark = Bookmark(**bookmark_data)
-                    if bookmark and bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
-                        existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
-                
-                logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
-                monitor_memory("after loading existing bookmarks")
-        except Exception as e:
-            logger.warning(f"Error querying bookmarks table: {e}")
-            logger.info("Proceeding with empty existing bookmarks")
+            # List files in potential directories to help debug
+            for dir_to_check in ['/app/database', '/database', DATABASE_DIR]:
+                if os.path.exists(dir_to_check):
+                    logger.info(f"📁 [UPDATE-{session_id}] Contents of {dir_to_check}:")
+                    try:
+                        for item in os.listdir(dir_to_check):
+                            logger.info(f"   - {item}")
+                    except Exception as e:
+                        logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {dir_to_check}: {str(e)}")
+                        
+                user_specific_dir = os.path.join(dir_to_check, user_dir)
+                if os.path.exists(user_specific_dir):
+                    logger.info(f"📁 [UPDATE-{session_id}] Contents of {user_specific_dir}:")
+                    try:
+                        for item in os.listdir(user_specific_dir):
+                            logger.info(f"   - {item}")
+                    except Exception as e:
+                        logger.error(f"❌ [UPDATE-{session_id}] Error listing directory {user_specific_dir}: {str(e)}")
             
-        # Process each bookmark
-        batch_count = 0
-        for i, bookmark_data in enumerate(new_bookmarks, start_index):
+            return {
+                'success': False,
+                'error': 'Bookmarks file not found',
+                'session_id': session_id,
+                'user_id': user_id
+            }
+        
+        # Check for update loops
+        is_in_loop, loop_data = detect_update_loop(progress_file, user_id=user_id)
+        if is_in_loop:
+            logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
+            # Force a vector rebuild to break the loop
+            rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15, force_full_rebuild=True)
+            
+            # Reset progress file to start fresh
+            if os.path.exists(progress_file):
+                try:
+                    # Backup the file first
+                    backup_file = f"{progress_file}.loop_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    shutil.copy2(progress_file, backup_file)
+                    logger.info(f"✅ [UPDATE-{session_id}] Created backup of progress file at {backup_file}")
+                    
+                    # Reset the progress file
+                    os.remove(progress_file)
+                    logger.info(f"✅ [UPDATE-{session_id}] Removed progress file to break update loop")
+                except Exception as e:
+                    logger.error(f"❌ [UPDATE-{session_id}] Error handling progress file during loop recovery: {e}")
+            
+            return {
+                'success': True,
+                'message': 'Update loop detected and resolved with vector rebuild',
+                'loop_data': loop_data,
+                'session_id': session_id,
+                'user_id': user_id
+            }
+        
+        # Track processed IDs to avoid duplicates
+        processed_ids = set()
+        
+        # Statistics for reporting
+        stats = {
+            'total_processed': 0,
+            'new_count': 0,
+            'updated_count': 0,
+            'errors': 0
+        }
+        
+        # Check for existing progress to resume
+        current_progress = {}
+        
+        if os.path.exists(progress_file) and start_index > 0:
             try:
-                # Get or generate tweet_url for tracking
-                tweet_url = bookmark_data.get('tweet_url')
+                with open(progress_file, 'r') as f:
+                    current_progress = json.load(f)
+                    # Get processed IDs from progress file
+                    if 'processed_ids' in current_progress:
+                        processed_ids = set(current_progress['processed_ids'])
+                        logger.info(f"📊 [UPDATE-{session_id}] Resuming from index {start_index} with {len(processed_ids)} already processed IDs")
+            except Exception as e:
+                logger.error(f"❌ [UPDATE-{session_id}] Error reading progress: {e}")
+        
+        logger.info(f"📋 [UPDATE-{session_id}] STEP 3: Initiating database update")
+        
+        # Load the bookmark data from the JSON file
+        try:
+            # Monitor memory before loading bookmarks
+            monitor_memory("before loading bookmarks.json")
+            
+            with open(bookmarks_file, 'r', encoding='utf-8') as f:
+                bookmark_data = json.load(f)
                 
-                # If no tweet_url but we have a tweet ID, create one
-                if not tweet_url and (tweet_id := bookmark_data.get('id')):
-                    tweet_url = f"https://twitter.com/i/status/{tweet_id}"
-                    bookmark_data['tweet_url'] = tweet_url
+            # Get bookmark array and count for logging
+            if isinstance(bookmark_data, dict) and 'bookmarks' in bookmark_data:
+                new_bookmarks = bookmark_data['bookmarks']
+                total_bookmarks = len(new_bookmarks)
+            else:
+                # Try handling as a direct array
+                new_bookmarks = bookmark_data
+                total_bookmarks = len(new_bookmarks)
                 
-                # We'll use this key for tracking duplicates
-                tracking_key = tweet_url if tweet_url else f"item_{i}"
-                
-                # Skip if we've already processed this exact URL (duplicate in the same file)
-                if tracking_key in processed_ids:
-                    logger.info(f"Skipping duplicate bookmark at index {i}: {tracking_key}")
-                    continue
-                
-                # Map the data with our improved function
-                mapped_data = map_bookmark_data(bookmark_data, user_id)
-                if not mapped_data:
-                    logger.error(f"Failed to map bookmark at index {i}: {bookmark_data.get('id', 'unknown')}")
-                    stats['errors'] += 1
-                    continue
-                
-                # Use the ID from mapped_data for tracking now that we have one
-                if mapped_data.get('id') and not tweet_url:
-                    tracking_key = f"id_{mapped_data['id']}"
-                
-                # Add to current batch with the proper tracking key
-                current_batch.append((tracking_key, mapped_data, bookmark_data))
-                
-                # Process batch if full or last item
-                if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) + start_index - 1:
-                    batch_count += 1
+            logger.info(f"Loaded {total_bookmarks} bookmarks from JSON file")
+            monitor_memory("after loading bookmarks.json")
+            
+            # Validate and adjust start_index
+            if start_index >= total_bookmarks:
+                error_msg = f"Start index {start_index} exceeds total bookmarks {total_bookmarks}"
+                logger.error(error_msg)
+                return {'success': False, 'error': error_msg}
+            
+            # Get existing bookmark URLs once using ORM - simplified version with URL as the key
+            existing_bookmarks = {}
+            
+            try:
+                # Use ORM approach to get existing bookmarks
+                with get_db_session() as session:
+                    query = session.query(Bookmark)
                     
-                    # Monitor memory before processing batch
-                    monitor_memory(f"before processing batch {batch_count}")
+                    # Filter by user_id if provided
+                    if user_id:
+                        query = query.filter(Bookmark.user_id == user_id)
+                        
+                    # Execute the query
+                    for bookmark in query.all():
+                        if bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
+                            existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
                     
-                    batch_success = 0
-                    batch_errors = 0
+                    logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
+                    monitor_memory("after loading existing bookmarks")
+            except Exception as e:
+                logger.warning(f"Error querying bookmarks table: {e}")
+                logger.info("Proceeding with empty existing bookmarks")
+            
+            # Process bookmarks in smaller batches
+            BATCH_SIZE = 10  # Small batch size for better error handling
+            current_batch = []
+            batch_count = 0
+            
+            # Begin processing bookmarks
+            for i, bookmark_data in enumerate(new_bookmarks[start_index:], start_index):
+                try:
+                    # Get or generate tweet_url for tracking
+                    tweet_url = bookmark_data.get('tweet_url')
                     
-                    # Process each item in batch with separate transactions
-                    for url, data, raw in current_batch:
-                        # Use a new session for each bookmark to isolate transactions
-                        with get_db_session() as item_session:
+                    # If no tweet_url but we have a tweet ID, create one
+                    if not tweet_url and (tweet_id := bookmark_data.get('id')):
+                        tweet_url = f"https://twitter.com/i/status/{tweet_id}"
+                        bookmark_data['tweet_url'] = tweet_url
+                    
+                    # We'll use this key for tracking duplicates 
+                    tracking_key = tweet_url if tweet_url else f"item_{i}"
+                    
+                    # Skip if we've already processed this URL in this session
+                    if tracking_key in processed_ids:
+                        logger.info(f"Skipping duplicate bookmark at index {i}: {tracking_key}")
+                        continue
+                    
+                    # Map the data
+                    mapped_data = map_bookmark_data(bookmark_data, user_id)
+                    if not mapped_data:
+                        logger.error(f"Failed to map bookmark at index {i}")
+                        stats['errors'] += 1
+                        continue
+                    
+                    # Add to current batch
+                    current_batch.append((tracking_key, mapped_data, bookmark_data))
+                    
+                    # Process batch if full or last item
+                    if len(current_batch) >= BATCH_SIZE or i == len(new_bookmarks) - 1 + start_index:
+                        batch_count += 1
+                        
+                        # Monitor memory before processing batch
+                        monitor_memory(f"before processing batch {batch_count}")
+                        
+                        batch_success = 0
+                        batch_errors = 0
+                        
+                        # Process entire batch in a single transaction
+                        with get_db_session() as session:
                             try:
-                                # Use PostgreSQL's UPSERT to handle both new and existing records efficiently
-                                upsert_query = """
-                                    INSERT INTO bookmarks 
-                                    (id, raw_data, user_id)
-                                    VALUES (:id, :raw_data, :user_id)
-                                    ON CONFLICT (id) 
-                                    DO UPDATE SET 
-                                        raw_data = EXCLUDED.raw_data
-                                        WHERE bookmarks.user_id = :user_id
-                                """
-                                # Convert Python data types to SQL-compatible types
-                                upsert_params = {
-                                    'id': data.get('id'),
-                                    'raw_data': json.dumps(raw),
-                                    'user_id': data.get('user_id')
-                                }
-                                result = item_session.execute(text(upsert_query), upsert_params)
+                                # Process each item in batch
+                                for url, data, raw in current_batch:
+                                    try:
+                                        # Check if bookmark exists
+                                        if url not in existing_bookmarks:
+                                            # Create new bookmark using ORM
+                                            new_bookmark = Bookmark(**data)
+                                            session.add(new_bookmark)
+                                            stats['new_count'] += 1
+                                        else:
+                                            # Update existing bookmark using ORM
+                                            existing = existing_bookmarks[url]
+                                            for key, value in data.items():
+                                                setattr(existing, key, value)
+                                            stats['updated_count'] += 1
+                                            
+                                        # Add to processed IDs
+                                        processed_ids.add(url)
+                                        batch_success += 1
+                                    except Exception as e:
+                                        # Log individual bookmark errors
+                                        logger.error(f"Error processing bookmark {url}: {e}")
+                                        stats['errors'] += 1
+                                        batch_errors += 1
+                                        # Continue with next bookmark - don't break the whole batch
                                 
-                                # Check if a row was affected (inserted or updated)
-                                if result.rowcount > 0:
-                                    if url not in existing_bookmarks:
-                                        stats['new_count'] += 1
-                                    else:
-                                        stats['updated_count'] += 1
-                                
-                                processed_ids.add(url)
-                                batch_success += 1
-                                item_session.commit()
+                                # Commit the whole batch
+                                session.commit()
                                 
                             except Exception as e:
-                                # Rollback the individual transaction on error
-                                item_session.rollback()
-                                logger.error(f"Error processing bookmark {url}: {e}")
-                                stats['errors'] += 1
-                                batch_errors += 1
-                    
-                    # Update progress file with session_id
-                    stats['total_processed'] = i + 1
-                    progress_data = {
-                        'session_id': session_id,
-                        'last_processed_index': i + 1,
-                        'processed_ids': list(processed_ids),
-                        'stats': stats,
-                        'last_update': datetime.now().isoformat()
-                    }
-                    
-                    # Log batch results
-                    logger.info(f"Batch completed: {batch_success} successful, {batch_errors} failed")
-                    
-                    with open(progress_file, 'w') as f:
-                        json.dump(progress_data, f)
-                    
-                    # Clear batch
-                    current_batch = []
-                    
-                    # Force garbage collection
-                    import gc
-                    gc.collect()
-                    
-                    # Log progress with memory usage info
-                    progress_percent = ((i + 1) / total_bookmarks) * 100
-                    monitor_memory(f"after processing batch {batch_count}")
-                    logger.info(f"✅ [UPDATE-{session_id}] Progress: {progress_percent:.1f}% ({i + 1}/{total_bookmarks})")
-                    
-            except Exception as e:
-                logger.error(f"Error in batch processing: {e}")
-                stats['errors'] += 1
-                continue
+                                # Only rollback on batch-level exceptions
+                                session.rollback()
+                                logger.error(f"Error processing batch {batch_count}: {e}")
+                                logger.error(traceback.format_exc())
+                                stats['errors'] += len(current_batch)
+                                batch_errors += len(current_batch)
+                        
+                        # Update progress file
+                        stats['total_processed'] = i + 1
+                        progress_data = {
+                            'session_id': session_id,
+                            'last_processed_index': i + 1,
+                            'processed_ids': list(processed_ids),
+                            'stats': stats,
+                            'last_update': datetime.now().isoformat()
+                        }
+                        
+                        try:
+                            with open(progress_file, 'w') as f:
+                                json.dump(progress_data, f)
+                        except Exception as e:
+                            logger.error(f"Error updating progress file: {e}")
+                        
+                        # Log batch results
+                        logger.info(f"Batch {batch_count}: {batch_success} succeeded, {batch_errors} failed")
+                        
+                        # Clear batch
+                        current_batch = []
+                        
+                        # Force garbage collection to free memory
+                        import gc
+                        gc.collect()
+                except Exception as e:
+                    logger.error(f"Error in batch processing loop: {e}")
+                    logger.error(traceback.format_exc())
+                    stats['errors'] += 1
             
-        # Return progress information
-        is_complete = stats['total_processed'] >= total_bookmarks
-        logger.info(f"🏁 [UPDATE-{session_id}] Update {'completed' if is_complete else 'in progress'}: {stats['total_processed']}/{total_bookmarks} bookmarks processed")
-        monitor_memory("after database updates")
-        
-        result_data = {
-            'success': True,
-            'session_id': session_id,
-            'progress': {
-                'total': total_bookmarks,
-                'processed': stats['total_processed'],
-                'new': stats['new_count'],
-                'updated': stats['updated_count'],
+            # Calculate duration
+            duration_seconds = time.time() - start_time
+            
+            logger.info(f"Update completed in {duration_seconds:.2f} seconds")
+            logger.info(f"Stats: {stats['new_count']} new, {stats['updated_count']} updated, {stats['errors']} errors")
+            
+            # Rebuild vector store if requested
+            vector_rebuilt = False
+            rebuild_result = None
+            if rebuild_vector:
+                logger.info("Rebuilding vector store as requested")
+                rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id)
+                vector_rebuilt = rebuild_result.get('success', False)
+            
+            # Return success response
+            return {
+                'success': True,
+                'message': 'Database update completed',
+                'processed_this_session': stats['total_processed'],
+                'new_bookmarks': stats['new_count'],
+                'updated_bookmarks': stats['updated_count'],
                 'errors': stats['errors'],
-                'percent_complete': (stats['total_processed'] / total_bookmarks) * 100 if total_bookmarks > 0 else 0
-            },
-            'is_complete': is_complete,
-            'next_index': stats['total_processed'] if not is_complete else None,
-            'vector_store_updated': False,
-            'user_id': user_id
-        }
-        
-        if is_complete or stats['new_count'] > 0 or stats['updated_count'] > 0:
-            # Rebuild vector store if update is complete or if we added/updated any bookmarks
-            try:
-                # Use smaller batch size (15) for vector store rebuild to reduce memory usage
-                # Don't force full rebuild to allow incremental processing
-                logger.info(f"Performing memory-optimized vector store rebuild (completed={is_complete}, new={stats['new_count']}, updated={stats['updated_count']})")
-                rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15, force_full_rebuild=False)
-                result_data['vector_store_updated'] = True
-                result_data['vector_rebuild_result'] = rebuild_result
-                
-                if not rebuild_result["success"]:
-                    logger.warning(f"Vector rebuild warning: {rebuild_result.get('error', 'Unknown error')}")
-                else:
-                    logger.info("Vector store rebuild successful")
-            except Exception as vector_error:
-                error_msg = f"Vector store rebuild error: {str(vector_error)}"
-                logger.error(error_msg)
-                result_data['vector_rebuild_error'] = error_msg
-        
-        return result_data
-        
+                'duration_seconds': duration_seconds,
+                'session_id': session_id,
+                'vector_rebuilt': vector_rebuilt,
+                'rebuild_result': rebuild_result,
+                'is_complete': True,
+                'user_id': user_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating bookmarks: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                'success': False,
+                'error': str(e),
+                'traceback': traceback.format_exc(),
+                'session_id': session_id,
+                'user_id': user_id
+            }
+    
     except Exception as e:
-        error_msg = f"Database error: {str(e)}"
-        logger.error(error_msg)
-        
-        # Try to perform vector store rebuild even if there was an error in the main process
-        vector_rebuild_result = None
-        if stats['new_count'] > 0 or stats['updated_count'] > 0:
-            try:
-                logger.info(f"Attempting memory-optimized vector store rebuild despite errors (new={stats['new_count']}, updated={stats['updated_count']})")
-                vector_rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15, force_full_rebuild=False)
-                if not vector_rebuild_result["success"]:
-                    logger.warning(f"Vector rebuild warning: {vector_rebuild_result.get('error', 'Unknown error')}")
-                else:
-                    logger.info("Vector store rebuild successful despite errors in main process")
-            except Exception as vector_error:
-                logger.error(f"Vector store rebuild error: {str(vector_error)}")
-        
+        logger.error(f"Unhandled exception in final_update_bookmarks: {e}")
+        logger.error(traceback.format_exc())
         return {
             'success': False,
-            'error': error_msg,
+            'error': str(e),
+            'traceback': traceback.format_exc(),
             'session_id': session_id,
-            'progress': {
-                'last_index': start_index,
-                'stats': stats
-            },
-            'user_id': user_id,
-            'vector_rebuild_result': vector_rebuild_result
+            'user_id': user_id
         }
 
 def test_resumable_update():
@@ -976,24 +929,142 @@ def test_resumable_update():
     logger.info(f"Second run result: {result2}")
     
 def get_memory_usage():
-    """Get current memory usage of the process in MB"""
+    """
+    Get current memory usage of the process in MB with improved platform support.
+    Works on Windows, Linux, and Mac.
+    
+    Returns:
+        str: Memory usage in MB with platform info
+    """
     try:
-        # Fallback to ps command for Linux/Mac systems
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024  # Convert to MB
+        platform_name = psutil.POSIX and "POSIX" or "Windows"
+        return f"{memory_mb:.1f}MB ({platform_name})"
+    except ImportError:
+        # Fallback if psutil is not available
         try:
-            memory_kb = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
-            memory_mb = float(memory_kb) / 1024
-            return f"{memory_mb:.1f}MB"
+            if os.name == 'posix':
+                # Linux/Mac
+                memory_kb = os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()
+                memory_mb = float(memory_kb) / 1024
+                return f"{memory_mb:.1f}MB (POSIX-fallback)"
+            elif os.name == 'nt':
+                # Windows
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                process_handle = kernel32.OpenProcess(0x1000, False, os.getpid())
+                memory_info = ctypes.c_size_t()
+                kernel32.GetProcessMemoryInfo(process_handle, ctypes.byref(memory_info), ctypes.sizeof(memory_info))
+                kernel32.CloseHandle(process_handle)
+                memory_mb = memory_info.value / 1024 / 1024
+                return f"{memory_mb:.1f}MB (Windows-fallback)"
+            else:
+                return "Unknown platform"
         except:
-            return "Unknown"
+            return "Unable to determine memory usage"
     except Exception as e:
         logger.error(f"Error getting memory usage: {e}")
-        return "Unknown"
+        return f"Error ({str(e)})"
 
 def monitor_memory(label=""):
-    """Log current memory usage with a label"""
-    memory = get_memory_usage()
-    logger.info(f"🧠 Memory usage {label}: {memory}")
-    return memory
+    """
+    Log current memory usage with a label and memory increase from last check
+    
+    Args:
+        label (str): Label to identify memory checkpoint
+        
+    Returns:
+        str: Memory usage information
+    """
+    global _last_memory_usage
+    
+    try:
+        current_memory = get_memory_usage()
+        
+        # Extract numeric value for comparison
+        try:
+            current_value = float(current_memory.split('MB')[0])
+            if '_last_memory_usage' in globals():
+                last_value = float(_last_memory_usage.split('MB')[0])
+                diff = current_value - last_value
+                diff_text = f" ({'+' if diff >= 0 else ''}{diff:.1f}MB from last check)"
+            else:
+                diff_text = ""
+                
+            _last_memory_usage = current_memory
+            memory_text = f"{current_memory}{diff_text}"
+        except:
+            memory_text = current_memory
+            
+        logger.info(f"🧠 Memory usage {label}: {memory_text}")
+        
+        # Report warning if memory usage is high (over 1GB)
+        if 'MB' in current_memory:
+            try:
+                mb_value = float(current_memory.split('MB')[0])
+                if mb_value > 1000:
+                    logger.warning(f"⚠️ High memory usage detected: {current_memory}")
+            except:
+                pass
+                
+        return memory_text
+        
+    except Exception as e:
+        logger.error(f"Error in monitor_memory: {e}")
+        return "Memory monitoring error"
+
+def find_file_in_possible_paths(filename, user_id=None, additional_paths=None):
+    """
+    Find a file in multiple possible paths to handle environment inconsistencies.
+    
+    Args:
+        filename (str): Name of the file to find
+        user_id (int, optional): User ID for multi-user support
+        additional_paths (list, optional): Additional paths to search
+        
+    Returns:
+        str or None: Full path to the file if found, None otherwise
+    """
+    # Base paths to search
+    base_paths = [
+        BASE_DIR,
+        os.path.dirname(BASE_DIR),
+        "/app",
+        os.getcwd(),
+        "."
+    ]
+    
+    # Additional path components based on user_id
+    user_dir = f"user_{user_id}" if user_id else ""
+    sub_paths = [
+        os.path.join("database", user_dir),
+        os.path.join("database"),
+        user_dir
+    ]
+    
+    # Build a list of all possible paths
+    search_paths = []
+    for base in base_paths:
+        for sub in sub_paths:
+            path = os.path.join(base, sub, filename)
+            search_paths.append(path)
+    
+    # Add any additional custom paths
+    if additional_paths:
+        search_paths.extend(additional_paths)
+    
+    # Search for the file in all paths
+    for path in search_paths:
+        if os.path.exists(path):
+            logger.info(f"Found file {filename} at path: {path}")
+            return path
+            
+    # File not found
+    logger.warning(f"Could not find file {filename} in any of the search paths")
+    return None
 
 if __name__ == "__main__":
     import argparse

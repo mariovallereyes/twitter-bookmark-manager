@@ -915,49 +915,52 @@
         document.getElementById('progress-steps').appendChild(successDiv);
     }
 
-    async function handleUploadDirect() {
+    function handleUploadDirect() {
+        // Show progress steps at the start
+        showProgressSteps();
+        updateProgressUI('step-upload', 'Uploading file...', 'processing');
+        
+        // Get checkboxes values for advanced options
+        const rebuildVector = document.getElementById('rebuild-vector').checked;
+        const resetProgress = document.getElementById('reset-progress').checked;
+        
         const fileInput = document.getElementById('json-file');
+        if (!fileInput.files.length) {
+            showError('Please select a file to upload');
+            return;
+        }
+        
         const file = fileInput.files[0];
-        if (!file) return;
-
+        if (!file.name.endsWith('.json')) {
+            showError('Please select a JSON file');
+            return;
+        }
+        
+        // Create FormData object to send the file
         const formData = new FormData();
         formData.append('file', file);
-
-        // Show progress steps
-        document.getElementById('progress-steps').style.display = 'block';
         
-        // Get the values of the checkboxes
-        const rebuildVector = document.getElementById('rebuild-vector') ? 
-            document.getElementById('rebuild-vector').checked : false;
-        const resetProgress = document.getElementById('reset-progress') ? 
-            document.getElementById('reset-progress').checked : false;
-
-        try {
-            // Update UI for upload step
-            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '🔄';
-            
-            // Upload file first
-            const uploadResponse = await fetch('/upload-bookmarks', {
-                method: 'POST',
-                body: formData
-            });
-
-            const uploadResult = await uploadResponse.json();
-            
-            if (!uploadResponse.ok) {
-                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
-                throw new Error(uploadResult.error || 'File upload failed');
+        // Step 1: Upload the file
+        fetch('/upload-bookmarks', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => {
+                    throw new Error(`Upload failed: ${err.error || response.statusText}`);
+                });
             }
+            return response.json();
+        })
+        .then(uploadResult => {
+            // File uploaded successfully
+            updateProgressUI('step-upload', 'success', `File uploaded successfully (${uploadResult.bookmarks_count || 0} bookmarks)`);
+            updateProgressUI('step-validate', 'success', 'JSON validated');
+            updateProgressUI('step-find-new', 'processing', 'Starting bookmark processing...');
             
-            // Update UI for successful upload
-            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
-            document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
-            
-            // Start the background processing 
-            document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '🔄';
-            
-            // Use the async endpoint for processing 
-            const processResponse = await fetch('/async-update-database', {
+            // Step 2: Process the bookmarks using async endpoint
+            return fetch('/async-update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -967,74 +970,191 @@
                     reset_progress: resetProgress
                 })
             });
-
-            const processResult = await processResponse.json();
-            
-            if (!processResponse.ok) {
-                throw new Error(processResult.error || 'Process initialization failed');
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => {
+                    throw new Error(`Processing initialization failed: ${err.error || response.statusText}`);
+                });
             }
+            return response.json();
+        })
+        .then(asyncResult => {
+            // Processing started in background
+            console.log('Background processing started:', asyncResult);
+            updateProgressUI('step-find-new', 'processing', 'Processing started in background');
+            updateProgressUI('step-init-ai', 'processing', 'Initializing AI models...');
             
             // Start polling for status
-            const sessionId = processResult.session_id;
-            pollUpdateStatus(sessionId);
-            
-        } catch (error) {
-            console.error('Error:', error);
+            pollUpdateStatus(asyncResult.session_id);
+        })
+        .catch(error => {
+            console.error('Error during upload process:', error);
             showError(error.message);
-        }
+        });
     }
     
-    // Function to poll for update status
-    async function pollUpdateStatus(sessionId) {
-        try {
-            const response = await fetch(`/update-status?session_id=${sessionId}`);
-            const result = await response.json();
-            
-            if (response.ok) {
-                // Update progress steps based on status
-                const progress = result.progress || {};
-                
-                // Update steps UI
-                document.getElementById('step-find-new').querySelector('span:last-child').textContent = 
-                    `Finding new bookmarks... (${progress.total_processed || 0} processed, ${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
-                
-                // Check status for next steps
-                if (result.status === 'running') {
-                    // Processing in progress
-                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '🔄';
-                    document.getElementById('step-sql').querySelector('.progress-icon').textContent = '🔄';
-                    
-                    // Continue polling
-                    setTimeout(() => pollUpdateStatus(sessionId), 2000);
-                } else if (result.status === 'completed') {
-                    // Processing completed successfully
-                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '✅';
-                    document.getElementById('step-sql').querySelector('.progress-icon').textContent = '✅';
-                    document.getElementById('step-categories').querySelector('.progress-icon').textContent = '✅';
-                    
-                    // Check if vector was rebuilt
-                    if (result.rebuild_result && result.rebuild_result.success) {
-                        document.getElementById('step-vectors').querySelector('.progress-icon').textContent = '✅';
-                        document.getElementById('step-sync').querySelector('.progress-icon').textContent = '✅';
+    function pollUpdateStatus(sessionId) {
+        // Poll the status endpoint every 3 seconds
+        let pollCount = 0;
+        let maxPolls = 120; // 6 minutes max polling time
+        
+        function checkStatus() {
+            fetch(`/update-status?session_id=${sessionId}`)
+            .then(response => {
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        // Status not found yet, may still be initializing
+                        if (pollCount < 5) { // Still early, keep trying
+                            return { status: 'initializing' };
+                        } else {
+                            throw new Error('Status not found after multiple attempts');
+                        }
                     }
-                    
-                    // Show success message
-                    const details = `Processed ${progress.total_processed || 0} bookmarks (${progress.new_count || 0} new, ${progress.updated_count || 0} updated)`;
-                    showSuccess("Processing completed successfully!", details);
-                } else if (result.status === 'error') {
-                    // Processing encountered an error
-                    document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
-                    showError("Processing failed", result.message || "Unknown error during processing");
+                    return response.json().then(err => {
+                        throw new Error(`Status check failed: ${err.error || response.statusText}`);
+                    });
                 }
-            } else {
-                throw new Error(result.message || "Error getting status update");
-            }
-        } catch (error) {
-            console.error('Status polling error:', error);
-            
-            // Continue polling even if there was an error
-            setTimeout(() => pollUpdateStatus(sessionId), 5000);
+                return response.json();
+            })
+            .then(statusData => {
+                pollCount++;
+                console.log('Status update:', statusData);
+                
+                // Update UI based on status
+                if (statusData.status === 'initializing' || !statusData.status) {
+                    // Still initializing, continue polling
+                    updateProgressUI('step-find-new', 'processing', 'Initializing processing...');
+                    
+                    if (pollCount < maxPolls) {
+                        setTimeout(checkStatus, 3000);
+                    } else {
+                        showError('Processing timed out', 'No status updates after 6 minutes');
+                    }
+                } 
+                else if (statusData.status === 'processing' || statusData.success === true) {
+                    // Update progress information
+                    const progress = statusData.progress || {};
+                    const totalProcessed = progress.total_processed || 0;
+                    const newCount = progress.new_count || 0;
+                    const updatedCount = progress.updated_count || 0;
+                    const errors = progress.errors || 0;
+                    
+                    updateProgressUI('step-find-new', 'processing', `Finding new bookmarks (${totalProcessed} processed, ${newCount} new, ${updatedCount} updated)`);
+                    
+                    // If we have a next_index, continue polling
+                    if (!statusData.is_complete) {
+                        if (pollCount < maxPolls) {
+                            setTimeout(checkStatus, 3000);
+                        } else {
+                            showError('Processing timed out', 'The process is taking too long. Check logs for details.');
+                        }
+                    } else {
+                        // Process completed successfully
+                        updateProgressUI('step-find-new', 'success', `Processed ${totalProcessed} bookmarks (${newCount} new, ${updatedCount} updated)`);
+                        updateProgressUI('step-sql', 'success', 'Database updated successfully');
+                        updateProgressUI('step-categories', 'success', 'Categories processed');
+                        
+                        // Check if vector was rebuilt
+                        if (statusData.vector_rebuilt || statusData.vector_store_updated) {
+                            updateProgressUI('step-vectors', 'success', 'Vector store rebuilt successfully');
+                            updateProgressUI('step-sync', 'success', 'Database sync verified');
+                            
+                            // Show success message
+                            showSuccess("Processing completed successfully!", 
+                                `Processed ${totalProcessed} bookmarks (${newCount} new, ${updatedCount} updated) and rebuilt vector store.`);
+                        } else {
+                            // If vector rebuild was requested but not completed
+                            if (document.getElementById('rebuild-vector').checked) {
+                                updateProgressUI('step-vectors', 'processing', 'Vector store rebuild pending...');
+                                // Trigger vector rebuild
+                                rebuildVectorStore(sessionId);
+                            } else {
+                                updateProgressUI('step-vectors', 'warning', 'Vector store not updated');
+                                updateProgressUI('step-sync', 'warning', 'Database sync not verified');
+                                
+                                showSuccess("Processing completed successfully!", 
+                                    `Processed ${totalProcessed} bookmarks (${newCount} new, ${updatedCount} updated). Vector store was not updated.`);
+                            }
+                        }
+                    }
+                }
+                else if (statusData.status === 'stalled') {
+                    // Process stalled
+                    updateProgressUI('step-find-new', 'error', 'Processing stalled');
+                    showError('Processing stalled', statusData.error || 'No recent updates from the server');
+                }
+                else if (statusData.status === 'error' || statusData.success === false) {
+                    // Process failed
+                    updateProgressUI('step-find-new', 'error', 'Processing failed');
+                    showError(statusData.error || 'Processing failed');
+                }
+                else {
+                    // Unknown status
+                    console.warn('Unknown status:', statusData);
+                    if (pollCount < maxPolls) {
+                        setTimeout(checkStatus, 3000);
+                    } else {
+                        showError('Processing timed out', 'The process is taking too long. Check logs for details.');
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error checking status:', error);
+                
+                // Show error but continue polling on network issues
+                if (pollCount < 10 && error.message.includes('network')) {
+                    setTimeout(checkStatus, 5000); // Wait longer on network errors
+                } else if (pollCount < maxPolls) {
+                    setTimeout(checkStatus, 3000);
+                } else {
+                    showError('Status check failed', error.message);
+                }
+            });
         }
+        
+        // Start checking
+        setTimeout(checkStatus, 2000);
+    }
+
+    function rebuildVectorStore(sessionId) {
+        // Trigger vector store rebuild
+        updateProgressUI('step-vectors', 'processing', 'Rebuilding vector store...');
+        
+        fetch('/update-database', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_id: sessionId,
+                rebuild_vector: true,
+                start_index: 0
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => {
+                    throw new Error(`Vector rebuild failed: ${err.error || response.statusText}`);
+                });
+            }
+            return response.json();
+        })
+        .then(result => {
+            if (result.success) {
+                updateProgressUI('step-vectors', 'success', 'Vector store rebuilt successfully');
+                updateProgressUI('step-sync', 'success', 'Database sync verified');
+                showSuccess('Processing completed', 'Bookmarks processed and vector store rebuilt successfully.');
+            } else {
+                updateProgressUI('step-vectors', 'error', 'Vector store rebuild failed');
+                showError('Vector rebuild failed', result.error || 'Unknown error');
+            }
+        })
+        .catch(error => {
+            console.error('Error rebuilding vector store:', error);
+            updateProgressUI('step-vectors', 'error', 'Vector store rebuild failed');
+            showError('Vector rebuild failed', error.message);
+        });
     }
 
     // Cleanup on modal close
