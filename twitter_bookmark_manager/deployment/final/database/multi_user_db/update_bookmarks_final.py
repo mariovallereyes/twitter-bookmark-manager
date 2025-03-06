@@ -741,40 +741,34 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         # Use a new session for each bookmark to isolate transactions
                         with get_db_session() as item_session:
                             try:
-                                if url not in existing_bookmarks:
-                                    # Use raw SQL to insert new bookmark
-                                    insert_query = """
-                                        INSERT INTO bookmarks 
-                                        (id, raw_data, user_id)
-                                        VALUES (:id, :raw_data, :user_id)
-                                    """
-                                    # Convert Python data types to SQL-compatible types
-                                    insert_params = {
-                                        'id': data.get('id'),
-                                        'raw_data': json.dumps(raw),
-                                        'user_id': data.get('user_id')
-                                    }
-                                    item_session.execute(text(insert_query), insert_params)
-                                    stats['new_count'] += 1
-                                else:
-                                    # Use raw SQL to update existing bookmark
-                                    existing = existing_bookmarks[url]
-                                    update_query = """
-                                        UPDATE bookmarks
-                                        SET raw_data = :raw_data
-                                        WHERE id = :id
-                                    """
-                                    update_params = {
-                                        'id': existing.id,
-                                        'raw_data': json.dumps(raw)
-                                    }
-                                    item_session.execute(text(update_query), update_params)
-                                    stats['updated_count'] += 1
+                                # Use PostgreSQL's UPSERT to handle both new and existing records efficiently
+                                upsert_query = """
+                                    INSERT INTO bookmarks 
+                                    (id, raw_data, user_id)
+                                    VALUES (:id, :raw_data, :user_id)
+                                    ON CONFLICT (id) 
+                                    DO UPDATE SET 
+                                        raw_data = EXCLUDED.raw_data
+                                        WHERE bookmarks.user_id = :user_id
+                                """
+                                # Convert Python data types to SQL-compatible types
+                                upsert_params = {
+                                    'id': data.get('id'),
+                                    'raw_data': json.dumps(raw),
+                                    'user_id': data.get('user_id')
+                                }
+                                result = item_session.execute(text(upsert_query), upsert_params)
                                 
-                                # Commit the individual transaction
-                                item_session.commit()
+                                # Check if a row was affected (inserted or updated)
+                                if result.rowcount > 0:
+                                    if url not in existing_bookmarks:
+                                        stats['new_count'] += 1
+                                    else:
+                                        stats['updated_count'] += 1
+                                
                                 processed_ids.add(url)
                                 batch_success += 1
+                                item_session.commit()
                                 
                             except Exception as e:
                                 # Rollback the individual transaction on error
