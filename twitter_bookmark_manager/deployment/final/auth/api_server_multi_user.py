@@ -27,6 +27,11 @@ from sqlalchemy import text, create_engine
 # Import user context features
 from auth.user_context_final import UserContext, with_user_context
 
+# Set up base directory using environment variables or relative paths
+BASE_DIR = os.environ.get('APP_BASE_DIR', '/app')
+DATABASE_DIR = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database'))
+MEDIA_DIR = os.environ.get('MEDIA_DIR', os.path.join(BASE_DIR, 'media'))
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('api_server_multi_user')
