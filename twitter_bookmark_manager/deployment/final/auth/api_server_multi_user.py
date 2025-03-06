@@ -303,6 +303,7 @@ def upload_bookmarks():
                 os.makedirs(dir_path, exist_ok=True)
                 if os.path.exists(dir_path):
                     database_dir = dir_path
+                    logger.info(f"Using directory: {dir_path}")
                     break
             except Exception as e:
                 logger.warning(f"Could not create directory {dir_path}: {e}")
@@ -319,64 +320,81 @@ def upload_bookmarks():
         if os.path.exists(bookmarks_file):
             try:
                 shutil.copy2(bookmarks_file, backup_file)
-                logger.info(f"Created backup of existing bookmarks at {backup_file}")
+                logger.info(f"Created backup at {backup_file}")
             except Exception as e:
                 logger.warning(f"Could not create backup: {e}")
         
         # Save the uploaded file
-        file.save(bookmarks_file)
-        file_size = os.path.getsize(bookmarks_file)
-        logger.info(f"Saved uploaded file ({file_size} bytes) to {bookmarks_file}")
-        
-        # Validate JSON format
         try:
-            with open(bookmarks_file, 'r', encoding='utf-8') as f:
-                json_data = json.load(f)
-                
-            # Check if it's a valid bookmarks structure (either array or object with bookmarks key)
-            if isinstance(json_data, list):
-                bookmark_count = len(json_data)
-            elif isinstance(json_data, dict) and 'bookmarks' in json_data:
-                bookmark_count = len(json_data['bookmarks'])
-            else:
-                logger.error("Invalid JSON format - not a bookmarks array or object")
-                return jsonify({'error': 'Invalid bookmarks format'}), 400
-                
-            logger.info(f"Validated JSON with {bookmark_count} bookmarks")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON file: {e}")
-            return jsonify({
-                'error': 'Invalid JSON file', 
-                'details': str(e)
-            }), 400
-        
-        # Reset progress file to ensure fresh start
-        progress_file = os.path.join(database_dir, 'update_progress.json')
-        if os.path.exists(progress_file):
+            # Save with a temporary name first to prevent partial writes
+            temp_path = os.path.join(database_dir, f'temp_{int(time.time())}.json')
+            file.save(temp_path)
+            
+            # Verify it's valid JSON and has the expected structure
             try:
-                # Create a backup of the progress file
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                # Check for bookmarks array
+                if isinstance(data, dict) and 'bookmarks' in data:
+                    bookmarks = data['bookmarks']
+                    bookmarks_count = len(bookmarks)
+                    logger.info(f"File contains {bookmarks_count} bookmarks")
+                elif isinstance(data, list):
+                    bookmarks_count = len(data)
+                    logger.info(f"File contains {bookmarks_count} bookmarks (array format)")
+                else:
+                    logger.error("Invalid JSON structure: no bookmarks array found")
+                    return jsonify({'error': 'Invalid JSON structure: no bookmarks array found'}), 400
+                    
+                # Move to final location
+                os.replace(temp_path, bookmarks_file)
+                logger.info(f"File saved to {bookmarks_file}")
+                
+                # Reset update progress to ensure clean start
+                progress_file = os.path.join(database_dir, 'update_progress.json')
                 progress_backup = os.path.join(database_dir, f'update_progress_backup_{int(time.time())}.json')
-                shutil.copy2(progress_file, progress_backup)
-                # Remove the original progress file
-                os.remove(progress_file)
-                logger.info("Reset progress file for fresh start")
-            except Exception as e:
-                logger.warning(f"Could not reset progress file: {e}")
-        
-        # Return success with file details
-        return jsonify({
-            'success': True,
-            'message': 'File uploaded successfully',
-            'filename': file.filename,
-            'bookmarks_count': bookmark_count,
-            'file_path': bookmarks_file,
-            'user_id': user_id
-        })
-        
+                
+                # Backup existing progress if needed
+                if os.path.exists(progress_file):
+                    try:
+                        shutil.copy2(progress_file, progress_backup)
+                        logger.info(f"Backed up previous progress to {progress_backup}")
+                    except Exception as e:
+                        logger.warning(f"Could not backup progress file: {e}")
+                
+                # Create new progress file
+                with open(progress_file, 'w') as f:
+                    progress_data = {
+                        'session_id': str(uuid.uuid4())[:8],
+                        'last_processed_index': 0,
+                        'processed_ids': [],
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    json.dump(progress_data, f)
+                
+                return jsonify({
+                    'success': True, 
+                    'message': f'File uploaded successfully. Found {bookmarks_count} bookmarks.',
+                    'bookmark_count': bookmarks_count
+                })
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON file: {e}")
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return jsonify({'error': f'Invalid JSON file: {e}'}), 400
+                
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Error saving file: {e}'}), 500
+            
     except Exception as e:
-        logger.error(f"Error uploading file: {e}")
+        logger.error(f"Unexpected error in upload: {e}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Server error: {e}'}), 500
 
 # Update database endpoint
 @app.route('/update-database', methods=['POST', 'GET'])

@@ -722,7 +722,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                 logger.info("Proceeding with empty existing bookmarks")
             
             # Process bookmarks in smaller batches
-            BATCH_SIZE = 5  # Even smaller batch size to prevent connection timeout
+            BATCH_SIZE = 10  # Small batch size for better error handling 
             current_batch = []
             batch_count = 0
             
@@ -765,108 +765,71 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         batch_success = 0
                         batch_errors = 0
                         
-                        # Process batch with retry logic
-                        max_batch_retries = 3
-                        batch_retry = 0
-                        batch_processed = False
-                        
-                        while not batch_processed and batch_retry < max_batch_retries:
+                        # Process entire batch in a single transaction
+                        with get_db_session() as session:
                             try:
-                                # Process entire batch in a single transaction
-                                with get_db_session() as session:
-                                    # Process each item in batch
-                                    for url, data, raw in current_batch:
-                                        try:
-                                            # Check if bookmark exists
-                                            existing = None
-                                            if url in existing_bookmarks:
-                                                existing = existing_bookmarks[url]
-                                            else:
-                                                # Try to find by tweet_id for more robust duplicate detection
-                                                tweet_id = data.get('tweet_id')
-                                                if tweet_id:
-                                                    query = session.query(Bookmark)
-                                                    if user_id:
-                                                        query = query.filter(Bookmark.user_id == user_id)
-                                                    query = query.filter(Bookmark.tweet_id == tweet_id)
-                                                    existing = query.first()
+                                # Process each item in batch
+                                for url, data, raw in current_batch:
+                                    try:
+                                        # Check if bookmark exists
+                                        if url not in existing_bookmarks:
+                                            # Create new bookmark using ORM
+                                            new_bookmark = Bookmark(**data)
+                                            session.add(new_bookmark)
+                                            stats['new_count'] += 1
+                                        else:
+                                            # Update existing bookmark using ORM
+                                            existing = existing_bookmarks[url]
+                                            for key, value in data.items():
+                                                setattr(existing, key, value)
+                                            stats['updated_count'] += 1
                                             
-                                            if not existing:
-                                                # Create new bookmark using ORM
-                                                new_bookmark = Bookmark(**data)
-                                                session.add(new_bookmark)
-                                                stats['new_count'] += 1
-                                            else:
-                                                # Update existing bookmark using ORM
-                                                for key, value in data.items():
-                                                    setattr(existing, key, value)
-                                                stats['updated_count'] += 1
-                                                
-                                            # Add to processed IDs
-                                            processed_ids.add(url)
-                                            batch_success += 1
-                                        except Exception as e:
-                                            # Log individual bookmark errors
-                                            logger.error(f"Error processing bookmark {url}: {e}")
-                                            stats['errors'] += 1
-                                            batch_errors += 1
-                                            # Continue with next bookmark - don't break the whole batch
-                                
-                                # If we got here, the transaction was committed successfully
-                                batch_processed = True
-                                logger.info(f"Batch {batch_count} processed successfully: {batch_success} successes, {batch_errors} errors")
-                                
-                            except Exception as batch_error:
-                                batch_retry += 1
-                                logger.error(f"Batch {batch_count} failed (attempt {batch_retry}/{max_batch_retries}): {batch_error}")
-                                
-                                if batch_retry >= max_batch_retries:
-                                    logger.error(f"Giving up on batch {batch_count} after {max_batch_retries} retries")
-                                    # Add these to processed IDs to avoid retrying later
-                                    for url, _, _ in current_batch:
+                                        # Add to processed IDs
                                         processed_ids.add(url)
-                                    stats['errors'] += len(current_batch)
-                                else:
-                                    # Wait a bit before retrying
-                                    time.sleep(1 * batch_retry)  # Exponential backoff
+                                        batch_success += 1
+                                    except Exception as e:
+                                        # Log individual bookmark errors
+                                        logger.error(f"Error processing bookmark {url}: {e}")
+                                        stats['errors'] += 1
+                                        batch_errors += 1
+                                        # Continue with next bookmark - don't break the whole batch
+                                
+                                # Commit the whole batch
+                                session.commit()
+                                
+                            except Exception as e:
+                                # Only rollback on batch-level exceptions
+                                session.rollback()
+                                logger.error(f"Error processing batch {batch_count}: {e}")
+                                logger.error(traceback.format_exc())
+                                stats['errors'] += len(current_batch)
+                                batch_errors += len(current_batch)
                         
-                        # Update progress
-                        stats['total_processed'] = i + 1 - start_index
-                        
-                        # Calculate percentage for progress tracking
-                        if total_bookmarks > 0:
-                            percent_complete = min(100, ((i + 1) / total_bookmarks) * 100)
-                        else:
-                            percent_complete = 100
-                            
-                        # Update progress file with counts and processed IDs
-                        current_progress.update({
+                        # Update progress file
+                        stats['total_processed'] = i + 1
+                        progress_data = {
                             'session_id': session_id,
-                            'last_index': i,
-                            'total_processed': stats['total_processed'],
-                            'new_count': stats['new_count'],
-                            'updated_count': stats['updated_count'],
-                            'errors': stats['errors'],
-                            'percent_complete': percent_complete,
-                            'processed_ids': list(processed_ids)
-                        })
+                            'last_processed_index': i + 1,
+                            'processed_ids': list(processed_ids),
+                            'stats': stats,
+                            'last_update': datetime.now().isoformat()
+                        }
                         
-                        # Save progress to disk
-                        with open(progress_file, 'w') as f:
-                            json.dump(current_progress, f)
+                        try:
+                            with open(progress_file, 'w') as f:
+                                json.dump(progress_data, f)
+                        except Exception as e:
+                            logger.error(f"Error updating progress file: {e}")
                         
-                        # Clear batch for next set
+                        # Log batch results
+                        logger.info(f"Batch {batch_count}: {batch_success} succeeded, {batch_errors} failed")
+                        
+                        # Clear batch
                         current_batch = []
                         
-                        # Force garbage collection
+                        # Force garbage collection to free memory
                         import gc
                         gc.collect()
-                        
-                        # Add a small delay between batches to prevent overwhelming the DB
-                        time.sleep(0.2)
-                        
-                        # Log progress
-                        logger.info(f"Progress: {percent_complete:.1f}% complete, {stats['total_processed']} processed, {stats['new_count']} new, {stats['updated_count']} updated, {stats['errors']} errors")
                 except Exception as e:
                     logger.error(f"Error in batch processing loop: {e}")
                     logger.error(traceback.format_exc())
