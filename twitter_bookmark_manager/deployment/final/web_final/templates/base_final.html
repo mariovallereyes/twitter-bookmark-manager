@@ -305,21 +305,23 @@
 
             <!-- Categories row (below main buttons) -->
             <div class="navbar-section mb-4">
-                <!-- Categories display - PythonAnywhere specific rendering -->
+                <!-- Categories display -->
                 <div id="base-categories" class="mt-3 flex flex-wrap gap-1.5">
                     {% for category in categories %}
                         {% if category is mapping %}
-                            <a href="/category/{{ category.name }}"
+                            <button 
                                 data-category="{{ category.name }}"
-                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}">
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}"
+                                onclick="toggleCategory('{{ category.name }}')">
                                 {{ category.name }} {% if category.count %}({{ category.count }}){% endif %}
-                            </a>
+                            </button>
                         {% else %}
-                            <a href="/category/{{ category }}"
+                            <button 
                                 data-category="{{ category }}"
-                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}">
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}"
+                                onclick="toggleCategory('{{ category }}')">
                                 {{ category }}
-                            </a>
+                            </button>
                         {% endif %}
                     {% endfor %}
                 </div>
@@ -358,41 +360,166 @@
                 </div>
             </div>
 
-            <!-- Upload Modal -->
-            <div class="modal fade" id="uploadModal" tabindex="-1" aria-labelledby="uploadModalLabel" aria-hidden="true">
-                <div class="modal-dialog">
-                    <div class="modal-content">
-                        <div class="modal-header bg-primary text-white">
-                            <h5 class="modal-title" id="uploadModalLabel">Upload Bookmarks JSON</h5>
-                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                        </div>
-                        <div class="modal-body">
-                            <form id="uploadForm" enctype="multipart/form-data">
-                                <div class="mb-3">
-                                    <label for="fileInput" class="form-label">Select Twitter Bookmarks JSON File</label>
-                                    <input type="file" class="form-control" id="fileInput" name="file" accept=".json">
-                                    <small class="form-text text-muted">
-                                        Upload your Twitter bookmarks JSON file to index it in the database.
-                                    </small>
+            <!-- New Upload Modal -->
+            <div x-show="uploadModal" 
+                 class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center"
+                 @click.away="uploadModal = false"
+                 x-cloak>
+                <div class="bg-[#1a1a1a] p-6 rounded-lg w-96">
+                    <h3 class="text-lg font-medium mb-4">Update Bookmark Database</h3>
+                    
+                    <!-- Upload Form -->
+                    <form id="upload-form" 
+                          class="space-y-4" 
+                          @submit.prevent="handleUpload"
+                          enctype="multipart/form-data">
+                        <!-- File Input Container -->
+                        <div class="border-2 border-dashed border-gray-700 rounded-lg p-4 text-center">
+                            <input type="file" 
+                                   id="json-file" 
+                                   accept=".json"
+                                   class="hidden"
+                                   onchange="handleFileSelectDirect(this)">
+                            
+                            <div class="space-y-2">
+                                <svg class="mx-auto h-8 w-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                                </svg>
+                                
+                                <div class="text-sm text-gray-400">
+                                    <label for="json-file" class="cursor-pointer text-blue-400 hover:text-blue-300">
+                                        Choose a file
+                                    </label>
+                                    or drag it here
                                 </div>
-                                <div class="alert alert-info mb-3">
-                                    <strong>Note:</strong> To export your Twitter bookmarks:
-                                    <ol class="mb-0 ps-3 mt-1">
-                                        <li>Go to your Twitter account settings</li>
-                                        <li>Select "Download an archive of your data"</li>
-                                        <li>Extract the ZIP file when received</li>
-                                        <li>Upload the bookmarks.json file from the data folder</li>
-                                    </ol>
+                                
+                                <div id="file-name" class="text-sm text-blue-400"></div>
+                            </div>
+                        </div>
+
+                        <!-- Progress Section -->
+                        <div id="progress-steps" class="mt-4 space-y-2" style="display: none;">
+                            <div id="step-upload" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Uploading file...</span>
+                            </div>
+                            <div id="step-validate" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Validating JSON...</span>
+                            </div>
+                            <div id="step-find-new" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Finding new bookmarks...</span>
+                            </div>
+                            <div id="step-init-ai" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Initializing AI models...</span>
+                            </div>
+                            <div id="step-dedup" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Checking for duplicates...</span>
+                            </div>
+                            <div id="step-sql" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Updating SQL database...</span>
+                            </div>
+                            <div id="step-categories" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Processing categories...</span>
+                            </div>
+                            <div id="step-vectors" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Rebuilding vector store...</span>
+                            </div>
+                            <div id="step-sync" class="flex items-center gap-2">
+                                <span class="progress-icon">⭕</span>
+                                <span class="text-sm text-gray-400">Verifying database sync...</span>
+                            </div>
+                        </div>
+
+                        <!-- Upload Button -->
+                        <div id="upload-actions" class="flex justify-end gap-3 mt-4" style="display: none;">
+                            <button 
+                                type="button"
+                                onclick="handleUploadDirect()"
+                                class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">
+                                Upload and Update Database
+                            </button>
+                        </div>
+
+                        <!-- Advanced Options -->
+                        <div id="advanced-options" class="mt-4 border-t border-gray-700 pt-4">
+                            <details class="text-sm">
+                                <summary class="cursor-pointer text-gray-300 hover:text-white">Advanced Options</summary>
+                                <div class="mt-2 text-gray-400">
+                                    <div class="mt-3 flex flex-col gap-3">
+                                        <div>
+                                            <button 
+                                                type="button"
+                                                onclick="rebuildVectorStore()"
+                                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+                                                Rebuild Vector Store
+                                            </button>
+                                            <p class="text-xs text-gray-400 mt-1">
+                                                Use this if search results are incorrect or missing. This rebuilds the search index from the database.
+                                            </p>
+                                        </div>
+                                        <div>
+                                            <button 
+                                                type="button"
+                                                onclick="resetUpdateProgress()"
+                                                class="px-4 py-2 bg-yellow-600 text-white rounded-lg text-sm hover:bg-yellow-700">
+                                                Reset Update Progress
+                                            </button>
+                                            <p class="text-xs text-gray-400 mt-1">
+                                                Use this if database updates are stuck in a loop or not completing.
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div id="uploadStatus" class="alert alert-danger d-none"></div>
-                            </form>
+                            </details>
                         </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                            <button type="button" class="btn btn-warning" id="directRebuildBtn">Direct Rebuild Vectors</button>
-                            <button type="button" class="btn btn-primary" id="uploadButton">Upload and Process</button>
+
+                        <!-- Progress Messages -->
+                        <div x-show="progressSteps.length > 0" class="mt-4 p-4 bg-[#1a1a1a] rounded-lg">
+                            <template x-for="(step, index) in progressSteps" :key="index">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <span x-show="step.status === 'processing'" class="animate-spin h-4 w-4">⚡</span>
+                                    <span x-show="step.status === 'done'" class="text-green-500">✓</span>
+                                    <span x-show="step.status === 'error'" class="text-red-500">✗</span>
+                                    <span x-text="step.message" :class="{
+                                        'text-gray-400': step.status === 'processing',
+                                        'text-green-500': step.status === 'done',
+                                        'text-red-500': step.status === 'error'
+                                    }"></span>
+                                </div>
+                            </template>
                         </div>
-                    </div>
+
+                        <!-- Buttons -->
+                        <div class="flex justify-end gap-3 mt-4">
+                            <button 
+                                type="button" 
+                                @click="uploadModal = false"
+                                :disabled="isProcessing"
+                                class="px-4 py-2 text-sm text-gray-400 hover:text-white disabled:opacity-50">
+                                Close
+                            </button>
+                        </div>
+
+                        <div class="mt-4">
+                            <button 
+                                x-ref="updateDatabaseBtn"
+                                x-show="uploadStatus === 'success'"
+                                type="button"
+                                @click="updateDatabase"
+                                :disabled="isProcessing"
+                                class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50">
+                                <span x-show="!isProcessing">Update Database</span>
+                                <span x-show="isProcessing">Processing...</span>
+                            </button>
+                        </div>
+                    </form>
                 </div>
             </div>
 
@@ -420,37 +547,94 @@
         }
     }
 
-    // Add this to debug the form submission
-    async function handleUpload(event) {
-        event.preventDefault();
+    // File select handler
+    function handleFileSelect(event) {
+        // Handle both direct events and dispatched events
+        const file = event.detail ? event.detail.file : (event.target ? event.target.files[0] : null);
+        console.log('File selected:', file);
         
+        if (file && file.name.endsWith('.json')) {
+            // Update Alpine.js state
+            this.selectedFile = file.name;
+            this.uploadStatus = ''; // Reset status for new file
+        } else {
+            console.log('Invalid or no file selected');
+        }
+    }
+
+    // Direct file selection handler
+    function handleFileSelectDirect(input) {
+        const file = input.files[0];
+        if (file) {
+            document.getElementById('file-name').textContent = file.name;
+            document.getElementById('upload-actions').style.display = 'flex';
+            
+            // Reset any previous progress
+            resetProgress();
+        }
+    }
+    
+    // Direct upload handler (not using Alpine)
+    async function handleUploadDirect() {
         const fileInput = document.getElementById('json-file');
         const file = fileInput.files[0];
         
         if (!file) {
-            console.log('No file selected');
+            alert('Please select a file to upload');
             return;
         }
-
+        
+        // Show progress indicator
+        document.getElementById('progress-steps').style.display = 'block';
+        
+        // Update upload step status
+        updateStepStatus('step-upload', 'processing');
+        
         const formData = new FormData();
         formData.append('file', file);
-
+        
         try {
-            const response = await fetch('/upload-bookmarks', {
+            await processUpload(formData);
+        } catch (error) {
+            console.error('Upload error:', error);
+            updateStepStatus('step-upload', 'error');
+        }
+    }
+
+    // Process the upload with progress updates
+    async function processUpload(formData) {
+        try {
+            // Step 1: Upload file
+            updateStepStatus('step-upload', 'processing');
+            const uploadResponse = await fetch('/process-bookmarks', {
                 method: 'POST',
                 body: formData
             });
-
-            const result = await response.json();
             
-            if (response.ok) {
+            if (!uploadResponse.ok) {
+                const errorData = await uploadResponse.json();
+                throw new Error(errorData.error || 'Upload failed');
+            }
+            
+            updateStepStatus('step-upload', 'done');
+            
+            // Step 2: Validate JSON
+            updateStepStatus('step-validate', 'processing');
+            await new Promise(resolve => setTimeout(resolve, 500)); // Simulated delay
+            updateStepStatus('step-validate', 'done');
+            
+            // Get response data
+            const responseData = await uploadResponse.json();
+            console.log('Upload response:', responseData);
+            
+            if (responseData.success) {
                 this.uploadStatus = 'success';
                 this.uploadMessage = 'File uploaded successfully! Click "Update Database" to process the new data.';
                 // Show the Update Database button
                 this.$refs.updateDatabaseBtn.classList.remove('hidden');
             } else {
                 this.uploadStatus = 'error';
-                this.uploadMessage = result.error || 'Error processing file';
+                this.uploadMessage = responseData.error || 'Error processing file';
             }
         } catch (error) {
             console.error('Upload error:', error);
@@ -465,40 +649,29 @@
         this.progressSteps = [
             { status: 'processing', message: 'Starting database update...' }
         ];
-        
-        // Get form data
-        const rebuildVector = document.getElementById('rebuild-vector') ? 
-            document.getElementById('rebuild-vector').checked : false;
-        const resetProgress = document.getElementById('reset-progress') ? 
-            document.getElementById('reset-progress').checked : false;
 
         try {
-            // Use the async endpoint instead
             const response = await fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    rebuild_vector: rebuildVector,
-                    reset_progress: resetProgress
-                })
+                method: 'POST'
             });
             
             const result = await response.json();
             
             if (response.ok) {
                 this.progressSteps = [
-                    { status: 'done', message: 'Processing started in background' },
-                    { status: 'processing', message: 'Update running in background...' }
+                    { status: 'done', message: 'File validated' },
+                    { status: 'done', message: 'SQL database updated' },
+                    { status: 'done', message: 'Vector store rebuilt' },
+                    { status: 'done', message: 'Update completed successfully!' }
                 ];
                 
-                // Start polling for updates
-                const sessionId = result.session_id;
-                this.pollStatus(sessionId);
+                // Wait 3 seconds before allowing close
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                this.isProcessing = false;
+                
             } else {
                 this.progressSteps.push(
-                    { status: 'error', message: result.error || 'Error starting database update' }
+                    { status: 'error', message: result.error || 'Error updating database' }
                 );
                 this.isProcessing = false;
             }
@@ -509,158 +682,6 @@
             );
             this.isProcessing = false;
         }
-    }
-    
-    // New function to poll status
-    async function pollStatus(sessionId) {
-        try {
-            const response = await fetch(`/update-status?session_id=${sessionId}`);
-            const result = await response.json();
-            
-            if (response.ok) {
-                // Update progress UI based on status
-                updateProgressFromStatus(result);
-                
-                // If not complete, continue polling
-                if (!result.is_complete) {
-                    setTimeout(() => this.pollStatus(sessionId), 2000); // Poll every 2 seconds
-                } else {
-                    // Process completed
-                    this.progressSteps = [
-                        { status: 'done', message: 'File validated' },
-                        { status: 'done', message: 'SQL database updated' },
-                        { status: 'done', message: 'Vector store rebuilt' },
-                        { status: 'done', message: result.message || 'Update completed successfully!' }
-                    ];
-                    
-                    // Wait 3 seconds before allowing close
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                    this.isProcessing = false;
-                }
-            } else {
-                // Handle error in status check
-                this.progressSteps.push(
-                    { status: 'error', message: result.error || 'Error checking update status' }
-                );
-                this.isProcessing = false;
-            }
-        } catch (error) {
-            console.error('Status polling error:', error);
-            this.progressSteps.push(
-                { status: 'error', message: 'Error connecting to server during status check' }
-            );
-            this.isProcessing = false;
-        }
-    }
-    
-    // Function to update progress UI from status response
-    function updateProgressFromStatus(status) {
-        // Update step messages based on status
-        const progress = status.progress || {};
-        const totalProcessed = progress.total_processed || 0;
-        const newCount = progress.new_count || 0;
-        const updatedCount = progress.updated_count || 0;
-        const errors = progress.errors || 0;
-        
-        this.progressSteps = [
-            { status: 'done', message: 'Processing started in background' },
-            { status: 'processing', message: `Processing bookmarks: ${totalProcessed} total, ${newCount} new, ${updatedCount} updated, ${errors} errors` }
-        ];
-        
-        if (status.status === 'completed') {
-            this.progressSteps.push(
-                { status: 'done', message: 'Update completed successfully!' }
-            );
-        } else if (status.status === 'error') {
-            this.progressSteps.push(
-                { status: 'error', message: status.message || 'Error during update' }
-            );
-        }
-    }
-
-    function handleFileSelect(event) {
-        console.log('handleFileSelect called');
-        
-        // Handle both direct events and dispatched events
-        const file = event.target ? event.target.files[0] : event.detail.target.files[0];
-        console.log('File:', file);
-        
-        if (file && file.name.endsWith('.json')) {
-            console.log('Valid JSON file selected:', file.name);
-            this.selectedFile = file.name;
-            this.uploadStatus = ''; // Reset status for new file
-        } else {
-            console.log('Invalid or no file selected');
-        }
-    }
-
-    function handleFileSelectDirect(fileInput) {
-        const fileName = fileInput.files[0] ? fileInput.files[0].name : 'No file selected';
-        document.getElementById('file-name').textContent = fileName;
-        
-        // Show upload action buttons if a file was selected
-        const uploadActions = document.getElementById('upload-actions');
-        uploadActions.style.display = fileInput.files.length > 0 ? 'flex' : 'none';
-    }
-
-    function handleUploadDirect() {
-        console.log('handleUploadDirect called');
-        // Check if a file is selected
-        const fileInput = document.getElementById('json-file');
-        if (!fileInput.files.length) {
-            alert('Please select a file to upload');
-            return;
-        }
-        
-        // Reset progress indicators
-        const progressSteps = document.getElementById('progress-steps');
-        progressSteps.style.display = 'block';
-        
-        // Reset all steps to pending
-        document.querySelectorAll('.progress-icon').forEach(icon => {
-            icon.textContent = '⭕';
-        });
-        
-        // Update upload step to in-progress
-        document.getElementById('step-upload').querySelector('.progress-icon').textContent = '🔄';
-        
-        // Create FormData and append the file
-        const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
-        
-        // Send the file to the server
-        fetch('/upload-bookmarks', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Update UI to show success and enable process button
-                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '✅';
-                document.getElementById('step-validate').querySelector('.progress-icon').textContent = '✅';
-                
-                // Show the process button and store session ID on it
-                const processButton = document.getElementById('process-button');
-                processButton.dataset.sessionId = data.session_id;
-                processButton.style.display = 'block';
-                
-                // Hide upload button after successful upload
-                document.getElementById('upload-actions').style.display = 'none';
-                
-                console.log('Upload successful, session ID:', data.session_id);
-            } else {
-                // Show error
-                document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
-                alert('Upload failed: ' + (data.error || 'Unknown error'));
-                console.error('Upload error:', data);
-            }
-        })
-        .catch(error => {
-            document.getElementById('step-upload').querySelector('.progress-icon').textContent = '❌';
-            alert('Error uploading file: ' + error.message);
-            console.error('Upload error:', error);
-        });
     }
 
     function processBookmarks(buttonElement) {
@@ -746,7 +767,7 @@
                     finishProcessingUI(false, details);
                 }
             } else {
-                // Error checking status
+                // Handle error in status check
                 document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
                 alert('Error checking processing status: ' + (data.error || 'Unknown error'));
                 console.error('Status error:', data);
@@ -1127,54 +1148,72 @@
             });
         }
         
-        // Function for direct vector rebuild call
-        function directRebuildCall() {
-            // Reset form
-            resetForm();
-            
-            // Show status
-            showStatus('Starting direct vector rebuild...', 10);
-            
-            console.log('Making direct call to /update-database endpoint to rebuild vectors');
-            
-            // Call rebuild API
-            fetch('/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'include',
-                body: JSON.stringify({
-                    rebuild_vector: true,
-                    direct_call: true
-                })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status}`);
+        // Function for direct vector rebuild
+        async function directRebuildVectors() {
+            try {
+                // Display progress steps if the UI has them
+                if (document.getElementById('progress-steps')) {
+                    document.getElementById('progress-steps').style.display = 'block';
+                    updateStepStatus('step-vectors', 'processing');
                 }
-                return response.json();
-            })
-            .then(data => {
-                console.log('Direct rebuild response:', data);
+                
+                // Call the API to rebuild vectors
+                const response = await fetch('/update-database', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        rebuild_vector: true,
+                        direct_call: true
+                    })
+                });
+                
+                const data = await response.json();
                 
                 if (data.success) {
-                    showStatus('Vector rebuild started directly...', 40);
-                    
-                    // Check status regularly
-                    if (data.session_id) {
-                        checkUpdateStatus(data.session_id);
+                    // Handle success
+                    if (document.getElementById('step-vectors')) {
+                        updateStepStatus('step-vectors', 'done');
+                        
+                        // Create success message
+                        const successDiv = document.createElement('div');
+                        successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
+                        successDiv.textContent = 'Vector store rebuilt successfully!';
+                        document.getElementById('progress-steps').appendChild(successDiv);
                     } else {
-                        showSuccess('Vector rebuild started directly. No session ID returned for tracking progress.');
+                        alert('Vector store rebuilt successfully!');
                     }
                 } else {
-                    throw new Error(data.error || 'Failed to start direct vector rebuild');
+                    // Handle API error
+                    if (document.getElementById('step-vectors')) {
+                        updateStepStatus('step-vectors', 'error');
+                        
+                        // Create error message
+                        const errorDiv = document.createElement('div');
+                        errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                        errorDiv.textContent = data.error || 'Failed to rebuild vector store';
+                        document.getElementById('progress-steps').appendChild(errorDiv);
+                    } else {
+                        alert('Error: ' + (data.error || 'Failed to rebuild vector store'));
+                    }
                 }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showError('Error: ' + error.message);
-            });
+            } catch (error) {
+                // Handle connection error
+                console.error('Rebuild error:', error);
+                
+                if (document.getElementById('step-vectors')) {
+                    updateStepStatus('step-vectors', 'error');
+                    
+                    // Create error message
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                    errorDiv.textContent = 'Error connecting to server: ' + error.message;
+                    document.getElementById('progress-steps').appendChild(errorDiv);
+                } else {
+                    alert('Error connecting to server: ' + error.message);
+                }
+            }
         }
         
         // Attach event listeners
@@ -1187,240 +1226,68 @@
         }
         
         if (directRebuildButton) {
-            directRebuildButton.addEventListener('click', directRebuildCall);
+            directRebuildButton.addEventListener('click', directRebuildVectors);
         }
     });
 
     // File upload and processing functions
     function uploadBookmarks() {
         // Clear previous status
-        $('#uploadStatus').addClass('d-none').removeClass('alert-danger alert-success').text('');
-        
-        const fileInput = document.getElementById('fileInput');
-        const file = fileInput.files[0];
-        
-        if (!file) {
-            $('#uploadStatus').removeClass('d-none').addClass('alert-danger')
-                .text('Please select a file to upload');
+        }
+    }
+    
+    // Function to reset update progress
+    async function resetUpdateProgress() {
+        if (!confirm('Are you sure you want to reset update progress? This will clear any pending operations.')) {
             return;
         }
         
-        // Create FormData object
-        const formData = new FormData();
-        formData.append('file', file);
-        
-        console.log("Uploading file:", file.name);
-        
-        // Show loading state
-        $('#uploadButton').prop('disabled', true).html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Uploading...');
-        
-        // Make AJAX request
-        $.ajax({
-            url: '/upload-bookmarks',
-            type: 'POST',
-            data: formData,
-            processData: false,  // Don't process the data
-            contentType: false,  // Don't set content type
-            success: function(response) {
-                console.log("Upload success:", response);
-                if (response.success) {
-                    $('#uploadStatus').removeClass('d-none alert-danger').addClass('alert-success')
-                        .html(`<strong>Success!</strong> ${response.message}`);
-                        
-                    // Store session ID for later processing if needed
-                    if (response.session_id) {
-                        localStorage.setItem('processingSessionId', response.session_id);
-                    }
-                    
-                    // Proceed to process bookmarks
-                    setTimeout(function() {
-                        processBookmarks(response.file);
-                    }, 1000);
-                } else {
-                    $('#uploadStatus').removeClass('d-none').addClass('alert-danger')
-                        .html(`<strong>Error:</strong> ${response.error || 'Unknown error occurred'}`);
-                    $('#uploadButton').prop('disabled', false).text('Upload and Process');
-                }
-            },
-            error: function(xhr, status, error) {
-                console.error("Upload error:", xhr.responseText);
-                let errorMessage = 'Failed to upload file';
+        try {
+            // Show progress steps
+            document.getElementById('progress-steps').style.display = 'block';
+            
+            // Update status
+            resetProgress();
+            updateStepStatus('step-sql', 'processing');
+            
+            const response = await fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ reset_progress: true })
+            });
+            
+            const result = await response.json();
+            
+            if (response.ok) {
+                updateStepStatus('step-sql', 'done');
                 
-                try {
-                    const response = JSON.parse(xhr.responseText);
-                    errorMessage = response.error || errorMessage;
-                } catch (e) {
-                    console.error("Error parsing response:", e);
-                }
+                // Create success message element
+                const successDiv = document.createElement('div');
+                successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
+                successDiv.textContent = 'Update progress has been reset successfully';
+                document.getElementById('progress-steps').appendChild(successDiv);
+            } else {
+                updateStepStatus('step-sql', 'error');
                 
-                $('#uploadStatus').removeClass('d-none').addClass('alert-danger')
-                    .html(`<strong>Error:</strong> ${errorMessage}`);
-                $('#uploadButton').prop('disabled', false).text('Upload and Process');
+                // Create error message element
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                errorDiv.textContent = result.error || 'Failed to reset update progress';
+                document.getElementById('progress-steps').appendChild(errorDiv);
             }
-        });
-    }
-
-    function processBookmarks(filename) {
-        if (!filename) {
-            console.error("No filename provided for processing");
-            $('#uploadStatus').removeClass('d-none').addClass('alert-danger')
-                .html('<strong>Error:</strong> No file information available for processing');
-            $('#uploadButton').prop('disabled', false).text('Upload and Process');
-            return;
+        } catch (error) {
+            console.error('Reset error:', error);
+            updateStepStatus('step-sql', 'error');
+            
+            // Create error message element
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+            errorDiv.textContent = 'Error connecting to server';
+            document.getElementById('progress-steps').appendChild(errorDiv);
         }
-        
-        // Update status
-        $('#uploadStatus').removeClass('d-none alert-danger').addClass('alert-info')
-            .html('<strong>Processing...</strong> Importing bookmarks from the uploaded file');
-        
-        // Get session ID if stored
-        const sessionId = localStorage.getItem('processingSessionId') || '';
-        
-        // Make AJAX request to process endpoint
-        $.ajax({
-            url: '/process-bookmarks',
-            type: 'POST',
-            data: JSON.stringify({
-                filename: filename,
-                session_id: sessionId
-            }),
-            contentType: 'application/json',
-            success: function(response) {
-                console.log("Processing success:", response);
-                if (response.success) {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-success')
-                        .html(`<strong>Success!</strong> ${response.message}`);
-                        
-                    // Update UI if needed
-                    if (response.processed > 0) {
-                        // Refresh bookmark count or other UI elements
-                        updateBookmarkStats();
-                    }
-                    
-                    // Option to rebuild vectors
-                    setTimeout(function() {
-                        if (confirm('Would you like to rebuild the vector database now to make the new bookmarks searchable?')) {
-                            rebuildVectors();
-                        } else {
-                            $('#uploadButton').prop('disabled', false).text('Upload and Process');
-                        }
-                    }, 1000);
-                } else {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                        .html(`<strong>Error:</strong> ${response.error || 'Unknown error occurred'}`);
-                    $('#uploadButton').prop('disabled', false).text('Upload and Process');
-                }
-            },
-            error: function(xhr, status, error) {
-                console.error("Processing error:", xhr.responseText);
-                let errorMessage = 'Failed to process bookmarks';
-                
-                try {
-                    const response = JSON.parse(xhr.responseText);
-                    errorMessage = response.error || errorMessage;
-                } catch (e) {
-                    console.error("Error parsing response:", e);
-                }
-                
-                $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                    .html(`<strong>Error:</strong> ${errorMessage}`);
-                $('#uploadButton').prop('disabled', false).text('Upload and Process');
-            }
-        });
     }
-
-    function updateBookmarkStats() {
-        // Fetch updated stats from the server
-        $.ajax({
-            url: '/user-stats',
-            type: 'GET',
-            success: function(response) {
-                if (response.success) {
-                    // Update bookmark count in the UI
-                    $('#bookmarkCount').text(response.bookmark_count || 0);
-                }
-            }
-        });
-    }
-
-    function rebuildVectors() {
-        $('#uploadStatus').removeClass('d-none alert-danger alert-success').addClass('alert-info')
-            .html('<strong>Rebuilding...</strong> Updating vector database with new bookmarks');
-        
-        $.ajax({
-            url: '/update-database',
-            type: 'POST',
-            data: JSON.stringify({
-                rebuild: true
-            }),
-            contentType: 'application/json',
-            success: function(response) {
-                console.log("Rebuild success:", response);
-                if (response.success) {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-success')
-                        .html(`<strong>Success!</strong> ${response.message}`);
-                } else {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                        .html(`<strong>Error:</strong> ${response.error || 'Failed to rebuild vectors'}`);
-                }
-                $('#uploadButton').prop('disabled', false).text('Upload and Process');
-            },
-            error: function(xhr, status, error) {
-                console.error("Rebuild error:", xhr.responseText);
-                $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                    .html('<strong>Error:</strong> Failed to rebuild vector database');
-                $('#uploadButton').prop('disabled', false).text('Upload and Process');
-            }
-        });
-    }
-
-    // Add this to document ready section
-    $(document).ready(function() {
-        // ... existing code ...
-        
-        // Add event listener for upload button
-        $('#uploadButton').on('click', function() {
-            uploadBookmarks();
-        });
-        
-        // Add event listener for direct rebuild button
-        $('#directRebuildBtn').on('click', function() {
-            directRebuildVectors();
-        });
-        
-        // ... existing code ...
-    });
-
-    // Add this with the other JS functions
-    function directRebuildVectors() {
-        $('#uploadStatus').removeClass('d-none alert-danger alert-success').addClass('alert-info')
-            .html('<strong>Rebuilding...</strong> Using direct vector database rebuild...');
-        
-        $.ajax({
-            url: '/update-database',
-            type: 'POST',
-            data: JSON.stringify({
-                rebuild: true,
-                direct_call: true
-            }),
-            contentType: 'application/json',
-            success: function(response) {
-                console.log("Direct rebuild success:", response);
-                if (response.success) {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-success')
-                        .html(`<strong>Success!</strong> ${response.message}`);
-                } else {
-                    $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                        .html(`<strong>Error:</strong> ${response.error || 'Failed to rebuild vectors'}`);
-                }
-            },
-            error: function(xhr, status, error) {
-                console.error("Rebuild error:", xhr.responseText);
-                $('#uploadStatus').removeClass('alert-info').addClass('alert-danger')
-                    .html('<strong>Error:</strong> Failed to rebuild vector database');
-            }
-        });
-    });
     </script>
 </body>
 </html> 
