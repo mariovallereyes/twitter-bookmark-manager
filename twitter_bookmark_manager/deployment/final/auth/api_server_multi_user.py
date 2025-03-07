@@ -127,7 +127,8 @@ app.config.update(
     get_db_connection=get_db_connection,
     PREFERRED_URL_SCHEME='https',
     MAX_CONTENT_LENGTH=32 * 1024 * 1024,  # 32MB max file size
-    UPLOAD_FOLDER=UPLOADS_DIR
+    UPLOAD_FOLDER=UPLOADS_DIR,
+    DATABASE_DIR=DATABASE_DIR  # Add DATABASE_DIR to the configuration
 )
 
 # Global session status tracking
