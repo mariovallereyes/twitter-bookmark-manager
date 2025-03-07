@@ -807,96 +807,75 @@ def upload_bookmarks():
 @app.route('/process-bookmarks', methods=['POST'])
 @login_required
 def process_bookmarks():
-    """
-    Process an uploaded bookmarks JSON file and insert into the database.
-    Handles both FormData uploads and JSON requests.
-    """
+    """Process bookmarks from a JSON file."""
     try:
-        # Get user info using UserContext instead of accessing g directly
         user = UserContext.get_current_user()
         if not user:
-            logger.error("No user found for processing - UserContext check failed")
+            logger.error("User not authenticated")
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
-            
+        
         user_id = user.id
         logger.info(f"Processing bookmarks for user {user_id}")
         
-        # Check if this is a FormData file upload or a JSON request
+        # Check if we have a file or a direct JSON payload
         if 'file' in request.files:
-            # This is a direct file upload via FormData
             file = request.files['file']
-            
-            # Check if a file was selected
             if file.filename == '':
-                logger.error(f"No file selected for user {user_id}")
                 return jsonify({'success': False, 'error': 'No file selected'}), 400
                 
-            # Ensure upload directory exists
-            upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-            user_dir = os.path.join(upload_folder, f"user_{user_id}")
-            os.makedirs(user_dir, exist_ok=True)
+            # Save the file temporarily
+            uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
+            os.makedirs(uploads_dir, exist_ok=True)
             
-            # Generate a safe filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = secure_filename(f"bookmarks_{timestamp}.json")
-            filepath = os.path.join(user_dir, filename)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"bookmarks_{timestamp}.json"
+            filepath = os.path.join(uploads_dir, filename)
             
-            # Save the file
-            try:
-                file.save(filepath)
-                file_size = os.path.getsize(filepath)
-                logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
-            except Exception as save_error:
-                logger.error(f"Error saving file: {str(save_error)}")
-                return jsonify({'success': False, 'error': f'Error saving file: {str(save_error)}'}), 500
-                
-        else:
-            # This is a JSON request with a filename reference
+            file.save(filepath)
+            file_size = os.path.getsize(filepath)
+            logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
+            
+        elif request.is_json:
+            # Direct JSON payload
             data = request.get_json()
             if not data:
-                logger.error(f"No JSON data in request for user {user_id}")
-                return jsonify({'success': False, 'error': 'No data provided'}), 400
+                return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
                 
-            filename = data.get('filename')
-            if not filename:
-                logger.error(f"No filename provided in request for user {user_id}")
-                return jsonify({'success': False, 'error': 'No filename provided'}), 400
-                
-            # Reconstruct the file path
-            upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-            user_dir = os.path.join(upload_folder, f"user_{user_id}")
-            filepath = os.path.join(user_dir, filename)
+            # Save as a file for consistent processing
+            uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
+            os.makedirs(uploads_dir, exist_ok=True)
             
-            if not os.path.exists(filepath):
-                logger.error(f"File not found: {filepath}")
-                return jsonify({'success': False, 'error': 'File not found'}), 404
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"bookmarks_{timestamp}.json"
+            filepath = os.path.join(uploads_dir, filename)
+            
+            with open(filepath, 'w') as f:
+                json.dump(data, f)
                 
-        logger.info(f"Processing bookmarks from {filepath}")
+            logger.info(f"JSON data saved to file: {filepath}")
+        else:
+            return jsonify({'success': False, 'error': 'No file or JSON data provided'}), 400
+            
+        # Copy the uploaded file to the database directory for processing
+        db_dir = os.path.join(app.config['DATABASE_FOLDER'], f'user_{user_id}')
+        os.makedirs(db_dir, exist_ok=True)
         
-        # Create database directory if not exists
-        database_dir = os.path.join(app.config.get('DATABASE_DIR', 'database'), f"user_{user_id}")
-        os.makedirs(database_dir, exist_ok=True)
+        target_file = os.path.join(db_dir, 'twitter_bookmarks.json')
+        shutil.copy2(filepath, target_file)
         
-        # Copy file to the expected location for update_bookmarks_final.py
-        target_filepath = os.path.join(database_dir, 'twitter_bookmarks.json')
-        shutil.copy2(filepath, target_filepath)
-        logger.info(f"Copied uploaded file to {target_filepath} for processing")
+        logger.info(f"Copied uploaded file to {target_file} for processing")
         
-        # Generate a session ID for tracking
-        session_id = str(uuid.uuid4())
-        
-        # Read the JSON file
+        # Process the JSON file
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(target_file, 'r', encoding='utf-8') as f:
                 bookmark_data = json.load(f)
                 
-            # Determine format - handle both array format and Twitter's nested format
+            # Extracting bookmarks from different possible structures
             bookmarks_list = []
             
-            # Check if it's a simple array of bookmarks
             if isinstance(bookmark_data, list):
+                # Direct list of bookmarks
                 bookmarks_list = bookmark_data
-            # Check if it's the Twitter export format with window.YTD structure already removed
             elif isinstance(bookmark_data, dict):
                 # Try different possible structures
                 if 'bookmarks' in bookmark_data:
@@ -913,89 +892,182 @@ def process_bookmarks():
             # Get database connection
             try:
                 db_conn = get_db_connection()
-                cursor = db_conn.cursor()
                 
-                # Check for existing bookmarks to avoid duplicates
-                cursor.execute(
-                    "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
-                    (user_id,)
-                )
-                existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
+                # Check if we got a SQLAlchemy connection or a psycopg2 connection
+                is_sqlalchemy_conn = hasattr(db_conn, 'execute') and not hasattr(db_conn, 'cursor')
                 
-                # Process each bookmark
-                processed = 0
-                skipped = 0
-                errors = 0
-                
-                for bookmark in bookmarks_list:
-                    try:
-                        # Handle either direct tweet or nested tweet structure
-                        tweet = bookmark.get('tweet', bookmark)
-                        
-                        # Extract bookmark ID - try various possible fields
-                        bookmark_id = None
-                        for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
-                            if id_field in tweet:
-                                bookmark_id = str(tweet[id_field])
-                                break
+                if is_sqlalchemy_conn:
+                    # Using SQLAlchemy connection
+                    # Get existing bookmark IDs
+                    result = db_conn.execute(
+                        text("SELECT bookmark_id FROM bookmarks WHERE user_id = :user_id"),
+                        {"user_id": user_id}
+                    )
+                    existing_bookmark_ids = {row[0] for row in result}
+                    
+                    # Process each bookmark
+                    processed = 0
+                    skipped = 0
+                    errors = 0
+                    
+                    for bookmark in bookmarks_list:
+                        try:
+                            # Handle either direct tweet or nested tweet structure
+                            tweet = bookmark.get('tweet', bookmark)
+                            
+                            # Extract bookmark ID - try various possible fields
+                            bookmark_id = None
+                            for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
+                                if id_field in tweet:
+                                    bookmark_id = str(tweet[id_field])
+                                    break
+                                    
+                            if not bookmark_id:
+                                logger.warning(f"Could not find ID in bookmark: {tweet}")
+                                errors += 1
+                                continue
                                 
-                        if not bookmark_id:
-                            logger.warning(f"Could not find ID in bookmark: {tweet}")
+                            # Skip duplicates
+                            if bookmark_id in existing_bookmark_ids:
+                                logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
+                                skipped += 1
+                                continue
+                                
+                            # Extract content
+                            text = tweet.get('full_text', tweet.get('text', ''))
+                            
+                            # Handle different date formats
+                            created_at = tweet.get('created_at', '')
+                            
+                            # Extract author information
+                            author = ''
+                            author_id = ''
+                            
+                            # Try to find author info in various possible locations
+                            user_info = tweet.get('user', {})
+                            if user_info:
+                                author = user_info.get('screen_name', user_info.get('username', ''))
+                                author_id = user_info.get('id_str', user_info.get('id', ''))
+                                
+                            # Store raw data for vector embedding
+                            tweet_content = json.dumps(tweet)
+                            
+                            # Insert using SQLAlchemy connection
+                            db_conn.execute(
+                                text("""
+                                    INSERT INTO bookmarks 
+                                    (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
+                                    VALUES (:bookmark_id, :user_id, :text, :tweet_content, :created_at, :author, :author_id, :processed)
+                                    ON CONFLICT (bookmark_id) DO NOTHING
+                                """),
+                                {
+                                    "bookmark_id": bookmark_id,
+                                    "user_id": user_id,
+                                    "text": text,
+                                    "tweet_content": tweet_content,
+                                    "created_at": created_at,
+                                    "author": author,
+                                    "author_id": author_id,
+                                    "processed": False
+                                }
+                            )
+                            
+                            # Track the new ID to prevent duplicates in the same batch
+                            existing_bookmark_ids.add(bookmark_id)
+                            processed += 1
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing bookmark: {str(e)}")
                             errors += 1
-                            continue
-                            
-                        # Skip duplicates
-                        if bookmark_id in existing_bookmark_ids:
-                            logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
-                            skipped += 1
-                            continue
-                            
-                        # Extract content
-                        text = tweet.get('full_text', tweet.get('text', ''))
-                        
-                        # Handle different date formats
-                        created_at = tweet.get('created_at', '')
-                        
-                        # Extract author information
-                        author = ''
-                        author_id = ''
-                        
-                        # Try to find author info in various possible locations
-                        user_info = tweet.get('user', {})
-                        if user_info:
-                            author = user_info.get('screen_name', user_info.get('username', ''))
-                            author_id = user_info.get('id_str', user_info.get('id', ''))
-                            
-                        # Store raw data for vector embedding
-                        tweet_content = json.dumps(tweet)
-                        
-                        # Insert into database
-                        cursor.execute("""
-                            INSERT INTO bookmarks 
-                            (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (bookmark_id) DO NOTHING
-                        """, (
-                            bookmark_id,
-                            user_id,
-                            text,
-                            tweet_content,
-                            created_at,
-                            author,
-                            author_id,
-                            False
-                        ))
-                        
-                        # Track the new ID to prevent duplicates in the same batch
-                        existing_bookmark_ids.add(bookmark_id)
-                        processed += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing bookmark: {str(e)}")
-                        errors += 1
+                    
+                    # Commit transaction for SQLAlchemy
+                    db_conn.commit()
                 
-                # Commit changes
-                db_conn.commit()
+                else:
+                    # Using psycopg2 connection (traditional approach)
+                    cursor = db_conn.cursor()
+                    
+                    # Check for existing bookmarks to avoid duplicates
+                    cursor.execute(
+                        "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
+                    
+                    # Process each bookmark
+                    processed = 0
+                    skipped = 0
+                    errors = 0
+                    
+                    for bookmark in bookmarks_list:
+                        try:
+                            # Handle either direct tweet or nested tweet structure
+                            tweet = bookmark.get('tweet', bookmark)
+                            
+                            # Extract bookmark ID - try various possible fields
+                            bookmark_id = None
+                            for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
+                                if id_field in tweet:
+                                    bookmark_id = str(tweet[id_field])
+                                    break
+                                    
+                            if not bookmark_id:
+                                logger.warning(f"Could not find ID in bookmark: {tweet}")
+                                errors += 1
+                                continue
+                                
+                            # Skip duplicates
+                            if bookmark_id in existing_bookmark_ids:
+                                logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
+                                skipped += 1
+                                continue
+                                
+                            # Extract content
+                            text = tweet.get('full_text', tweet.get('text', ''))
+                            
+                            # Handle different date formats
+                            created_at = tweet.get('created_at', '')
+                            
+                            # Extract author information
+                            author = ''
+                            author_id = ''
+                            
+                            # Try to find author info in various possible locations
+                            user_info = tweet.get('user', {})
+                            if user_info:
+                                author = user_info.get('screen_name', user_info.get('username', ''))
+                                author_id = user_info.get('id_str', user_info.get('id', ''))
+                                
+                            # Store raw data for vector embedding
+                            tweet_content = json.dumps(tweet)
+                            
+                            # Insert into database
+                            cursor.execute("""
+                                INSERT INTO bookmarks 
+                                (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (bookmark_id) DO NOTHING
+                            """, (
+                                bookmark_id,
+                                user_id,
+                                text,
+                                tweet_content,
+                                created_at,
+                                author,
+                                author_id,
+                                False
+                            ))
+                            
+                            # Track the new ID to prevent duplicates in the same batch
+                            existing_bookmark_ids.add(bookmark_id)
+                            processed += 1
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing bookmark: {str(e)}")
+                            errors += 1
+                    
+                    # Commit changes for psycopg2
+                    db_conn.commit()
                 
                 logger.info(f"Processed {processed} bookmarks, skipped {skipped}, errors: {errors}")
                 
@@ -1010,7 +1082,11 @@ def process_bookmarks():
             except Exception as db_error:
                 logger.error(f"Database error: {str(db_error)}")
                 if 'db_conn' in locals() and db_conn:
-                    db_conn.rollback()
+                    # Check if we have a SQLAlchemy connection (has execute method)
+                    if hasattr(db_conn, 'execute') and not hasattr(db_conn, 'cursor'):
+                        db_conn.rollback()
+                    elif hasattr(db_conn, 'rollback'):  # psycopg2 connection
+                        db_conn.rollback()
                 return jsonify({'success': False, 'error': f'Database error: {str(db_error)}'}), 500
                 
         except json.JSONDecodeError as je:
@@ -1170,30 +1246,50 @@ def check_tweet_content_column():
     """Check if the tweet_content column exists in bookmarks table and add it if missing"""
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
         
-        # Check if column exists
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='bookmarks' AND column_name='tweet_content'
-        """)
+        # Check if we got a SQLAlchemy connection or a psycopg2 connection
+        is_sqlalchemy_conn = hasattr(conn, 'execute') and not hasattr(conn, 'cursor')
         
-        if cursor.fetchone() is None:
-            # Add tweet_content column if it doesn't exist
-            logger.info("Adding tweet_content column to bookmarks table")
+        if is_sqlalchemy_conn:
+            # Using SQLAlchemy connection
+            # Check if column exists
+            result = conn.execute(text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='bookmarks' AND column_name='tweet_content'
+            """))
+            
+            if result.fetchone() is None:
+                # Add tweet_content column if it doesn't exist
+                logger.info("Adding tweet_content column to bookmarks table")
+                conn.execute(text("""
+                    ALTER TABLE bookmarks ADD COLUMN IF NOT EXISTS tweet_content TEXT
+                """))
+                conn.commit()
+                logger.info("tweet_content column added successfully")
+        else:
+            # Using raw psycopg2 connection
+            cursor = conn.cursor()
+            
+            # Check if column exists
             cursor.execute("""
-                ALTER TABLE bookmarks 
-                ADD COLUMN IF NOT EXISTS tweet_content TEXT
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='bookmarks' AND column_name='tweet_content'
             """)
-            conn.commit()
-            logger.info("Added tweet_content column successfully")
+            
+            if cursor.fetchone() is None:
+                # Add tweet_content column if it doesn't exist
+                logger.info("Adding tweet_content column to bookmarks table")
+                cursor.execute("""
+                    ALTER TABLE bookmarks ADD COLUMN IF NOT EXISTS tweet_content TEXT
+                """)
+                conn.commit()
+                logger.info("tweet_content column added successfully")
         
-        cursor.close()
-        conn.close()
     except Exception as e:
-        logger.error(f"Error checking/adding tweet_content column: {str(e)}")
-        raise
+        logger.error(f"Error checking tweet_content column: {e}")
+        logger.error(traceback.format_exc())
 
 @app.route('/search')
 def search():
