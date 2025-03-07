@@ -12,6 +12,7 @@ import random
 import json
 import time
 from sqlalchemy import text
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,20 @@ class BookmarkSearchMultiUser:
         self.user_id = user_id  # Default to system user if not specified
         logger.info(f"Created BookmarkSearchMultiUser with user_id: {self.user_id}")
 
+    def _get_cursor(self):
+        """
+        Get a cursor from the connection, handling both psycopg2 and SQLAlchemy connections.
+        Returns a cursor object and a flag indicating if it's SQLAlchemy.
+        """
+        # Check if this is an SQLAlchemy connection
+        if hasattr(self.conn, 'execute'):
+            logger.info("Using SQLAlchemy connection")
+            return None, True
+        else:
+            # This is a psycopg2 connection
+            logger.info("Using psycopg2 connection")
+            return self.conn.cursor(), False
+
     @with_user_context
     def search(self, query=None, user=None, category_ids=None, limit=100, user_id=1):
         """
@@ -40,7 +55,7 @@ class BookmarkSearchMultiUser:
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        cursor = self.conn.cursor()
+        cursor, is_sqlalchemy = self._get_cursor()
         results = []
         
         try:
@@ -64,12 +79,13 @@ class BookmarkSearchMultiUser:
                 
             # Add category filter if provided
             if category_ids and len(category_ids) > 0:
-                sql_query += """
+                placeholder = ','.join(['%s'] * len(category_ids))
+                sql_query += f"""
                 AND b.id IN (
                     SELECT bookmark_id 
                     FROM bookmark_categories 
-                    WHERE category_id IN ({}))
-                """.format(','.join(['%s'] * len(category_ids)))
+                    WHERE category_id IN ({placeholder}))
+                """
                 params.extend(category_ids)
                 
             # Add order and limit
@@ -77,10 +93,18 @@ class BookmarkSearchMultiUser:
             params.append(limit)
             
             # Execute the query
-            cursor.execute(sql_query, params)
+            if is_sqlalchemy:
+                # For SQLAlchemy, use text() to create a SQL expression
+                stmt = text(sql_query)
+                result_proxy = self.conn.execute(stmt, params)
+                rows = result_proxy.fetchall()
+            else:
+                # For psycopg2, use the cursor directly
+                cursor.execute(sql_query, params)
+                rows = cursor.fetchall()
             
             # Process results
-            for row in cursor.fetchall():
+            for row in rows:
                 bookmark = {
                     'id': row[0],
                     'text': row[1],
@@ -89,49 +113,75 @@ class BookmarkSearchMultiUser:
                 }
                 
                 # Get categories for this bookmark
-                cursor.execute("""
-                SELECT c.id, c.name 
-                FROM categories c 
-                JOIN bookmark_categories bc ON c.id = bc.category_id 
-                WHERE bc.bookmark_id = %s AND c.user_id = %s
-                """, (bookmark['id'], self.user_id))
-                
-                categories = []
-                for cat_row in cursor.fetchall():
-                    categories.append({
-                        'id': cat_row[0],
-                        'name': cat_row[1]
-                    })
-                
+                categories = self._get_bookmark_categories(bookmark['id'], is_sqlalchemy, cursor)
                 bookmark['categories'] = categories
                 results.append(bookmark)
                 
-            return results
-            
         except Exception as e:
             logger.error(f"Error in search: {e}")
-            return []
+            logger.error(traceback.format_exc())
             
+        return results
+        
+    def _get_bookmark_categories(self, bookmark_id, is_sqlalchemy, cursor=None):
+        """Get categories for a bookmark, handling both connection types"""
+        categories = []
+        cat_query = """
+        SELECT c.id, c.name 
+        FROM categories c 
+        JOIN bookmark_categories bc ON c.id = bc.category_id 
+        WHERE bc.bookmark_id = %s AND c.user_id = %s
+        """
+        
+        try:
+            if is_sqlalchemy:
+                stmt = text(cat_query)
+                result_proxy = self.conn.execute(stmt, [bookmark_id, self.user_id])
+                cat_rows = result_proxy.fetchall()
+            else:
+                cursor.execute(cat_query, (bookmark_id, self.user_id))
+                cat_rows = cursor.fetchall()
+                
+            for cat_row in cat_rows:
+                categories.append({
+                    'id': cat_row[0],
+                    'name': cat_row[1]
+                })
+        except Exception as e:
+            logger.error(f"Error getting categories for bookmark {bookmark_id}: {e}")
+            
+        return categories
+
     @with_user_context
     def get_recent(self, limit=10, user_id=1):
         """Get recent bookmarks for a user."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        cursor = self.conn.cursor()
+        cursor, is_sqlalchemy = self._get_cursor()
         results = []
         
         try:
             # Get recent bookmarks
-            cursor.execute("""
+            query = """
             SELECT id, text, author, created_at, bookmark_id, author_id
             FROM bookmarks
             WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT %s
-            """, (self.user_id, limit))
+            """
+            params = [self.user_id, limit]
             
-            for row in cursor.fetchall():
+            # Execute query based on connection type
+            if is_sqlalchemy:
+                stmt = text(query)
+                result_proxy = self.conn.execute(stmt, params)
+                rows = result_proxy.fetchall()
+            else:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+            
+            for row in rows:
                 bookmark = {
                     'id': row[0],
                     'text': row[1],
@@ -142,25 +192,13 @@ class BookmarkSearchMultiUser:
                 }
                 
                 # Get categories for this bookmark
-                cursor.execute("""
-                SELECT c.id, c.name 
-                FROM categories c 
-                JOIN bookmark_categories bc ON c.id = bc.category_id 
-                WHERE bc.bookmark_id = %s AND c.user_id = %s
-                """, (bookmark['id'], self.user_id))
-                
-                categories = []
-                for cat_row in cursor.fetchall():
-                    categories.append({
-                        'id': cat_row[0],
-                        'name': cat_row[1]
-                    })
-                
+                categories = self._get_bookmark_categories(bookmark['id'], is_sqlalchemy, cursor)
                 bookmark['categories'] = categories
                 results.append(bookmark)
                 
         except Exception as e:
             logger.error(f"Error getting recent bookmarks: {e}")
+            logger.error(traceback.format_exc())
             # Return empty list on error
             
         return results
@@ -190,93 +228,140 @@ class BookmarkSearchMultiUser:
             
     @with_user_context
     def get_bookmark_count(self, user_id=1):
-        """Get the total number of bookmarks for a user"""
+        """Get the total number of bookmarks for a user."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        cursor = self.conn.cursor()
+        cursor, is_sqlalchemy = self._get_cursor()
+        
         try:
-            cursor.execute("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s", (self.user_id,))
-            count = cursor.fetchone()[0]
+            query = "SELECT COUNT(*) FROM bookmarks WHERE user_id = %s"
+            
+            if is_sqlalchemy:
+                stmt = text(query)
+                result = self.conn.execute(stmt, [self.user_id])
+                count = result.scalar()
+            else:
+                cursor.execute(query, (self.user_id,))
+                count = cursor.fetchone()[0]
+                
             return count
+            
         except Exception as e:
-            logger.error(f"Error in get_bookmark_count: {e}")
+            logger.error(f"Error getting bookmark count: {e}")
+            logger.error(traceback.format_exc())
             return 0
             
     @with_user_context
     def get_categories(self, user_id=1):
-        """Get all categories for a user"""
+        """Get all categories for a user."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
-        categories = []
+        cursor, is_sqlalchemy = self._get_cursor()
+        results = []
         
         try:
-            # Use SQLAlchemy for the query instead of cursor
             query = """
-            SELECT c.id, c.name, COUNT(bc.bookmark_id) as count
-            FROM categories c
-            LEFT JOIN bookmark_categories bc ON c.id = bc.category_id
-            WHERE c.user_id = :user_id
-            GROUP BY c.id, c.name
-            ORDER BY count DESC, c.name
+            SELECT c.id, c.name, COUNT(bc.bookmark_id) as count 
+            FROM categories c 
+            LEFT JOIN bookmark_categories bc ON c.id = bc.category_id 
+            WHERE c.user_id = %s 
+            GROUP BY c.id, c.name 
+            ORDER BY c.name
             """
-            result = self.conn.execute(text(query), {"user_id": self.user_id})
-            categories = [{"id": row[0], "name": row[1], "count": row[2]} for row in result]
             
-            return categories
+            # Execute query based on connection type
+            if is_sqlalchemy:
+                stmt = text(query)
+                result_proxy = self.conn.execute(stmt, [self.user_id])
+                rows = result_proxy.fetchall()
+            else:
+                cursor.execute(query, (self.user_id,))
+                rows = cursor.fetchall()
             
+            for row in rows:
+                category = {
+                    'id': row[0],
+                    'name': row[1],
+                    'count': row[2]
+                }
+                results.append(category)
+                
         except Exception as e:
-            logger.error(f"Error in get_categories: {e}")
-            return []
+            logger.error(f"Error getting categories: {e}")
+            logger.error(traceback.format_exc())
+            
+        return results
             
     @with_user_context
     def update_bookmark_categories(self, bookmark_id, category_ids, user_id=1):
-        """
-        Update categories for a bookmark.
-        Ensures the bookmark belongs to the current user.
-        """
+        """Update the categories for a bookmark, ensuring user ownership."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
+        cursor, is_sqlalchemy = self._get_cursor()
+        
         try:
-            # First verify this bookmark belongs to the user
-            query = "SELECT COUNT(*) FROM bookmarks WHERE id = :bookmark_id AND user_id = :user_id"
-            result = self.conn.execute(text(query), {"bookmark_id": bookmark_id, "user_id": self.user_id})
-            count = result.scalar()
+            # First, verify that the bookmark belongs to the user
+            query = "SELECT id FROM bookmarks WHERE id = %s AND user_id = %s"
             
-            if count == 0:
-                logger.warning(f"Attempted to update categories for bookmark {bookmark_id} that doesn't belong to user {self.user_id}")
-                return False
+            if is_sqlalchemy:
+                stmt = text(query)
+                result = self.conn.execute(stmt, [bookmark_id, self.user_id])
+                if not result.fetchone():
+                    logger.warning(f"Bookmark {bookmark_id} does not belong to user {self.user_id}")
+                    return {"error": "Access denied or bookmark not found"} 
+            else:
+                cursor.execute(query, (bookmark_id, self.user_id))
+                if not cursor.fetchone():
+                    logger.warning(f"Bookmark {bookmark_id} does not belong to user {self.user_id}")
+                    return {"error": "Access denied or bookmark not found"}
             
-            # Delete existing categories
-            delete_query = "DELETE FROM bookmark_categories WHERE bookmark_id = :bookmark_id"
-            self.conn.execute(text(delete_query), {"bookmark_id": bookmark_id})
+            # Clear existing categories for this bookmark
+            delete_query = "DELETE FROM bookmark_categories WHERE bookmark_id = %s"
             
-            # Add new categories
+            if is_sqlalchemy:
+                stmt = text(delete_query)
+                self.conn.execute(stmt, [bookmark_id])
+            else:
+                cursor.execute(delete_query, (bookmark_id,))
+            
+            # Insert new categories if provided
             if category_ids and len(category_ids) > 0:
-                # Verify all categories belong to this user
-                placeholder = ','.join([':cat_' + str(i) for i in range(len(category_ids))])
-                params = {f'cat_{i}': category_id for i, category_id in enumerate(category_ids)}
-                params['user_id'] = self.user_id
+                # Verify that the categories belong to the user
+                placeholders = ','.join(['%s'] * len(category_ids))
+                verify_query = f"""
+                SELECT id FROM categories 
+                WHERE id IN ({placeholders}) AND user_id = %s
+                """
                 
-                query = f"SELECT COUNT(*) FROM categories WHERE id IN ({placeholder}) AND user_id = :user_id"
-                result = self.conn.execute(text(query), params)
-                count = result.scalar()
+                params = list(category_ids) + [self.user_id]
                 
-                if count != len(category_ids):
-                    logger.warning(f"Attempted to use categories that don't belong to user {self.user_id}")
-                    return False
+                if is_sqlalchemy:
+                    stmt = text(verify_query)
+                    result = self.conn.execute(stmt, params)
+                    valid_category_ids = [row[0] for row in result.fetchall()]
+                else:
+                    cursor.execute(verify_query, params)
+                    valid_category_ids = [row[0] for row in cursor.fetchall()]
                 
-                # Insert new categories
-                for category_id in category_ids:
-                    insert_query = "INSERT INTO bookmark_categories (bookmark_id, category_id) VALUES (:bookmark_id, :category_id)"
-                    self.conn.execute(text(insert_query), {"bookmark_id": bookmark_id, "category_id": category_id})
+                # Insert verified categories
+                if valid_category_ids:
+                    insert_values = []
+                    for cat_id in valid_category_ids:
+                        if is_sqlalchemy:
+                            stmt = text("INSERT INTO bookmark_categories (bookmark_id, category_id) VALUES (%s, %s)")
+                            self.conn.execute(stmt, [bookmark_id, cat_id])
+                        else:
+                            cursor.execute(
+                                "INSERT INTO bookmark_categories (bookmark_id, category_id) VALUES (%s, %s)",
+                                (bookmark_id, cat_id)
+                            )
             
-            # For SQLAlchemy sessions, the commit is handled by the session
-            return True
+            return {"success": True, "message": "Categories updated"}
             
         except Exception as e:
-            logger.error(f"Error in update_bookmark_categories: {e}")
-            # For SQLAlchemy sessions, the rollback is handled by the session
-            return False 
+            logger.error(f"Error updating bookmark categories: {e}")
+            logger.error(traceback.format_exc())
+            return {"error": str(e)} 
