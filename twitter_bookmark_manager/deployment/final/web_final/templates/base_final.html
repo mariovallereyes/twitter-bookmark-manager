@@ -562,6 +562,41 @@
         }
     }
 
+    // Reset progress indicators
+    function resetProgress() {
+        document.querySelectorAll('.progress-icon').forEach(icon => {
+            icon.textContent = '⭕';
+        });
+        // Hide any error or success messages
+        const messageElements = document.querySelectorAll('.mt-4.p-4.bg-red-900, .mt-4.p-4.bg-green-900');
+        messageElements.forEach(element => {
+            element.remove();
+        });
+    }
+    
+    // Update step status indicators
+    function updateStepStatus(stepId, status) {
+        const stepElement = document.getElementById(stepId);
+        if (!stepElement) return;
+        
+        const icon = stepElement.querySelector('.progress-icon');
+        if (!icon) return;
+        
+        switch (status) {
+            case 'processing':
+                icon.textContent = '⚡';
+                break;
+            case 'done':
+                icon.textContent = '✅';
+                break;
+            case 'error':
+                icon.textContent = '❌';
+                break;
+            default:
+                icon.textContent = '⭕';
+        }
+    }
+    
     // Direct file selection handler
     function handleFileSelectDirect(input) {
         const file = input.files[0];
@@ -628,18 +663,31 @@
             console.log('Upload response:', responseData);
             
             if (responseData.success) {
-                this.uploadStatus = 'success';
-                this.uploadMessage = 'File uploaded successfully! Click "Update Database" to process the new data.';
-                // Show the Update Database button
-                this.$refs.updateDatabaseBtn.classList.remove('hidden');
+                // Update the UI to show success
+                const updateDatabaseBtn = document.querySelector('[x-ref="updateDatabaseBtn"]');
+                if (updateDatabaseBtn) {
+                    updateDatabaseBtn.classList.remove('hidden');
+                }
+                
+                // Create success message
+                const successDiv = document.createElement('div');
+                successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
+                successDiv.textContent = 'File uploaded successfully! Click "Update Database" to process the new data.';
+                document.getElementById('progress-steps').appendChild(successDiv);
             } else {
-                this.uploadStatus = 'error';
-                this.uploadMessage = responseData.error || 'Error processing file';
+                // Show error message
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                errorDiv.textContent = responseData.error || 'Error processing file';
+                document.getElementById('progress-steps').appendChild(errorDiv);
             }
         } catch (error) {
             console.error('Upload error:', error);
-            this.uploadStatus = 'error';
-            this.uploadMessage = 'Error uploading file';
+            // Show error message
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+            errorDiv.textContent = 'Error uploading file: ' + error.message;
+            document.getElementById('progress-steps').appendChild(errorDiv);
         }
     }
 
@@ -1233,7 +1281,7 @@
     // File upload and processing functions
     function uploadBookmarks() {
         // Clear previous status
-        }
+        // Function implementation will go here
     }
     
     // Function to reset update progress
@@ -1286,6 +1334,65 @@
             errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
             errorDiv.textContent = 'Error connecting to server';
             document.getElementById('progress-steps').appendChild(errorDiv);
+        }
+    }
+
+    // Document ready event
+    document.addEventListener('DOMContentLoaded', function() {
+        // Set up drag and drop for file upload
+        const dropZone = document.querySelector('.border-2.border-dashed');
+        if (dropZone) {
+            // Prevent default behavior to allow drop
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, preventDefaults, false);
+            });
+            
+            // Highlight drop zone when dragging over it
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, highlight, false);
+            });
+            
+            // Remove highlight when drag leaves or after drop
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, unhighlight, false);
+            });
+            
+            // Handle dropped files
+            dropZone.addEventListener('drop', handleDrop, false);
+        }
+    });
+
+    // Helper functions for drag and drop
+    function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+    
+    function highlight(e) {
+        this.classList.add('border-blue-500', 'bg-blue-100', 'bg-opacity-10');
+    }
+    
+    function unhighlight(e) {
+        this.classList.remove('border-blue-500', 'bg-blue-100', 'bg-opacity-10');
+    }
+    
+    function handleDrop(e) {
+        const dt = e.dataTransfer;
+        const file = dt.files[0];
+        
+        if (file && file.name.endsWith('.json')) {
+            // Update file input
+            const fileInput = document.getElementById('json-file');
+            fileInput.files = dt.files;
+            
+            // Update display
+            document.getElementById('file-name').textContent = file.name;
+            document.getElementById('upload-actions').style.display = 'flex';
+            
+            // Reset any previous progress
+            resetProgress();
+        } else {
+            alert('Please drop a JSON file');
         }
     }
     </script>
