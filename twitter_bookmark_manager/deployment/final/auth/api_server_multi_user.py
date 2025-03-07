@@ -857,7 +857,7 @@ def process_bookmarks():
             return jsonify({'success': False, 'error': 'No file or JSON data provided'}), 400
             
         # Copy the uploaded file to the database directory for processing
-        db_dir = os.path.join(app.config['DATABASE_FOLDER'], f'user_{user_id}')
+        db_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
         os.makedirs(db_dir, exist_ok=True)
         
         target_file = os.path.join(db_dir, 'twitter_bookmarks.json')
