@@ -923,6 +923,20 @@ def process_bookmarks():
                                     bookmark_id = str(tweet[id_field])
                                     break
                                     
+                            # New format: extract ID from tweet_url if available
+                            if not bookmark_id and 'tweet_url' in tweet:
+                                # URLs like https://x.com/username/status/1234567890123456789
+                                tweet_url = tweet['tweet_url']
+                                if '/status/' in tweet_url:
+                                    # Extract the ID part after /status/
+                                    parts = tweet_url.split('/status/')
+                                    if len(parts) > 1:
+                                        # Get everything after /status/ and before any subsequent /
+                                        potential_id = parts[1].split('/')[0]
+                                        if potential_id.isdigit():
+                                            bookmark_id = potential_id
+                                            logger.info(f"Extracted ID {bookmark_id} from tweet_url")
+                                    
                             if not bookmark_id:
                                 logger.warning(f"Could not find ID in bookmark: {tweet}")
                                 errors += 1
@@ -1011,6 +1025,20 @@ def process_bookmarks():
                                 if id_field in tweet:
                                     bookmark_id = str(tweet[id_field])
                                     break
+                                    
+                            # New format: extract ID from tweet_url if available
+                            if not bookmark_id and 'tweet_url' in tweet:
+                                # URLs like https://x.com/username/status/1234567890123456789
+                                tweet_url = tweet['tweet_url']
+                                if '/status/' in tweet_url:
+                                    # Extract the ID part after /status/
+                                    parts = tweet_url.split('/status/')
+                                    if len(parts) > 1:
+                                        # Get everything after /status/ and before any subsequent /
+                                        potential_id = parts[1].split('/')[0]
+                                        if potential_id.isdigit():
+                                            bookmark_id = potential_id
+                                            logger.info(f"Extracted ID {bookmark_id} from tweet_url")
                                     
                             if not bookmark_id:
                                 logger.warning(f"Could not find ID in bookmark: {tweet}")
