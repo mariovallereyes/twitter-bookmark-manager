@@ -650,7 +650,7 @@
 
         try {
             // Use the async endpoint instead
-            const response = await fetch('/async-update-database', {
+            const response = await fetch('/update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1054,8 +1054,8 @@
         console.log('Dispatched update-progress event');
         
         // Call the async-update-database endpoint
-        console.log('Sending request to /async-update-database');
-        fetch('/async-update-database', {
+        console.log('Sending request to /update-database');
+        fetch('/update-database', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1238,7 +1238,7 @@
         const resetProgress = document.getElementById('reset-progress').checked;
 
         // Make the API call
-        fetch('/async-update-database', {
+        fetch('/update-database', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
