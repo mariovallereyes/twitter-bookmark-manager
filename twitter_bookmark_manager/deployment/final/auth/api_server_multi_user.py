@@ -250,12 +250,23 @@ def index():
             
             # Execute a simple query to get categories
             cursor = direct_conn.cursor()
-            cursor.execute(f"""
-                SELECT id, name, description 
-                FROM categories 
-                WHERE user_id = %s 
-                ORDER BY name
-            """, (user.id,))
+            try:
+                # First try with description column
+                cursor.execute(f"""
+                    SELECT id, name, description 
+                    FROM categories 
+                    WHERE user_id = %s 
+                    ORDER BY name
+                """, (user.id,))
+            except Exception as e:
+                logger.warning(f"Error querying categories with description: {e}")
+                # Fallback query without description
+                cursor.execute(f"""
+                    SELECT id, name, '' as description
+                    FROM categories 
+                    WHERE user_id = %s 
+                    ORDER BY name
+                """, (user.id,))
             
             # Fetch categories directly
             categories = []
@@ -339,12 +350,23 @@ def index():
                 
                 # Execute a simple query to get categories
                 cursor = direct_conn.cursor()
-                cursor.execute(f"""
-                    SELECT id, name, description 
-                    FROM categories 
-                    WHERE user_id = %s 
-                    ORDER BY name
-                """, (user.id,))
+                try:
+                    # First try with description column
+                    cursor.execute(f"""
+                        SELECT id, name, description 
+                        FROM categories 
+                        WHERE user_id = %s 
+                        ORDER BY name
+                    """, (user.id,))
+                except Exception as e:
+                    logger.warning(f"Error querying categories with description: {e}")
+                    # Fallback query without description
+                    cursor.execute(f"""
+                        SELECT id, name, '' as description
+                        FROM categories 
+                        WHERE user_id = %s 
+                        ORDER BY name
+                    """, (user.id,))
                 
                 # Fetch categories directly
                 categories = []
