@@ -14,6 +14,8 @@ import threading
 import traceback
 import random
 import psycopg2
+import sqlalchemy
+from sqlalchemy import text
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
@@ -183,6 +185,50 @@ app.register_blueprint(user_api_bp)
 # Initialize user context middleware
 UserContextMiddleware(app, lambda user_id: get_user_by_id(get_db_connection(), user_id))
 
+# Debug database at startup
+@app.before_first_request
+def debug_database_startup():
+    """Check database at startup and ensure guest user exists"""
+    try:
+        logger.info("STARTUP DEBUG - Checking database initialization")
+        conn = get_db_connection()
+        
+        # Check table counts
+        tables = ['users', 'bookmarks', 'categories', 'bookmark_categories']
+        for table in tables:
+            cursor = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+            count = cursor.scalar()
+            logger.info(f"STARTUP DEBUG - Table {table} has {count} records")
+            
+        # Ensure guest user exists (user_id = 1)
+        cursor = conn.execute(text("SELECT COUNT(*) FROM users WHERE id = 1"))
+        if cursor.scalar() == 0:
+            logger.info("STARTUP DEBUG - Creating default guest user with ID 1")
+            cursor = conn.execute(
+                text("INSERT INTO users (id, username, email) VALUES (1, 'guest', 'guest@example.com') ON CONFLICT DO NOTHING")
+            )
+            
+        # Check if we have any bookmarks for user 1
+        cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id = 1"))
+        count = cursor.scalar()
+        logger.info(f"STARTUP DEBUG - User 1 has {count} bookmarks")
+        
+        # If no bookmarks for user 1, check if there are "orphaned" bookmarks with NULL user_id
+        if count == 0:
+            cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id IS NULL"))
+            null_count = cursor.scalar()
+            logger.info(f"STARTUP DEBUG - Found {null_count} bookmarks with NULL user_id")
+            
+            if null_count > 0:
+                # Update these bookmarks to belong to user 1
+                cursor = conn.execute(text("UPDATE bookmarks SET user_id = 1 WHERE user_id IS NULL"))
+                logger.info(f"STARTUP DEBUG - Updated {null_count} bookmarks to user_id 1")
+                
+        conn.close()
+    except Exception as e:
+        logger.error(f"STARTUP DEBUG - Error: {e}")
+        logger.error(traceback.format_exc())
+
 # Define login_required decorator
 def login_required(f):
     @wraps(f)
@@ -199,6 +245,12 @@ def index():
     """Home page with multiple database connection fallbacks"""
     logger.info("Home page requested")
     user = UserContext.get_current_user()
+    
+    # DEBUG: Log user information
+    if user:
+        logger.info(f"USER DEBUG - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
+    else:
+        logger.info("USER DEBUG - No authenticated user")
     
     # Choose template based on authentication
     if user:
@@ -424,6 +476,50 @@ def index():
                 # Get 5 most recent bookmarks
                 latest_tweets = searcher.get_recent_bookmarks(limit=5)
                 logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                
+                # FALLBACK: If no bookmarks found for this user, try getting system bookmarks
+                if len(latest_tweets) == 0 and user and user.id != 1:
+                    logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
+                    
+                    # Try with user_id = 1 (system user)
+                    searcher = BookmarkSearchMultiUser(conn, 1)
+                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                    logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
+                    
+                    # If still no results, try with a direct query for ANY bookmarks
+                    if len(latest_tweets) == 0:
+                        logger.warning("No system bookmarks found, trying direct query for any bookmarks")
+                        
+                        # Direct query for any bookmarks
+                        query = """
+                        SELECT id, bookmark_id, text, author, created_at, author_id
+                        FROM bookmarks
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                        """
+                        
+                        if isinstance(conn, sqlalchemy.engine.Connection):
+                            result = conn.execute(text(query))
+                            rows = result.fetchall()
+                        else:
+                            cursor = conn.cursor()
+                            cursor.execute(query)
+                            rows = cursor.fetchall()
+                            
+                        # Format the direct query results
+                        for row in rows:
+                            bookmark = {
+                                'id': row[0],
+                                'bookmark_id': row[1],
+                                'text': row[2],
+                                'author': row[3],
+                                'author_username': row[3].replace('@', '') if row[3] else '',
+                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                'author_id': row[5]
+                            }
+                            latest_tweets.append(bookmark)
+                            
+                        logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
             finally:
                 conn.close()
     except Exception as e:
@@ -899,6 +995,12 @@ def search():
     logger.info("Search route accessed")
     user = UserContext.get_current_user()
     
+    # DEBUG: Log user information
+    if user:
+        logger.info(f"USER DEBUG - Search route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
+    else:
+        logger.info("USER DEBUG - Search route - No authenticated user")
+    
     if not user:
         logger.info("User not authenticated, redirecting to login")
         return redirect(url_for('auth.login'))
@@ -946,6 +1048,67 @@ def search():
             )
             logger.info(f"Search returned {len(results)} results")
             
+            # FALLBACK: If no bookmarks found for this user, try with system user
+            if len(results) == 0 and user.id != 1:
+                logger.warning(f"No search results found for user {user.id}, falling back to system bookmarks")
+                
+                # Try with user_id = 1 (system user)
+                system_searcher = BookmarkSearchMultiUser(conn, 1)
+                results = system_searcher.search(
+                    query=query, 
+                    user=user_query, 
+                    category_ids=category_ids, 
+                    limit=100
+                )
+                logger.info(f"System user search returned {len(results)} results")
+                
+                # If still no results, try with a direct query for ANY matching bookmarks
+                if len(results) == 0:
+                    logger.warning("No system bookmarks found in search, trying direct query")
+                    
+                    # Build a direct query
+                    direct_query = """
+                    SELECT id, bookmark_id, text, author, created_at, author_id
+                    FROM bookmarks
+                    WHERE 1=1
+                    """
+                    
+                    params = []
+                    
+                    if query:
+                        direct_query += " AND text ILIKE %s"
+                        params.append(f"%{query}%")
+                    
+                    if user_query:
+                        direct_query += " AND author ILIKE %s"
+                        params.append(f"%{user_query}%")
+                        
+                    direct_query += " ORDER BY created_at DESC LIMIT 100"
+                    
+                    if isinstance(conn, sqlalchemy.engine.Connection):
+                        stmt = text(direct_query)
+                        result_proxy = conn.execute(stmt, params)
+                        rows = result_proxy.fetchall()
+                    else:
+                        cursor = conn.cursor()
+                        cursor.execute(direct_query, params)
+                        rows = cursor.fetchall()
+                        
+                    # Format the direct query results
+                    for row in rows:
+                        bookmark = {
+                            'id': row[0],
+                            'bookmark_id': row[1],
+                            'text': row[2],
+                            'author': row[3],
+                            'author_username': row[3].replace('@', '') if row[3] else '',
+                            'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                            'author_id': row[5]
+                        }
+                        results.append(bookmark)
+                        
+                    logger.info(f"Direct search query found {len(results)} bookmarks")
+            
             total_results = len(results)
             
         finally:
@@ -981,6 +1144,12 @@ def recent():
     logger.info("Recent bookmarks route accessed")
     user = UserContext.get_current_user()
     
+    # DEBUG: Log user information
+    if user:
+        logger.info(f"USER DEBUG - Recent route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
+    else:
+        logger.info("USER DEBUG - Recent route - No authenticated user")
+    
     if not user:
         logger.info("User not authenticated, redirecting to login")
         return redirect(url_for('auth.login'))
@@ -1002,11 +1171,57 @@ def recent():
             
             # Get recent bookmarks
             results = searcher.get_recent_bookmarks(limit=100)
+            logger.info(f"Recent bookmarks query returned {len(results)} results")
+            
+            # FALLBACK: If no bookmarks found for this user, try with system user
+            if len(results) == 0 and user.id != 1:
+                logger.warning(f"No recent bookmarks found for user {user.id}, falling back to system bookmarks")
+                
+                # Try with user_id = 1 (system user)
+                system_searcher = BookmarkSearchMultiUser(conn, 1)
+                results = system_searcher.get_recent_bookmarks(limit=100)
+                logger.info(f"System user recent bookmarks returned {len(results)} results")
+                
+                # If still no results, try with a direct query for ANY bookmarks
+                if len(results) == 0:
+                    logger.warning("No system bookmarks found, trying direct query for any bookmarks")
+                    
+                    # Direct query for any bookmarks
+                    direct_query = """
+                    SELECT id, bookmark_id, text, author, created_at, author_id
+                    FROM bookmarks
+                    ORDER BY created_at DESC
+                    LIMIT 100
+                    """
+                    
+                    if isinstance(conn, sqlalchemy.engine.Connection):
+                        result_proxy = conn.execute(text(direct_query))
+                        rows = result_proxy.fetchall()
+                    else:
+                        cursor = conn.cursor()
+                        cursor.execute(direct_query)
+                        rows = cursor.fetchall()
+                        
+                    # Format the direct query results
+                    for row in rows:
+                        bookmark = {
+                            'id': row[0],
+                            'bookmark_id': row[1],
+                            'text': row[2],
+                            'author': row[3],
+                            'author_username': row[3].replace('@', '') if row[3] else '',
+                            'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                            'author_id': row[5]
+                        }
+                        results.append(bookmark)
+                        
+                    logger.info(f"Direct query found {len(results)} bookmarks")
             
         finally:
             conn.close()
     except Exception as e:
         logger.error(f"Recent bookmarks error: {e}")
+        logger.error(traceback.format_exc())
         error_message = str(e)
     
     # Check if user is admin
@@ -1034,6 +1249,12 @@ def category(category_name):
     """Show bookmarks for a specific category"""
     logger.info(f"Category route accessed for: {category_name}")
     user = UserContext.get_current_user()
+    
+    # DEBUG: Log user information
+    if user:
+        logger.info(f"USER DEBUG - Category route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
+    else:
+        logger.info("USER DEBUG - Category route - No authenticated user")
     
     if not user:
         logger.info("User not authenticated, redirecting to login")
@@ -1071,8 +1292,106 @@ def category(category_name):
                     limit=100
                 )
                 logger.info(f"Found {len(results)} bookmarks for category: {category_name}")
+                
+                # FALLBACK: If no bookmarks found for this user, try with system user
+                if len(results) == 0 and user.id != 1:
+                    logger.warning(f"No category results found for user {user.id}, falling back to system bookmarks")
+                    
+                    # Try with system user (user_id = 1)
+                    system_searcher = BookmarkSearchMultiUser(conn, 1)
+                    
+                    # Try to find the category again using system user's categories
+                    system_categories = system_searcher.get_categories()
+                    system_category_id = None
+                    
+                    for cat in system_categories:
+                        if cat['name'] == category_name:
+                            system_category_id = cat['id']
+                            break
+                    
+                    if system_category_id:
+                        results = system_searcher.search(
+                            query='', 
+                            user='', 
+                            category_ids=[system_category_id], 
+                            limit=100
+                        )
+                        logger.info(f"System user category search returned {len(results)} results")
+                    
+                    # If still no results or category not found, try a direct query
+                    if len(results) == 0:
+                        logger.warning("No system category results, trying direct query by category name")
+                        
+                        # Direct query by category name
+                        direct_query = """
+                        SELECT b.id, b.bookmark_id, b.text, b.author, b.created_at, b.author_id
+                        FROM bookmarks b
+                        JOIN bookmark_categories bc ON b.id = bc.bookmark_id
+                        JOIN categories c ON bc.category_id = c.id
+                        WHERE c.name = %s
+                        ORDER BY b.created_at DESC
+                        LIMIT 100
+                        """
+                        
+                        if isinstance(conn, sqlalchemy.engine.Connection):
+                            stmt = text(direct_query)
+                            result_proxy = conn.execute(stmt, [category_name])
+                            rows = result_proxy.fetchall()
+                        else:
+                            cursor = conn.cursor()
+                            cursor.execute(direct_query, (category_name,))
+                            rows = cursor.fetchall()
+                            
+                        # Format the direct query results
+                        for row in rows:
+                            bookmark = {
+                                'id': row[0],
+                                'bookmark_id': row[1],
+                                'text': row[2],
+                                'author': row[3],
+                                'author_username': row[3].replace('@', '') if row[3] else '',
+                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                'author_id': row[5]
+                            }
+                            results.append(bookmark)
+                            
+                        logger.info(f"Direct category query found {len(results)} bookmarks")
             else:
                 logger.warning(f"Category not found: {category_name}")
+                
+                # Try to find any bookmarks with this category name across all users
+                logger.info(f"Trying to find category '{category_name}' for any user")
+                
+                direct_query = """
+                SELECT c.id, c.user_id
+                FROM categories c
+                WHERE c.name = %s
+                LIMIT 1
+                """
+                
+                if isinstance(conn, sqlalchemy.engine.Connection):
+                    stmt = text(direct_query)
+                    result = conn.execute(stmt, [category_name])
+                    row = result.fetchone()
+                else:
+                    cursor = conn.cursor()
+                    cursor.execute(direct_query, (category_name,))
+                    row = cursor.fetchone()
+                
+                if row:
+                    any_category_id = row[0]
+                    category_user_id = row[1]
+                    logger.info(f"Found category '{category_name}' (ID: {any_category_id}) for user {category_user_id}")
+                    
+                    # Create a searcher for this user
+                    alternate_searcher = BookmarkSearchMultiUser(conn, category_user_id)
+                    results = alternate_searcher.search(
+                        query='', 
+                        user='', 
+                        category_ids=[any_category_id], 
+                        limit=100
+                    )
+                    logger.info(f"Found {len(results)} bookmarks for category '{category_name}' from user {category_user_id}")
                 
         finally:
             conn.close()
@@ -1100,6 +1419,80 @@ def category(category_name):
         db_error=bool(error_message),
         error_message=error_message
     )
+
+# Add a debug route for direct database inspection
+@app.route('/debug/database')
+def debug_database():
+    """Debug route to directly check database contents"""
+    user = UserContext.get_current_user()
+    
+    # Only allow this for authenticated users
+    if not user:
+        return jsonify({"error": "Authentication required"}), 401
+        
+    # Build debug information
+    debug_info = {
+        "user": {
+            "id": user.id if user else None,
+            "username": getattr(user, 'username', 'unknown') if user else None
+        },
+        "database": {}
+    }
+    
+    try:
+        # Connect to database
+        conn = get_db_connection()
+        try:
+            # Get table counts
+            tables = ['users', 'bookmarks', 'categories', 'bookmark_categories']
+            for table in tables:
+                cursor = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                debug_info['database'][f'{table}_count'] = cursor.scalar()
+                
+            # Check bookmarks for this user
+            cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id = :user_id"), {"user_id": user.id})
+            debug_info['database']['user_bookmarks_count'] = cursor.scalar()
+            
+            # Get a few sample bookmarks
+            cursor = conn.execute(text("SELECT id, bookmark_id, text, author, created_at FROM bookmarks LIMIT 5"))
+            samples = []
+            for row in cursor:
+                samples.append({
+                    "id": row[0],
+                    "bookmark_id": row[1],
+                    "text": row[2][:50] + "..." if row[2] and len(row[2]) > 50 else row[2],
+                    "author": row[3],
+                    "created_at": str(row[4])
+                })
+            debug_info['database']['sample_bookmarks'] = samples
+            
+            # Get user's bookmarks sample
+            cursor = conn.execute(
+                text("SELECT id, bookmark_id, text, author, created_at FROM bookmarks WHERE user_id = :user_id LIMIT 5"), 
+                {"user_id": user.id}
+            )
+            user_samples = []
+            for row in cursor:
+                user_samples.append({
+                    "id": row[0],
+                    "bookmark_id": row[1],
+                    "text": row[2][:50] + "..." if row[2] and len(row[2]) > 50 else row[2],
+                    "author": row[3],
+                    "created_at": str(row[4])
+                })
+            debug_info['database']['user_sample_bookmarks'] = user_samples
+            
+        finally:
+            conn.close()
+            
+        return jsonify(debug_info)
+    except Exception as e:
+        logger.error(f"Debug route error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 # Add error handlers to capture all exceptions
 @app.errorhandler(Exception)

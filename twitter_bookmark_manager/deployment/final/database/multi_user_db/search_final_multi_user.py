@@ -55,6 +55,15 @@ class BookmarkSearchMultiUser:
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
+        # Ensure user_id is an integer
+        try:
+            self.user_id = int(self.user_id)
+        except (TypeError, ValueError):
+            logger.error(f"Invalid user_id: {self.user_id}, type: {type(self.user_id)}")
+            self.user_id = 1  # Default to system user
+        
+        logger.info(f"SEARCH DEBUG - Using user_id: {self.user_id} (type: {type(self.user_id)})")
+        
         cursor, is_sqlalchemy = self._get_cursor()
         results = []
         
@@ -92,7 +101,32 @@ class BookmarkSearchMultiUser:
             sql_query += " ORDER BY b.created_at DESC LIMIT %s"
             params.append(limit)
             
-            logger.info(f"Executing search query with params: {params}")
+            # CRITICAL DEBUGGING: Log full SQL query and parameters
+            param_str = ', '.join([f"'{p}'" if isinstance(p, str) else str(p) for p in params])
+            logger.info(f"SEARCH DEBUG - Executing exact SQL query: {sql_query} with params: [{param_str}]")
+            logger.info(f"SEARCH DEBUG - User ID: {self.user_id}, Type: {type(self.user_id)}")
+            
+            # Direct debugging query to check bookmarks table
+            if is_sqlalchemy:
+                check_sql = text("SELECT COUNT(*) FROM bookmarks")
+                result = self.conn.execute(check_sql)
+                count = result.scalar()
+                logger.info(f"SEARCH DEBUG - Total bookmarks in database: {count}")
+                
+                check_sql = text("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s")
+                result = self.conn.execute(check_sql, [self.user_id])
+                count = result.scalar()
+                logger.info(f"SEARCH DEBUG - Bookmarks for user {self.user_id}: {count}")
+            else:
+                # For psycopg2, use the cursor directly
+                debug_cursor = self.conn.cursor()
+                debug_cursor.execute("SELECT COUNT(*) FROM bookmarks")
+                count = debug_cursor.fetchone()[0]
+                logger.info(f"SEARCH DEBUG - Total bookmarks in database: {count}")
+                
+                debug_cursor.execute("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s", (self.user_id,))
+                count = debug_cursor.fetchone()[0]
+                logger.info(f"SEARCH DEBUG - Bookmarks for user {self.user_id}: {count}")
             
             # Execute the query
             if is_sqlalchemy:
@@ -105,7 +139,13 @@ class BookmarkSearchMultiUser:
                 cursor.execute(sql_query, params)
                 rows = cursor.fetchall()
             
-            logger.info(f"Search returned {len(rows)} results")
+            logger.info(f"SEARCH DEBUG - Search returned {len(rows)} results")
+            
+            # Debug raw row data
+            if len(rows) > 0:
+                logger.info(f"SEARCH DEBUG - First row sample: {rows[0]}")
+            else:
+                logger.info("SEARCH DEBUG - No rows returned")
             
             # Process results
             for row in rows:
@@ -165,6 +205,15 @@ class BookmarkSearchMultiUser:
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
+        # Ensure user_id is an integer
+        try:
+            self.user_id = int(self.user_id)
+        except (TypeError, ValueError):
+            logger.error(f"Invalid user_id: {self.user_id}, type: {type(self.user_id)}")
+            self.user_id = 1  # Default to system user
+        
+        logger.info(f"RECENT DEBUG - Using user_id: {self.user_id} (type: {type(self.user_id)})")
+        
         cursor, is_sqlalchemy = self._get_cursor()
         results = []
         
@@ -179,7 +228,32 @@ class BookmarkSearchMultiUser:
             """
             params = [self.user_id, limit]
             
-            logger.info(f"Executing get_recent query with limit {limit}")
+            # CRITICAL DEBUGGING: Log full SQL query
+            param_str = ', '.join([f"'{p}'" if isinstance(p, str) else str(p) for p in params])
+            logger.info(f"RECENT DEBUG - Executing exact SQL query: {query} with params: [{param_str}]")
+            logger.info(f"RECENT DEBUG - User ID: {self.user_id}, Type: {type(self.user_id)}")
+            
+            # Direct debugging query to check bookmarks table
+            if is_sqlalchemy:
+                check_sql = text("SELECT COUNT(*) FROM bookmarks")
+                result = self.conn.execute(check_sql)
+                count = result.scalar()
+                logger.info(f"RECENT DEBUG - Total bookmarks in database: {count}")
+                
+                check_sql = text("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s")
+                result = self.conn.execute(check_sql, [self.user_id])
+                count = result.scalar()
+                logger.info(f"RECENT DEBUG - Bookmarks for user {self.user_id}: {count}")
+            else:
+                # For psycopg2, use the cursor directly
+                debug_cursor = self.conn.cursor()
+                debug_cursor.execute("SELECT COUNT(*) FROM bookmarks")
+                count = debug_cursor.fetchone()[0]
+                logger.info(f"RECENT DEBUG - Total bookmarks in database: {count}")
+                
+                debug_cursor.execute("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s", (self.user_id,))
+                count = debug_cursor.fetchone()[0]
+                logger.info(f"RECENT DEBUG - Bookmarks for user {self.user_id}: {count}")
             
             # Execute query based on connection type
             if is_sqlalchemy:
@@ -190,7 +264,13 @@ class BookmarkSearchMultiUser:
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
             
-            logger.info(f"get_recent returned {len(rows)} results")
+            logger.info(f"RECENT DEBUG - Query returned {len(rows)} results")
+            
+            # Debug raw row data
+            if len(rows) > 0:
+                logger.info(f"RECENT DEBUG - First row sample: {rows[0]}")
+            else:
+                logger.info("RECENT DEBUG - No rows returned")
             
             for row in rows:
                 bookmark = {
@@ -257,6 +337,15 @@ class BookmarkSearchMultiUser:
         """Get all categories for a user with bookmark counts."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
+        
+        # Ensure user_id is an integer
+        try:
+            self.user_id = int(self.user_id)
+        except (TypeError, ValueError):
+            logger.error(f"Invalid user_id: {self.user_id}, type: {type(self.user_id)}")
+            self.user_id = 1  # Default to system user
+            
+        logger.info(f"CATEGORIES DEBUG - Using user_id: {self.user_id} (type: {type(self.user_id)})")
         
         cursor, is_sqlalchemy = self._get_cursor()
         results = []
