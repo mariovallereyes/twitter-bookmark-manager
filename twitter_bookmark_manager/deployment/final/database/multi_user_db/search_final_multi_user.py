@@ -61,7 +61,7 @@ class BookmarkSearchMultiUser:
         try:
             # Start building the query
             sql_query = """
-            SELECT b.id, b.text, b.author, b.created_at 
+            SELECT b.id, b.bookmark_id, b.text, b.author, b.created_at, b.author_id 
             FROM bookmarks b 
             WHERE b.user_id = %s
             """
@@ -92,6 +92,8 @@ class BookmarkSearchMultiUser:
             sql_query += " ORDER BY b.created_at DESC LIMIT %s"
             params.append(limit)
             
+            logger.info(f"Executing search query with params: {params}")
+            
             # Execute the query
             if is_sqlalchemy:
                 # For SQLAlchemy, use text() to create a SQL expression
@@ -103,18 +105,23 @@ class BookmarkSearchMultiUser:
                 cursor.execute(sql_query, params)
                 rows = cursor.fetchall()
             
+            logger.info(f"Search returned {len(rows)} results")
+            
             # Process results
             for row in rows:
                 bookmark = {
                     'id': row[0],
-                    'text': row[1],
-                    'author': row[2],
-                    'created_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None
+                    'bookmark_id': row[1],  # Include the Twitter bookmark_id
+                    'text': row[2],
+                    'author': row[3],
+                    'author_username': row[3].replace('@', '') if row[3] else '',
+                    'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                    'author_id': row[5]
                 }
                 
                 # Get categories for this bookmark
                 categories = self._get_bookmark_categories(bookmark['id'], is_sqlalchemy, cursor)
-                bookmark['categories'] = categories
+                bookmark['categories'] = [cat['name'] for cat in categories]
                 results.append(bookmark)
                 
         except Exception as e:
@@ -164,13 +171,15 @@ class BookmarkSearchMultiUser:
         try:
             # Get recent bookmarks
             query = """
-            SELECT id, text, author, created_at, bookmark_id, author_id
+            SELECT id, bookmark_id, text, author, created_at, author_id
             FROM bookmarks
             WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT %s
             """
             params = [self.user_id, limit]
+            
+            logger.info(f"Executing get_recent query with limit {limit}")
             
             # Execute query based on connection type
             if is_sqlalchemy:
@@ -181,19 +190,22 @@ class BookmarkSearchMultiUser:
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
             
+            logger.info(f"get_recent returned {len(rows)} results")
+            
             for row in rows:
                 bookmark = {
                     'id': row[0],
-                    'text': row[1],
-                    'author': row[2],
-                    'created_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
-                    'bookmark_id': row[4],
+                    'bookmark_id': row[1],  # Include the Twitter bookmark_id
+                    'text': row[2],
+                    'author': row[3],
+                    'author_username': row[3].replace('@', '') if row[3] else '',
+                    'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
                     'author_id': row[5]
                 }
                 
                 # Get categories for this bookmark
                 categories = self._get_bookmark_categories(bookmark['id'], is_sqlalchemy, cursor)
-                bookmark['categories'] = categories
+                bookmark['categories'] = [cat['name'] for cat in categories]
                 results.append(bookmark)
                 
         except Exception as e:
@@ -211,20 +223,8 @@ class BookmarkSearchMultiUser:
         
         bookmarks = self.get_recent(limit=limit, user_id=user_id)
         
-        # Format for template display
-        formatted_bookmarks = []
-        for bookmark in bookmarks:
-            # Format the bookmark data
-            formatted_bookmark = {
-                'id': bookmark.get('bookmark_id', bookmark.get('id', '')),
-                'text': bookmark.get('text', ''),
-                'author_username': bookmark.get('author', '').replace('@', ''),
-                'created_at': bookmark.get('created_at', ''),
-                'categories': [cat['name'] for cat in bookmark.get('categories', [])]
-            }
-            formatted_bookmarks.append(formatted_bookmark)
-            
-        return formatted_bookmarks
+        # Return the bookmarks directly as they are already formatted for template display
+        return bookmarks
             
     @with_user_context
     def get_bookmark_count(self, user_id=1):
@@ -254,7 +254,7 @@ class BookmarkSearchMultiUser:
             
     @with_user_context
     def get_categories(self, user_id=1):
-        """Get all categories for a user."""
+        """Get all categories for a user with bookmark counts."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
@@ -271,6 +271,8 @@ class BookmarkSearchMultiUser:
             ORDER BY c.name
             """
             
+            logger.info(f"Executing get_categories query for user_id: {self.user_id}")
+            
             # Execute query based on connection type
             if is_sqlalchemy:
                 stmt = text(query)
@@ -280,11 +282,20 @@ class BookmarkSearchMultiUser:
                 cursor.execute(query, (self.user_id,))
                 rows = cursor.fetchall()
             
+            logger.info(f"get_categories returned {len(rows)} categories")
+            
             for row in rows:
+                # Calculate percentage if there are bookmarks
+                bookmark_count = self.get_bookmark_count(user_id)
+                percentage = 0
+                if bookmark_count > 0 and row[2] > 0:
+                    percentage = int((row[2] / bookmark_count) * 100)
+                
                 category = {
                     'id': row[0],
                     'name': row[1],
-                    'count': row[2]
+                    'count': row[2],
+                    'percentage': percentage
                 }
                 results.append(category)
                 

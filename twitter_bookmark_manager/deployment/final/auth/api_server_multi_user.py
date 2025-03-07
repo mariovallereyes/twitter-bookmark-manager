@@ -428,6 +428,7 @@ def index():
                 conn.close()
     except Exception as e:
         logger.warning(f"Failed to retrieve latest bookmarks: {e}")
+        logger.error(traceback.format_exc())
     
     # Return normal template if we have successfully connected, even if no categories
     return render_template(
@@ -436,7 +437,9 @@ def index():
         user=user, 
         is_admin=is_admin,
         db_error=False,
-        latest_tweets=latest_tweets
+        latest_tweets=latest_tweets,
+        showing_results=len(latest_tweets),
+        total_results=len(latest_tweets)
     )
 
 # Upload bookmarks endpoint
@@ -934,33 +937,22 @@ def search():
                             break
             
             # Perform search
+            logger.info(f"Executing search with query: '{query}', categories: {category_ids}")
             results = searcher.search(
                 query=query, 
                 user=user_query, 
                 category_ids=category_ids, 
                 limit=100
             )
+            logger.info(f"Search returned {len(results)} results")
             
-            # Format results for template
-            formatted_results = []
-            for bookmark in results:
-                # Format the bookmark data
-                formatted_bookmark = {
-                    'id': bookmark.get('id', ''),
-                    'text': bookmark.get('text', ''),
-                    'author_username': bookmark.get('author', '').replace('@', ''),
-                    'created_at': bookmark.get('created_at', ''),
-                    'categories': [cat['name'] for cat in bookmark.get('categories', [])]
-                }
-                formatted_results.append(formatted_bookmark)
-            
-            total_results = len(formatted_results)
-            results = formatted_results
+            total_results = len(results)
             
         finally:
             conn.close()
     except Exception as e:
         logger.error(f"Search error: {e}")
+        logger.error(traceback.format_exc())
         error_message = str(e)
     
     # Check if user is admin
@@ -1071,27 +1063,14 @@ def category(category_name):
             
             if category_id:
                 # Perform search by category
+                logger.info(f"Searching bookmarks for category: {category_name} (ID: {category_id})")
                 results = searcher.search(
                     query='', 
                     user='', 
                     category_ids=[category_id], 
                     limit=100
                 )
-                
-                # Format results for template
-                formatted_results = []
-                for bookmark in results:
-                    # Format the bookmark data
-                    formatted_bookmark = {
-                        'id': bookmark.get('id', ''),
-                        'text': bookmark.get('text', ''),
-                        'author_username': bookmark.get('author', '').replace('@', ''),
-                        'created_at': bookmark.get('created_at', ''),
-                        'categories': [cat['name'] for cat in bookmark.get('categories', [])]
-                    }
-                    formatted_results.append(formatted_bookmark)
-                
-                results = formatted_results
+                logger.info(f"Found {len(results)} bookmarks for category: {category_name}")
             else:
                 logger.warning(f"Category not found: {category_name}")
                 
@@ -1099,6 +1078,7 @@ def category(category_name):
             conn.close()
     except Exception as e:
         logger.error(f"Category view error: {e}")
+        logger.error(traceback.format_exc())
         error_message = str(e)
     
     # Check if user is admin
