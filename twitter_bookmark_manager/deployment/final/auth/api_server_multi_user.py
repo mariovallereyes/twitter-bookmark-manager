@@ -114,6 +114,9 @@ app = Flask(__name__,
             template_folder='../web_final/templates',
             static_folder='../web_final/static')
 
+# Configure CORS - Allow all origins during deployment
+CORS(app, supports_credentials=True)
+
 # Configure app
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(32)),
@@ -407,7 +410,23 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         user = UserContext.get_current_user()
         if user is None:
-            return redirect(url_for('auth.login', next=request.url))
+            # Check if this is an API request based on the URL or Accept header
+            is_api_request = (
+                request.path.startswith('/api/') or 
+                request.headers.get('Accept') == 'application/json' or
+                request.headers.get('Content-Type') == 'application/json'
+            )
+            
+            if is_api_request:
+                # Return a JSON error for API requests
+                return jsonify({
+                    'success': False,
+                    'authenticated': False,
+                    'error': 'User not authenticated'
+                }), 401
+            else:
+                # Redirect to login for browser requests
+                return redirect(url_for('auth.login', next=request.url))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -786,9 +805,11 @@ def upload_bookmarks():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/process-bookmarks', methods=['POST'])
+@login_required
 def process_bookmarks():
     """
-    Process an uploaded bookmarks JSON file and insert into the database
+    Process an uploaded bookmarks JSON file and insert into the database.
+    Handles both FormData uploads and JSON requests.
     """
     try:
         # Get user info
@@ -798,27 +819,58 @@ def process_bookmarks():
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
         user_id = user_context.user_id
+        logger.info(f"Processing bookmarks for user {user_id}")
         
-        # Get request data
-        data = request.get_json()
-        if not data:
-            logger.error(f"No JSON data in request for user {user_id}")
-            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        # Check if this is a FormData file upload or a JSON request
+        if 'file' in request.files:
+            # This is a direct file upload via FormData
+            file = request.files['file']
             
-        filename = data.get('filename')
-        if not filename:
-            logger.error(f"No filename provided in request for user {user_id}")
-            return jsonify({'success': False, 'error': 'No filename provided'}), 400
+            # Check if a file was selected
+            if file.filename == '':
+                logger.error(f"No file selected for user {user_id}")
+                return jsonify({'success': False, 'error': 'No file selected'}), 400
+                
+            # Ensure upload directory exists
+            upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+            user_dir = os.path.join(upload_folder, f"user_{user_id}")
+            os.makedirs(user_dir, exist_ok=True)
             
-        # Reconstruct the file path
-        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
-        user_dir = os.path.join(upload_folder, f"user_{user_id}")
-        filepath = os.path.join(user_dir, filename)
-        
-        if not os.path.exists(filepath):
-            logger.error(f"File not found: {filepath}")
-            return jsonify({'success': False, 'error': 'File not found'}), 404
+            # Generate a safe filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = secure_filename(f"bookmarks_{timestamp}.json")
+            filepath = os.path.join(user_dir, filename)
             
+            # Save the file
+            try:
+                file.save(filepath)
+                file_size = os.path.getsize(filepath)
+                logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
+            except Exception as save_error:
+                logger.error(f"Error saving file: {str(save_error)}")
+                return jsonify({'success': False, 'error': f'Error saving file: {str(save_error)}'}), 500
+                
+        else:
+            # This is a JSON request with a filename reference
+            data = request.get_json()
+            if not data:
+                logger.error(f"No JSON data in request for user {user_id}")
+                return jsonify({'success': False, 'error': 'No data provided'}), 400
+                
+            filename = data.get('filename')
+            if not filename:
+                logger.error(f"No filename provided in request for user {user_id}")
+                return jsonify({'success': False, 'error': 'No filename provided'}), 400
+                
+            # Reconstruct the file path
+            upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+            user_dir = os.path.join(upload_folder, f"user_{user_id}")
+            filepath = os.path.join(user_dir, filename)
+            
+            if not os.path.exists(filepath):
+                logger.error(f"File not found: {filepath}")
+                return jsonify({'success': False, 'error': 'File not found'}), 404
+                
         logger.info(f"Processing bookmarks from {filepath}")
         
         # Create database directory if not exists
@@ -831,7 +883,7 @@ def process_bookmarks():
         logger.info(f"Copied uploaded file to {target_filepath} for processing")
         
         # Generate a session ID for tracking
-        session_id = data.get('session_id', str(uuid.uuid4()))
+        session_id = str(uuid.uuid4())
         
         # Read the JSON file
         try:
@@ -1438,7 +1490,7 @@ def category(category_name):
             
             if category_id:
                 # Perform search by category
-                logger.info(f"Searching bookmarks for category: {category_name} (ID: {category_id})")
+                logger.info(f"Searching bookmarks for category: {category_name} (ID: {category_id}")
                 results = searcher.search(
                     query='', 
                     user='', 
@@ -1739,6 +1791,93 @@ def handle_exception(e):
         'error': 'Internal Server Error',
         'message': str(e)
     }), 500
+
+@app.route('/api/user-info', methods=['GET'])
+@login_required
+def api_user_info():
+    """API endpoint to get current user information.
+    This is used by the frontend to check if the user is authenticated.
+    """
+    try:
+        # Get the current user from session
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({
+                'error': 'Not authenticated',
+                'authenticated': False
+            }), 401
+
+        # Get user details from database
+        user = get_user_by_id(get_db_connection(), user_id)
+        if not user:
+            return jsonify({
+                'error': 'User not found',
+                'authenticated': False
+            }), 404
+
+        # Return user info (excluding sensitive data)
+        return jsonify({
+            'authenticated': True,
+            'user_id': user_id,
+            'username': user.username,
+            'is_admin': is_admin_user(user_id),
+            'profile_picture': user.profile_picture if hasattr(user, 'profile_picture') else None
+        })
+    except Exception as e:
+        logger.error(f"Error in user info API: {str(e)}")
+        return jsonify({
+            'error': 'Internal server error',
+            'message': str(e),
+            'authenticated': False
+        }), 500
+
+# Add API endpoint for categories
+@app.route('/api/categories', methods=['GET'])
+@login_required
+def api_categories():
+    """API endpoint to get categories for the current user."""
+    try:
+        # Get the current user from session
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({
+                'error': 'Not authenticated'
+            }), 401
+
+        # Get categories from database
+        categories = get_categories_for_user(user_id)
+        
+        # Return categories as JSON
+        return jsonify({
+            'success': True,
+            'categories': [
+                {
+                    'name': category.name,
+                    'count': category.bookmark_count if hasattr(category, 'bookmark_count') else 0
+                }
+                for category in categories
+            ]
+        })
+    except Exception as e:
+        logger.error(f"Error in categories API: {str(e)}")
+        return jsonify({
+            'error': 'Internal server error',
+            'message': str(e)
+        }), 500
+
+# Add authentication check endpoint
+@app.route('/check-auth', methods=['GET'])
+def check_auth():
+    """Simple endpoint to check if user is authenticated."""
+    if 'user_id' in session:
+        return jsonify({
+            'authenticated': True,
+            'user_id': session['user_id']
+        })
+    else:
+        return jsonify({
+            'authenticated': False
+        }), 401
 
 # Run the app if this file is executed directly
 if __name__ == '__main__':

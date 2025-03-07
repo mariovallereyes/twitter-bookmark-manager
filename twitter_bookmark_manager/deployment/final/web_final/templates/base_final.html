@@ -658,6 +658,24 @@
         formData.append('file', file);
         
         try {
+            // First check authentication
+            const authCheck = await fetch('/check-auth', {
+                method: 'GET',
+                credentials: 'include'
+            });
+            
+            const authResult = await authCheck.json();
+            
+            if (!authResult.authenticated) {
+                updateStepStatus('step-upload', 'error');
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                errorDiv.textContent = 'User not authenticated. Please log out and log in again.';
+                document.getElementById('progress-steps').appendChild(errorDiv);
+                return;
+            }
+            
+            // Then process the upload
             await processUpload(formData);
         } catch (error) {
             console.error('Upload error:', error);
@@ -674,17 +692,40 @@
     // Process the upload with progress updates
     async function processUpload(formData) {
         try {
+            // Clear any previous error messages
+            document.getElementById('auth-status-display').innerHTML = '';
+            
             // Step 1: Upload file
             updateStepStatus('step-upload', 'processing');
+            
+            console.log('Sending request to /process-bookmarks with credentials included');
+            
             const uploadResponse = await fetch('/process-bookmarks', {
                 method: 'POST',
                 body: formData,
-                credentials: 'include'
+                credentials: 'include'  // Ensure credentials are included
             });
             
             if (!uploadResponse.ok) {
-                const errorData = await uploadResponse.json();
-                throw new Error(errorData.error || 'Upload failed');
+                if (uploadResponse.status === 401) {
+                    // Authentication error
+                    updateStepStatus('step-upload', 'error');
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+                    errorDiv.textContent = 'User not authenticated. Please log out and log in again.';
+                    document.getElementById('progress-steps').appendChild(errorDiv);
+                    
+                    // Update auth status display
+                    document.getElementById('auth-status-display').innerHTML = 
+                        'Authentication check failed. Status: ' + uploadResponse.status + 
+                        '. You need to log out and log in again.';
+                    document.getElementById('auth-status-display').className = 'mt-2 text-xs text-red-400';
+                    
+                    throw new Error('User not authenticated');
+                } else {
+                    const errorData = await uploadResponse.json();
+                    throw new Error(errorData.error || 'Upload failed');
+                }
             }
             
             updateStepStatus('step-upload', 'done');
@@ -708,7 +749,8 @@
                 // Create success message
                 const successDiv = document.createElement('div');
                 successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
-                successDiv.textContent = 'File uploaded successfully! Click "Update Database" to process the new data.';
+                successDiv.textContent = 'File uploaded and processed successfully! ' + 
+                    (responseData.message || 'Click "Update Database" to process the new data.');
                 document.getElementById('progress-steps').appendChild(successDiv);
             } else {
                 // Show error message
@@ -855,7 +897,6 @@
                 // Handle error in status check
                 document.getElementById('step-find-new').querySelector('.progress-icon').textContent = '❌';
                 alert('Error checking processing status: ' + (data.error || 'Unknown error'));
-                console.error('Status error:', data);
                 
                 // Enable process button for retry
                 const processButton = document.getElementById('process-button');
