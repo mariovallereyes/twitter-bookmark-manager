@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 from typing import Dict, Any, Optional, List, Tuple
+import sqlite3
+import psutil
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -48,6 +50,7 @@ import requests
 import hashlib
 import platform
 from sqlalchemy import text, create_engine
+from flask_cors import CORS
 
 # Import user authentication components
 from auth.auth_routes_final import auth_bp
@@ -125,6 +128,168 @@ app.config.update(
 
 # Global session status tracking
 session_status: Dict[str, Dict[str, Any]] = {}
+
+# Path for the SQLite database to store session status
+STATUS_DB_PATH = os.path.join(os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', 'data'), 'session_status.db')
+
+# Initialize status database
+def init_status_db():
+    """Initialize the SQLite database for storing session status"""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_status (
+            session_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            message TEXT,
+            timestamp TEXT NOT NULL,
+            is_complete BOOLEAN DEFAULT 0,
+            success BOOLEAN DEFAULT 0,
+            data TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info(f"Session status database initialized at {STATUS_DB_PATH}")
+    except Exception as e:
+        logger.error(f"Error initializing session status database: {str(e)}")
+        logger.error(traceback.format_exc())
+
+# Initialize the database at startup
+init_status_db()
+
+# Function to save session status to the database
+def save_session_status(session_id, status_data):
+    """Save session status to the SQLite database"""
+    try:
+        # Convert Python dict to JSON string
+        data_json = json.dumps(status_data.get('data', {}))
+        
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if session exists
+        cursor.execute("SELECT 1 FROM session_status WHERE session_id = ?", (session_id,))
+        exists = cursor.fetchone() is not None
+        
+        now = datetime.now().isoformat()
+        
+        if exists:
+            # Update existing record
+            cursor.execute('''
+            UPDATE session_status SET
+                status = ?,
+                message = ?,
+                timestamp = ?,
+                is_complete = ?,
+                success = ?,
+                data = ?,
+                updated_at = ?
+            WHERE session_id = ?
+            ''', (
+                status_data.get('status', 'unknown'),
+                status_data.get('message', ''),
+                status_data.get('timestamp', now),
+                1 if status_data.get('is_complete', False) else 0,
+                1 if status_data.get('success', False) else 0,
+                data_json,
+                now,
+                session_id
+            ))
+        else:
+            # Insert new record
+            cursor.execute('''
+            INSERT INTO session_status
+            (session_id, user_id, status, message, timestamp, is_complete, success, data, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                session_id,
+                status_data.get('user_id', ''),
+                status_data.get('status', 'unknown'),
+                status_data.get('message', ''),
+                status_data.get('timestamp', now),
+                1 if status_data.get('is_complete', False) else 0,
+                1 if status_data.get('success', False) else 0,
+                data_json,
+                now,
+                now
+            ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error saving session status: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+# Function to get session status from the database
+def get_session_status(session_id):
+    """Get session status from the SQLite database"""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT * FROM session_status WHERE session_id = ?
+        ''', (session_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # Convert row to dict
+            status = dict(row)
+            
+            # Parse JSON data field
+            try:
+                status['data'] = json.loads(status['data'])
+            except:
+                status['data'] = {}
+                
+            # Convert SQLite booleans (0/1) to Python booleans
+            status['is_complete'] = bool(status['is_complete'])
+            status['success'] = bool(status['success'])
+            
+            return status
+        else:
+            return None
+    except Exception as e:
+        logger.error(f"Error getting session status: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+# Cleanup old sessions periodically
+def cleanup_old_sessions():
+    """Remove sessions older than 24 hours from the database"""
+    try:
+        conn = sqlite3.connect(STATUS_DB_PATH)
+        cursor = conn.cursor()
+        
+        # Get timestamp for 24 hours ago
+        cutoff_time = (datetime.now() - timedelta(hours=24)).isoformat()
+        
+        cursor.execute('''
+        DELETE FROM session_status WHERE created_at < ?
+        ''', (cutoff_time,))
+        
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} expired session records")
+        
+        return deleted_count
+    except Exception as e:
+        logger.error(f"Error cleaning up old sessions: {str(e)}")
+        logger.error(traceback.format_exc())
+        return 0
 
 # Register cleanup function to run on app shutdown
 @app.teardown_appcontext
@@ -927,7 +1092,7 @@ def update_database():
             
             # Start background process
             thread = threading.Thread(
-                target=background_rebuild_vectors,
+                target=background_process,
                 args=(session_id, user_id)
             )
             thread.daemon = True
@@ -984,37 +1149,40 @@ def background_process(session_id, user_id, rebuild_vector=False, reset_progress
     Background task to process bookmarks and update database
     """
     try:
-        logger.info(f"Starting background process for user {user_id} (session: {session_id})")
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024
+        
+        logger.info(f"Starting background process for user {user_id} (session: {session_id}) - Initial memory: {initial_memory:.2f} MB")
         
         # Update status to processing
-        session_status[session_id]['status'] = 'processing'
-        session_status[session_id]['message'] = 'Processing bookmarks'
+        status_data = {
+            'status': 'processing',
+            'user_id': user_id,
+            'timestamp': datetime.now().isoformat(),
+            'message': 'Processing bookmarks',
+            'is_complete': False,
+            'success': False,
+            'data': {
+                'total_processed': 0,
+                'new_count': 0,
+                'updated_count': 0,
+                'errors': 0,
+                'memory_usage': initial_memory,
+                'rebuild_vector': rebuild_vector,
+                'reset_progress': reset_progress
+            }
+        }
+        
+        # Save to database
+        save_session_status(session_id, status_data)
+        
+        # Clean up old sessions - do this periodically
+        cleanup_old_sessions()
         
         # If we're only rebuilding vectors
         if rebuild_vector and not reset_progress:
-            # Import vector store
-            from database.multi_user_db.vector_store_final import VectorStore
-            
-            # Initialize vector store
-            vector_store = VectorStore()
-            
-            # Rebuild vectors
-            success_count, error_count = vector_store.rebuild_user_vectors(
-                user_id=user_id,
-                bookmarks=[]  # Let the method fetch bookmarks
-            )
-            
-            # Update status
-            session_status[session_id].update({
-                'status': 'completed',
-                'message': f'Vector rebuild completed: {success_count} successful, {error_count} errors',
-                'is_complete': True,
-                'success': success_count > 0,
-                'progress': {
-                    'total_processed': success_count + error_count,
-                    'errors': error_count
-                }
-            })
+            # Use the dedicated rebuild function
+            background_rebuild_vectors(session_id, user_id)
             return
         
         # Otherwise process bookmarks from file
@@ -1026,13 +1194,21 @@ def background_process(session_id, user_id, rebuild_vector=False, reset_progress
         bookmark_files = glob.glob(os.path.join(user_dir, "bookmarks_*.json"))
         if not bookmark_files:
             logger.error(f"No bookmark files found for user {user_id}")
-            session_status[session_id].update({
+            
+            # Update status with error in database
+            status_data = {
                 'status': 'error',
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
                 'message': 'No bookmark files found',
                 'is_complete': True,
                 'success': False,
-                'error': 'No bookmark files found'
-            })
+                'error': 'No bookmark files found',
+                'data': {
+                    'memory_usage': process.memory_info().rss / 1024 / 1024
+                }
+            }
+            save_session_status(session_id, status_data)
             return
             
         # Sort by modification time (newest first)
@@ -1041,56 +1217,124 @@ def background_process(session_id, user_id, rebuild_vector=False, reset_progress
         logger.info(f"Using most recent bookmark file: {latest_file}")
         
         # Process bookmarks
-        from database.multi_user_db.update_bookmarks_final import process_bookmarks
-        
-        result = process_bookmarks(
-            user_id=user_id,
-            json_file=latest_file,
-            rebuild_vector=rebuild_vector
-        )
-        
-        # Update status with results
-        session_status[session_id].update({
-            'status': 'completed',
-            'message': 'Processing completed',
-            'is_complete': True,
-            'success': result.get('success', False),
-            'results': result,
-            'completed_at': datetime.now().isoformat()
-        })
-        
-        logger.info(f"Background processing completed for user {user_id}")
+        try:
+            from database.multi_user_db.update_bookmarks_final import process_bookmarks
+            
+            # Update status
+            status_data = {
+                'status': 'processing',
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
+                'message': 'Processing bookmarks from file',
+                'is_complete': False,
+                'success': False,
+                'data': {
+                    'file': latest_file,
+                    'memory_usage': process.memory_info().rss / 1024 / 1024
+                }
+            }
+            save_session_status(session_id, status_data)
+            
+            # Process the bookmarks
+            result = process_bookmarks(
+                user_id=user_id,
+                json_file=latest_file,
+                rebuild_vector=rebuild_vector
+            )
+            
+            # Final memory usage
+            final_memory = process.memory_info().rss / 1024 / 1024
+            
+            # Update status with results
+            status_data = {
+                'status': 'completed',
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
+                'message': 'Processing completed',
+                'is_complete': True,
+                'success': result.get('success', False),
+                'data': {
+                    'results': result,
+                    'memory_usage': {
+                        'initial': initial_memory,
+                        'final': final_memory,
+                        'difference': final_memory - initial_memory
+                    },
+                    'completed_at': datetime.now().isoformat()
+                }
+            }
+            save_session_status(session_id, status_data)
+            
+            logger.info(f"Background processing completed for user {user_id}")
+            logger.info(f"Final memory usage: {final_memory:.2f} MB (Difference: {final_memory - initial_memory:.2f} MB)")
+            
+        except Exception as e:
+            logger.error(f"Error in process_bookmarks: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Update status with error
+            status_data = {
+                'status': 'error',
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
+                'message': f'Error processing bookmarks: {str(e)}',
+                'is_complete': True,
+                'success': False,
+                'error': str(e),
+                'data': {
+                    'traceback': traceback.format_exc(),
+                    'memory_usage': process.memory_info().rss / 1024 / 1024
+                }
+            }
+            save_session_status(session_id, status_data)
         
     except Exception as e:
         logger.error(f"Error in background_process: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # Update status with error
-        session_status[session_id].update({
-            'status': 'error',
-            'message': f'Error processing bookmarks: {str(e)}',
-            'is_complete': True,
-            'success': False,
-            'error': str(e),
-            'traceback': traceback.format_exc()
-        })
+        try:
+            # Update status with error
+            status_data = {
+                'status': 'error',
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
+                'message': f'Error in background process: {str(e)}',
+                'is_complete': True,
+                'success': False,
+                'error': str(e),
+                'data': {
+                    'traceback': traceback.format_exc()
+                }
+            }
+            save_session_status(session_id, status_data)
+        except:
+            logger.error("Failed to save error status to database")
 
 def background_rebuild_vectors(session_id, user_id):
     """Background task to rebuild vectors for a user"""
     try:
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024
+        
+        logger.info(f"Starting vector rebuild for user {user_id} - Initial memory: {initial_memory:.2f} MB")
+        
         # Update status
-        session_status[session_id] = {
+        status_data = {
             'status': 'processing',
             'user_id': user_id,
             'timestamp': datetime.now().isoformat(),
             'message': 'Rebuilding vector store',
             'is_complete': False,
             'success': False,
-            'progress': {
+            'data': {
                 'total_processed': 0,
-                'errors': 0
+                'errors': 0,
+                'memory_usage': initial_memory
             }
         }
+        
+        # Save to database
+        save_session_status(session_id, status_data)
         
         # Import vector store
         from database.multi_user_db.vector_store_final import VectorStore
@@ -1104,34 +1348,54 @@ def background_rebuild_vectors(session_id, user_id):
             bookmarks=[]  # Let the method fetch bookmarks
         )
         
+        # Get final memory usage
+        final_memory = process.memory_info().rss / 1024 / 1024
+        
         # Update status
-        session_status[session_id] = {
+        status_data = {
             'status': 'completed',
             'user_id': user_id,
             'timestamp': datetime.now().isoformat(),
             'message': f'Vector rebuild completed: {success_count} successful, {error_count} errors',
             'is_complete': True,
             'success': success_count > 0,
-            'progress': {
+            'data': {
                 'total_processed': success_count + error_count,
-                'errors': error_count
+                'errors': error_count,
+                'memory_usage': {
+                    'initial': initial_memory,
+                    'final': final_memory,
+                    'difference': final_memory - initial_memory
+                }
             }
         }
+        
+        # Save to database
+        save_session_status(session_id, status_data)
+        
+        logger.info(f"Vector rebuild completed for user {user_id}: {success_count} successful, {error_count} errors")
+        logger.info(f"Final memory usage: {final_memory:.2f} MB (Difference: {final_memory - initial_memory:.2f} MB)")
         
     except Exception as e:
         logger.error(f"Error in background_rebuild_vectors: {str(e)}")
         logger.error(traceback.format_exc())
         
         # Update status with error
-        session_status[session_id] = {
+        status_data = {
             'status': 'error',
             'user_id': user_id,
             'timestamp': datetime.now().isoformat(),
             'message': f'Error rebuilding vectors: {str(e)}',
             'is_complete': True,
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'data': {
+                'traceback': traceback.format_exc()
+            }
         }
+        
+        # Save to database
+        save_session_status(session_id, status_data)
 
 @app.route('/search')
 def search():
@@ -1652,16 +1916,14 @@ def update_status():
                 'error': 'Missing session_id parameter'
             }), 400
             
-        # Check if session exists
-        if session_id not in session_status:
+        # Get status from database
+        status_data = get_session_status(session_id)
+        if not status_data:
             return jsonify({
                 'success': False,
                 'error': 'Invalid session_id or job expired'
             }), 404
             
-        # Get status
-        status_data = session_status[session_id]
-        
         # Get user context - with fallback methods
         user_id = None
         

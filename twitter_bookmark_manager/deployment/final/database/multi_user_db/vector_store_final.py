@@ -207,6 +207,14 @@ class VectorStore:
             tuple: (success_count, error_count)
         """
         try:
+            import gc
+            import psutil
+            import os
+            
+            # Log memory usage
+            process = psutil.Process(os.getpid())
+            self.logger.info(f"Starting vector rebuild - Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
             self.logger.info(f"Starting vector rebuild for user {user_id}")
             
             # Track counts
@@ -221,6 +229,10 @@ class VectorStore:
                     search = BookmarkSearchMultiUser()
                     bookmarks = search.get_all_bookmarks_for_user(user_id)
                     self.logger.info(f"Fetched {len(bookmarks)} bookmarks from database for user {user_id}")
+                    
+                    # Log memory after fetch
+                    self.logger.info(f"After fetching bookmarks - Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                    
                 except Exception as e:
                     self.logger.error(f"Error fetching bookmarks from database: {str(e)}")
                     self.logger.error(traceback.format_exc())
@@ -230,61 +242,98 @@ class VectorStore:
                 self.logger.error(f"No bookmarks found for user {user_id}, cannot rebuild vectors")
                 return 0, 1
             
-            self.logger.info(f"Processing {len(bookmarks)} bookmarks for user {user_id}")
+            total_bookmarks = len(bookmarks)
+            self.logger.info(f"Processing {total_bookmarks} bookmarks for user {user_id}")
             
             # Delete existing vectors for this user
             try:
-                self._delete_user_vectors(user_id)
+                self.logger.info(f"Deleting existing vectors for user {user_id}")
+                deleted = self._delete_user_vectors(user_id)
+                self.logger.info(f"Deleted existing vectors: {deleted}")
             except Exception as e:
                 self.logger.error(f"Error deleting existing vectors: {str(e)}")
                 # Continue anyway
             
-            # Prepare batches
-            batch_size = 100  # Process in batches to avoid memory issues
+            # Force garbage collection
+            gc.collect()
+            self.logger.info(f"After deletion - Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
+            # Prepare batches - use smaller batches to avoid memory issues
+            batch_size = 25  # Reduced batch size from 100
             bookmarks_batched = [bookmarks[i:i + batch_size] for i in range(0, len(bookmarks), batch_size)]
             
             # Process each batch
             for batch_idx, batch in enumerate(bookmarks_batched):
                 self.logger.info(f"Processing batch {batch_idx+1}/{len(bookmarks_batched)} ({len(batch)} bookmarks)")
                 
-                # Process each bookmark in batch
-                for bookmark in batch:
-                    try:
-                        # Get embedding-ready text
-                        bookmark_id = bookmark.get('id')
-                        if not bookmark_id:
-                            self.logger.error(f"Missing ID in bookmark: {bookmark}")
-                            error_count += 1
-                            continue
+                try:
+                    # Process each bookmark in batch
+                    batch_success = 0
+                    batch_errors = 0
+                    
+                    for bookmark in batch:
+                        try:
+                            # Get embedding-ready text
+                            bookmark_id = bookmark.get('id')
+                            if not bookmark_id:
+                                self.logger.error(f"Missing ID in bookmark: {bookmark}")
+                                error_count += 1
+                                batch_errors += 1
+                                continue
+                                
+                            # Combine text for embedding
+                            text = bookmark.get('text', '')
+                            content = bookmark.get('tweet_content', '')
+                            author = bookmark.get('author', '')
                             
-                        # Combine text for embedding
-                        text = bookmark.get('text', '')
-                        content = bookmark.get('tweet_content', '')
-                        author = bookmark.get('author', '')
-                        
-                        # Ensure we have at least some text
-                        combined_text = ' '.join([t for t in [text, content, author] if t])
-                        if not combined_text.strip():
-                            self.logger.error(f"Empty text for bookmark {bookmark_id}")
+                            # Ensure we have at least some text
+                            combined_text = ' '.join([t for t in [text, content, author] if t])
+                            if not combined_text.strip():
+                                self.logger.error(f"Empty text for bookmark {bookmark_id}")
+                                error_count += 1
+                                batch_errors += 1
+                                continue
+                            
+                            # Create embedding and store in vector DB
+                            vector_id = f"{user_id}:{bookmark_id}"
+                            self.add_vector(
+                                id=vector_id,
+                                text=combined_text,
+                                payload={
+                                    "bookmark_id": bookmark_id,
+                                    "user_id": user_id
+                                }
+                            )
+                            success_count += 1
+                            batch_success += 1
+                            
+                        except Exception as e:
+                            self.logger.error(f"Error processing bookmark {bookmark.get('id', 'unknown')}: {str(e)}")
                             error_count += 1
-                            continue
-                        
-                        # Create embedding and store in vector DB
-                        self.add_vector(
-                            id=f"{user_id}:{bookmark_id}",
-                            text=combined_text,
-                            payload={
-                                "bookmark_id": bookmark_id,
-                                "user_id": user_id
-                            }
-                        )
-                        success_count += 1
-                        
-                    except Exception as e:
-                        self.logger.error(f"Error processing bookmark {bookmark.get('id', 'unknown')}: {str(e)}")
-                        error_count += 1
+                            batch_errors += 1
+                    
+                    # Log batch results
+                    self.logger.info(f"Batch {batch_idx+1} completed: {batch_success} successful, {batch_errors} errors")
+                    
+                    # Log memory usage after batch
+                    self.logger.info(f"After batch {batch_idx+1} - Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                    
+                    # Force garbage collection between batches
+                    gc.collect()
+                    
+                    # Ensure we don't overwhelm the system - small sleep between batches
+                    time.sleep(0.1)
+                    
+                except Exception as batch_error:
+                    self.logger.error(f"Error processing batch {batch_idx+1}: {str(batch_error)}")
+                    self.logger.error(traceback.format_exc())
+                    error_count += len(batch)
             
             self.logger.info(f"Vector rebuild completed for user {user_id}: {success_count} successful, {error_count} errors")
+            
+            # Final memory usage
+            self.logger.info(f"Completed rebuild - Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
             return success_count, error_count
             
         except Exception as e:
