@@ -589,52 +589,57 @@ class BookmarkSearchMultiUser:
             logger.error(traceback.format_exc())
             return {"error": str(e)} 
 
-    def get_all_bookmarks_for_user(self, user_id: str) -> List[Dict[str, Any]]:
+    def get_all_bookmarks_for_user(self, user_id):
         """
-        Get all bookmarks for a specific user for vector embedding.
+        Retrieve all bookmarks for a specific user from the database.
         
         Args:
-            user_id (str): The user ID to get bookmarks for
+            user_id (int): The user ID to fetch bookmarks for
             
         Returns:
-            List[Dict[str, Any]]: List of bookmark dictionaries with id, text, tweet_content, author
+            list: List of bookmark dictionaries with keys id, text, tweet_content, author, created_at
         """
         try:
-            self.logger.info(f"Fetching all bookmarks for user {user_id}")
+            logger.info(f"Fetching all bookmarks for user {user_id}")
             
-            with self._get_cursor() as cur:
-                # Query for all bookmarks belonging to the user
-                cur.execute(
-                    """
-                    SELECT 
-                        id, text, tweet_content, author, created_at
-                    FROM 
-                        bookmarks 
-                    WHERE 
-                        user_id = %s
-                    """, 
-                    (user_id,)
-                )
+            # Connect to database
+            conn = self.get_db_connection()
+            if not conn:
+                logger.error(f"Failed to connect to database when fetching bookmarks for user {user_id}")
+                return []
+            
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            
+            # Query to get all bookmarks for user
+            query = """
+                SELECT bookmark_id, text, tweet_content, author, created_at
+                FROM bookmarks
+                WHERE user_id = %s
+            """
+            
+            cursor.execute(query, (user_id,))
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            bookmarks = []
+            for row in results:
+                # Combine text and tweet_content for better search
+                text = row['text'] or ''
+                tweet_content = row['tweet_content'] or ''
                 
-                result = cur.fetchall()
-                self.logger.info(f"Found {len(result)} bookmarks for user {user_id}")
-                
-                # Convert to list of dictionaries
-                bookmarks = []
-                for row in result:
-                    # Combine text and tweet_content for embedding
-                    bookmark = {
-                        'id': row['id'],
-                        'text': row['text'] or '',
-                        'tweet_content': row['tweet_content'] or '',
-                        'author': row['author'] or '',
-                        'created_at': row['created_at'].isoformat() if row['created_at'] else None
-                    }
-                    bookmarks.append(bookmark)
-                    
-                return bookmarks
-                
+                bookmark = {
+                    'id': row['bookmark_id'],
+                    'text': text,
+                    'tweet_content': tweet_content,
+                    'author': row['author'] or '',
+                    'created_at': row['created_at'] or ''
+                }
+                bookmarks.append(bookmark)
+            
+            logger.info(f"Found {len(bookmarks)} bookmarks for user {user_id}")
+            return bookmarks
+            
         except Exception as e:
-            self.logger.error(f"Error fetching all bookmarks for user {user_id}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            logger.error(f"Error fetching bookmarks for user {user_id}: {str(e)}")
+            logger.error(traceback.format_exc())
             return [] 

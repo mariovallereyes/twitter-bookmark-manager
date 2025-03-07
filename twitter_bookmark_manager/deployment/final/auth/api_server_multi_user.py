@@ -15,6 +15,7 @@ import traceback
 import random
 import psycopg2
 import sqlalchemy
+import shutil  # For file operations
 from sqlalchemy import text
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -709,295 +710,265 @@ def index():
         total_results=len(latest_tweets)
     )
 
-# Upload bookmarks endpoint
 @app.route('/upload-bookmarks', methods=['POST'])
 def upload_bookmarks():
     """
-    Upload bookmarks JSON file endpoint with improved error handling and duplicate detection
+    Handle file upload for bookmarks JSON file
     """
-    user = UserContext.get_current_user()
-    if not user:
-        return jsonify({"error": "Authentication required"}), 401
-        
-    # Check if a file was uploaded
-    if 'bookmarks_file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-        
-    file = request.files['bookmarks_file']
-    
-    # Check if the file is empty
-    if file.filename == '':
-        return jsonify({"error": "Empty file provided"}), 400
-        
-    # Create a safe filename based on user ID and timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    user_id_hash = hashlib.md5(str(user.id).encode()).hexdigest()[:8]
-    safe_filename = f"bookmarks_{user_id_hash}_{timestamp}.json"
-    
-    # Ensure uploads directory exists
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    
-    # Save the uploaded file
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
-    file.save(file_path)
-    logger.info(f"Saved uploaded file to {file_path}")
-    
-    # Parse the JSON file
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        # Get user info
+        user_context = g.get('user_context', None)
+        if not user_context or not user_context.user_id:
+            logger.error("No user context or user ID found for upload")
+            return jsonify({'success': False, 'error': 'User not authenticated'}), 401
+            
+        user_id = user_context.user_id
+        logger.info(f"Processing upload for user {user_id}")
+        
+        # Check if file is in the request
+        if 'file' not in request.files:
+            logger.error(f"No file part in the request for user {user_id}")
+            return jsonify({'success': False, 'error': 'No file part in the request'}), 400
+            
+        file = request.files['file']
+        
+        # Check if a file was selected
+        if file.filename == '':
+            logger.error(f"No file selected for user {user_id}")
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+            
+        logger.info(f"File received: {file.filename} for user {user_id}")
+        
+        # Ensure upload directory exists
+        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+        user_dir = os.path.join(upload_folder, f"user_{user_id}")
+        os.makedirs(user_dir, exist_ok=True)
+        logger.info(f"User directory confirmed: {user_dir}")
+        
+        # Generate a safe filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = secure_filename(f"bookmarks_{timestamp}.json")
+        filepath = os.path.join(user_dir, filename)
+        
+        # Save the file
+        try:
+            file.save(filepath)
+            file_size = os.path.getsize(filepath)
+            logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
+            
+            # Validate JSON format
             try:
-                bookmarks_data = json.load(f)
-                
-                # Check if it's a list of bookmarks or has a nested structure
-                if isinstance(bookmarks_data, dict) and 'bookmarks' in bookmarks_data:
-                    bookmarks_list = bookmarks_data.get('bookmarks', [])
-                else:
-                    bookmarks_list = bookmarks_data if isinstance(bookmarks_data, list) else []
-                    
-                if not bookmarks_list:
-                    return jsonify({"error": "No bookmarks found in the file"}), 400
-                    
-                logger.info(f"Found {len(bookmarks_list)} bookmarks in the uploaded file")
-                
-                # Process bookmarks with robust error handling
-                try:
-                    # Get database connection
-                    db_conn = get_db_connection()
-                    
-                    # Check if bookmarks already exist to avoid duplicate key errors
-                    cursor = db_conn.cursor()
-                    cursor.execute(
-                        "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
-                        (user.id,)
-                    )
-                    existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
-                    
-                    # Process bookmarks - handle each bookmark individually with transaction control
-                    processed = 0
-                    skipped = 0
-                    errors = 0
-                    
-                    for bookmark in bookmarks_list:
-                        try:
-                            # Extract bookmark ID
-                            bookmark_id = None
-                            # Try different fields that might contain the ID
-                            for id_field in ['id_str', 'id', 'tweet_id']:
-                                if id_field in bookmark:
-                                    bookmark_id = str(bookmark[id_field])
-                                    break
-                                
-                            # Skip if we couldn't find an ID or it already exists
-                            if not bookmark_id:
-                                logger.warning(f"Bookmark missing ID, skipping: {bookmark}")
-                                errors += 1
-                                continue
-                                
-                            if bookmark_id in existing_bookmark_ids:
-                                logger.info(f"Bookmark {bookmark_id} already exists, skipping")
-                                skipped += 1
-                                continue
-                                
-                            # Extract basic fields
-                            text = bookmark.get('text', bookmark.get('full_text', ''))
-                            created_at = bookmark.get('created_at', '')
-                            author = bookmark.get('user', {}).get('screen_name', '')
-                            author_id = bookmark.get('user', {}).get('id_str') or bookmark.get('user', {}).get('id', '')
-                            
-                            # Use ON CONFLICT DO NOTHING to handle any potential duplicates gracefully
-                            cursor.execute("""
-                                INSERT INTO bookmarks (bookmark_id, user_id, text, created_at, author, author_id, processed)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (bookmark_id) DO NOTHING
-                            """, (
-                                bookmark_id,
-                                user.id,
-                                text,
-                                created_at,
-                                author,
-                                author_id,
-                                False
-                            ))
-                            
-                            # Add to existing set to prevent future duplicates in the same batch
-                            existing_bookmark_ids.add(bookmark_id)
-                            processed += 1
-                            
-                        except Exception as bookmark_error:
-                            logger.error(f"Error processing bookmark: {bookmark_error}")
-                            errors += 1
-                            # Continue with the next bookmark instead of failing the entire batch
-                            continue
-                    
-                    # Commit all changes
-                    db_conn.commit()
-                    
-                    # Store file path in session for the next step
-                    session['uploaded_file'] = file_path
-                    session['bookmark_count'] = processed
-                    
-                    return jsonify({
-                        "success": True,
-                        "message": f"Successfully processed {processed} bookmarks, skipped {skipped} duplicates",
-                        "processed": processed,
-                        "skipped": skipped,
-                        "errors": errors,
-                        "next_step": "/process-bookmarks"
-                    })
-                    
-                except Exception as db_error:
-                    # Rollback on error
-                    if 'db_conn' in locals() and db_conn:
-                        db_conn.rollback()
-                        
-                    logger.error(f"Database error: {db_error}")
-                    return jsonify({"error": f"Database error: {str(db_error)}"}), 500
-                    
-            except json.JSONDecodeError as json_error:
-                logger.error(f"Invalid JSON: {json_error}")
-                return jsonify({"error": f"Invalid JSON file: {str(json_error)}"}), 400
-                
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    json_data = json.load(f)
+                    bookmark_count = len(json_data)
+                    logger.info(f"JSON validated - Contains {bookmark_count} entries")
+            except json.JSONDecodeError as je:
+                logger.error(f"Invalid JSON format: {str(je)}")
+                return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+            
+            # Return success with session ID for later processing
+            session_id = str(uuid.uuid4())
+            return jsonify({
+                'success': True, 
+                'message': 'File uploaded successfully',
+                'file': filename,
+                'session_id': session_id
+            })
+            
+        except Exception as save_error:
+            logger.error(f"Error saving file: {str(save_error)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'success': False, 'error': f'Error saving file: {str(save_error)}'}), 500
+            
     except Exception as e:
-        logger.error(f"File processing error: {e}")
-        return jsonify({"error": f"Error processing file: {str(e)}"}), 500
+        logger.error(f"Error in upload_bookmarks: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/process-bookmarks', methods=['POST'])
 def process_bookmarks():
     """
-    Process previously uploaded bookmark file in the background.
-    This is separated from upload to avoid connection timeout issues.
+    Process an uploaded bookmarks JSON file and insert into the database
     """
-    user = UserContext.get_current_user()
-    user_id = user.id if user else None
-    
-    # Get session ID from request
-    if request.is_json:
-        data = request.json
-        session_id = data.get('session_id')
-    else:
-        session_id = request.form.get('session_id')
-        
-    if not session_id:
-        logger.error(f"❌ [PROCESS] No session ID provided")
-        return jsonify({'error': 'No session ID provided', 'details': 'Please provide the session_id from upload'}), 400
-        
-    logger.info(f"🚀 [PROCESS-{session_id}] Starting bookmark processing for user {user_id}")
-    
-    # Find status file
-    user_dir = get_user_directory(user_id)
-    status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-    
-    if not os.path.exists(status_file):
-        logger.error(f"❌ [PROCESS-{session_id}] Status file not found: {status_file}")
-        return jsonify({'error': 'Session not found', 'details': 'Upload session not found'}), 404
-        
-    # Read status file
     try:
-        with open(status_file, 'r') as f:
-            status_data = json.load(f)
+        # Get user info
+        user_context = g.get('user_context', None)
+        if not user_context or not user_context.user_id:
+            logger.error("No user context or user ID found for processing")
+            return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
-        # Check status
-        current_status = status_data.get('status')
-        if current_status == 'processing':
-            logger.info(f"⏳ [PROCESS-{session_id}] Processing already in progress")
-            return jsonify({
-                'success': True,
-                'message': 'Processing already in progress',
-                'session_id': session_id,
-                'status': current_status
-            })
-        elif current_status == 'completed':
-            logger.info(f"✅ [PROCESS-{session_id}] Processing already completed")
-            return jsonify({
-                'success': True,
-                'message': 'Processing already completed',
-                'session_id': session_id,
-                'status': current_status,
-                'results': status_data.get('results', {})
-            })
-        elif current_status == 'error':
-            logger.info(f"❌ [PROCESS-{session_id}] Previous processing error: {status_data.get('error')}")
-            # Allow retry by continuing
-            
-        # Get file path
-        file_path = status_data.get('file_path')
-        if not file_path or not os.path.exists(file_path):
-            logger.error(f"❌ [PROCESS-{session_id}] File not found: {file_path}")
-            return jsonify({'error': 'File not found', 'details': 'Uploaded file not found'}), 404
-            
-        # Update status to processing
-        status_data['status'] = 'processing'
-        status_data['processing_start'] = datetime.now().isoformat()
+        user_id = user_context.user_id
         
-        with open(status_file, 'w') as f:
-            json.dump(status_data, f)
+        # Get request data
+        data = request.get_json()
+        if not data:
+            logger.error(f"No JSON data in request for user {user_id}")
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
             
-        # Start background processing
-        def background_process():
-            logger.info(f"🔄 [PROCESS-{session_id}] Starting background processing")
+        filename = data.get('filename')
+        if not filename:
+            logger.error(f"No filename provided in request for user {user_id}")
+            return jsonify({'success': False, 'error': 'No filename provided'}), 400
+            
+        # Reconstruct the file path
+        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+        user_dir = os.path.join(upload_folder, f"user_{user_id}")
+        filepath = os.path.join(user_dir, filename)
+        
+        if not os.path.exists(filepath):
+            logger.error(f"File not found: {filepath}")
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+            
+        logger.info(f"Processing bookmarks from {filepath}")
+        
+        # Create database directory if not exists
+        database_dir = os.path.join(app.config.get('DATABASE_DIR', 'database'), f"user_{user_id}")
+        os.makedirs(database_dir, exist_ok=True)
+        
+        # Copy file to the expected location for update_bookmarks_final.py
+        target_filepath = os.path.join(database_dir, 'twitter_bookmarks.json')
+        shutil.copy2(filepath, target_filepath)
+        logger.info(f"Copied uploaded file to {target_filepath} for processing")
+        
+        # Generate a session ID for tracking
+        session_id = data.get('session_id', str(uuid.uuid4()))
+        
+        # Read the JSON file
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                bookmark_data = json.load(f)
+                
+            # Determine format - handle both array format and Twitter's nested format
+            bookmarks_list = []
+            
+            # Check if it's a simple array of bookmarks
+            if isinstance(bookmark_data, list):
+                bookmarks_list = bookmark_data
+            # Check if it's the Twitter export format with window.YTD structure already removed
+            elif isinstance(bookmark_data, dict):
+                # Try different possible structures
+                if 'bookmarks' in bookmark_data:
+                    bookmarks_list = bookmark_data['bookmarks']
+                elif 'tweet' in bookmark_data and isinstance(bookmark_data['tweet'], list):
+                    # Handle structure where tweets are directly in a "tweet" field
+                    bookmarks_list = bookmark_data['tweet']
+                    
+            logger.info(f"Found {len(bookmarks_list)} bookmarks to process")
+            
+            if not bookmarks_list:
+                return jsonify({'success': False, 'error': 'No bookmarks found in file'}), 400
+                
+            # Get database connection
             try:
-                # Process bookmarks
-                result = final_update_bookmarks(
-                    user_id=user_id,
-                    json_file=file_path,
-                    session_id=session_id,
-                    status_file=status_file
+                db_conn = get_db_connection()
+                cursor = db_conn.cursor()
+                
+                # Check for existing bookmarks to avoid duplicates
+                cursor.execute(
+                    "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
+                    (user_id,)
                 )
+                existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
                 
-                # Update status file with results
-                with open(status_file, 'r') as f:
-                    current_status = json.load(f)
-                    
-                current_status['status'] = 'completed' if result.get('success') else 'error'
-                current_status['completed_at'] = datetime.now().isoformat()
-                current_status['results'] = result
+                # Process each bookmark
+                processed = 0
+                skipped = 0
+                errors = 0
                 
-                with open(status_file, 'w') as f:
-                    json.dump(current_status, f)
-                    
-                logger.info(f"✅ [PROCESS-{session_id}] Background processing completed")
-                
-            except Exception as e:
-                logger.error(f"❌ [PROCESS-{session_id}] Background processing error: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Update status file with error
-                try:
-                    with open(status_file, 'r') as f:
-                        current_status = json.load(f)
+                for bookmark in bookmarks_list:
+                    try:
+                        # Handle either direct tweet or nested tweet structure
+                        tweet = bookmark.get('tweet', bookmark)
                         
-                    current_status['status'] = 'error'
-                    current_status['error'] = str(e)
-                    current_status['traceback'] = traceback.format_exc()
-                    current_status['error_time'] = datetime.now().isoformat()
-                    
-                    with open(status_file, 'w') as f:
-                        json.dump(current_status, f)
-                except Exception as file_error:
-                    logger.error(f"❌ [PROCESS-{session_id}] Error updating status file: {str(file_error)}")
-        
-        # Start processing in background thread
-        processing_thread = threading.Thread(
-            target=background_process,
-            daemon=True,
-            name=f"BookmarkProcessor-{session_id}"
-        )
-        processing_thread.start()
-        
-        # Return immediately with processing status
-        return jsonify({
-            'success': True,
-            'message': 'Processing started in background',
-            'session_id': session_id,
-            'status': 'processing',
-            'status_file': status_file,
-            'check_endpoint': f"/process-status?session_id={session_id}"
-        })
-        
+                        # Extract bookmark ID - try various possible fields
+                        bookmark_id = None
+                        for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
+                            if id_field in tweet:
+                                bookmark_id = str(tweet[id_field])
+                                break
+                                
+                        if not bookmark_id:
+                            logger.warning(f"Could not find ID in bookmark: {tweet}")
+                            errors += 1
+                            continue
+                            
+                        # Skip duplicates
+                        if bookmark_id in existing_bookmark_ids:
+                            logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
+                            skipped += 1
+                            continue
+                            
+                        # Extract content
+                        text = tweet.get('full_text', tweet.get('text', ''))
+                        
+                        # Handle different date formats
+                        created_at = tweet.get('created_at', '')
+                        
+                        # Extract author information
+                        author = ''
+                        author_id = ''
+                        
+                        # Try to find author info in various possible locations
+                        user_info = tweet.get('user', {})
+                        if user_info:
+                            author = user_info.get('screen_name', user_info.get('username', ''))
+                            author_id = user_info.get('id_str', user_info.get('id', ''))
+                            
+                        # Store raw data for vector embedding
+                        tweet_content = json.dumps(tweet)
+                        
+                        # Insert into database
+                        cursor.execute("""
+                            INSERT INTO bookmarks 
+                            (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (bookmark_id) DO NOTHING
+                        """, (
+                            bookmark_id,
+                            user_id,
+                            text,
+                            tweet_content,
+                            created_at,
+                            author,
+                            author_id,
+                            False
+                        ))
+                        
+                        # Track the new ID to prevent duplicates in the same batch
+                        existing_bookmark_ids.add(bookmark_id)
+                        processed += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing bookmark: {str(e)}")
+                        errors += 1
+                
+                # Commit changes
+                db_conn.commit()
+                
+                logger.info(f"Processed {processed} bookmarks, skipped {skipped}, errors: {errors}")
+                
+                return jsonify({
+                    'success': True,
+                    'message': f"Successfully processed {processed} bookmarks, skipped {skipped} duplicates",
+                    'processed': processed,
+                    'skipped': skipped,
+                    'errors': errors
+                })
+                
+            except Exception as db_error:
+                logger.error(f"Database error: {str(db_error)}")
+                if 'db_conn' in locals() and db_conn:
+                    db_conn.rollback()
+                return jsonify({'success': False, 'error': f'Database error: {str(db_error)}'}), 500
+                
+        except json.JSONDecodeError as je:
+            logger.error(f"Invalid JSON format: {str(je)}")
+            return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+            
     except Exception as e:
-        logger.error(f"❌ [PROCESS-{session_id}] Error: {str(e)}")
+        logger.error(f"Error in process_bookmarks: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': 'Server error', 'details': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/process-status', methods=['GET'])
 def process_status():
@@ -1041,361 +1012,136 @@ def process_status():
 @app.route('/update-database', methods=['POST'])
 def update_database():
     """
-    Process uploaded bookmark JSON file and update the database.
-    
-    This endpoint can be used to:
-    1. Process a previously uploaded file (using session_id)
-    2. Rebuild vector store only (using rebuild_vector=true)
-    3. Reset update progress (using reset_progress=true)
+    Endpoint to rebuild vector database for a user
     """
     try:
-        # Get request data
-        data = request.get_json() or {}
-        
-        # Check for vector rebuild flag
-        rebuild_vector = data.get('rebuild_vector', False)
-        reset_progress = data.get('reset_progress', False)
-        
-        # Get user context - with fallback methods
-        user_id = None
-        
-        # Try different ways to get user_id
-        if hasattr(g, 'user_context') and g.user_context and g.user_context.user_id:
-            user_id = g.user_context.user_id
-            logger.info(f"Using user_id from g.user_context: {user_id}")
-        elif 'user_id' in session:
-            user_id = session['user_id']
-            logger.info(f"Using user_id from session: {user_id}")
-        elif hasattr(g, 'user') and g.user and hasattr(g.user, 'id'):
-            user_id = g.user.id
-            logger.info(f"Using user_id from g.user: {user_id}")
-        elif 'user' in session and isinstance(session['user'], dict) and 'id' in session['user']:
-            user_id = session['user']['id']
-            logger.info(f"Using user_id from session['user']: {user_id}")
+        # Get user info
+        user_context = g.get('user_context', None)
+        if not user_context or not user_context.user_id:
+            logger.error("No user context or user ID found for vector rebuild")
+            return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
-        # For debugging, log all session data (be careful with sensitive data)
-        logger.info(f"Session data: {session}")
+        user_id = user_context.user_id
+        logger.info(f"Starting vector database rebuild for user {user_id}")
         
-        if not user_id:
-            logger.error("No user_id found in context, session, or user object")
-            return jsonify({
-                'success': False,
-                'error': 'User not authenticated or user ID not found'
-            }), 401
+        # Get rebuild flag
+        data = request.get_json(silent=True) or {}
+        rebuild = data.get('rebuild', True)
+        direct_call = data.get('direct_call', False)
         
-        # If rebuilding vectors only, handle this special case
-        if rebuild_vector and not reset_progress:
-            logger.info(f"Starting vector rebuild for user {user_id}")
-            
-            # Create session_id for this operation
-            session_id = str(uuid.uuid4())
-            
-            # Start background process
-            thread = threading.Thread(
-                target=background_process,
-                args=(session_id, user_id)
-            )
-            thread.daemon = True
-            thread.start()
-            
+        if not rebuild:
+            logger.info(f"Rebuild flag set to false, skipping for user {user_id}")
             return jsonify({
                 'success': True,
-                'message': 'Vector rebuild started',
-                'session_id': session_id
+                'message': 'No changes made to vector database (rebuild=false)'
             })
             
-        # Initialize session to track progress
+        # Create session ID for this rebuild
         session_id = str(uuid.uuid4())
+        logger.info(f"Vector rebuild session {session_id} started for user {user_id}")
         
-        # Store status in session
-        session_status[session_id] = {
-            'status': 'starting',
-            'user_id': user_id,
-            'rebuild_vector': rebuild_vector,
-            'reset_progress': reset_progress,
-            'timestamp': datetime.now().isoformat(),
-            'progress': {
-                'total_processed': 0,
-                'new_count': 0,
-                'updated_count': 0,
-                'errors': 0
-            }
-        }
-        
-        # Start background process
-        thread = threading.Thread(
-            target=background_process,
-            args=(session_id, user_id, rebuild_vector, reset_progress)
-        )
-        thread.daemon = True
-        thread.start()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Processing started',
-            'session_id': session_id
-        })
-        
+        # Call vector rebuild function
+        try:
+            if direct_call:
+                # Use the direct approach from update_bookmarks_final
+                logger.info(f"Using direct rebuild call for user {user_id}")
+                
+                # Import the rebuild function
+                from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+                
+                # Execute the rebuild function
+                result = rebuild_vector_store(user_id=user_id, session_id=session_id)
+                
+                if result.get('success', False):
+                    logger.info(f"Direct vector rebuild successful for user {user_id}")
+                    return jsonify({
+                        'success': True,
+                        'message': result.get('message', 'Vector database rebuilt successfully'),
+                        'details': result
+                    })
+                else:
+                    logger.error(f"Direct vector rebuild failed for user {user_id}: {result.get('error', 'Unknown error')}")
+                    return jsonify({
+                        'success': False,
+                        'error': result.get('error', 'Failed to rebuild vector database'),
+                        'details': result
+                    }), 500
+            else:
+                # Use the vector store class directly
+                logger.info(f"Using vector store class for rebuild (user {user_id})")
+                
+                # Get the vector store instance
+                vector_store = get_multi_user_vector_store()
+                if not vector_store:
+                    logger.error(f"Failed to get vector store for user {user_id}")
+                    return jsonify({'success': False, 'error': 'Vector store initialization failed'}), 500
+                    
+                # Check for tweet_content column
+                try:
+                    check_tweet_content_column()
+                except Exception as column_error:
+                    logger.warning(f"Issue with tweet_content column check: {str(column_error)}")
+                    # Continue as this is non-critical
+                
+                # Initiate rebuild
+                result = vector_store.rebuild_user_vectors(user_id=user_id)
+                
+                if result.get('success'):
+                    logger.info(f"Vector rebuild successful for user {user_id}: {result.get('message', '')}")
+                    return jsonify({
+                        'success': True,
+                        'message': result.get('message', 'Vector database rebuilt successfully'),
+                        'details': result
+                    })
+                else:
+                    logger.error(f"Vector rebuild failed for user {user_id}: {result.get('error', '')}")
+                    return jsonify({
+                        'success': False,
+                        'error': result.get('error', 'Failed to rebuild vector database'),
+                        'details': result
+                    }), 500
+                
+        except Exception as rebuild_error:
+            logger.error(f"Vector rebuild error for user {user_id}: {str(rebuild_error)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'success': False,
+                'error': f'Vector rebuild error: {str(rebuild_error)}'
+            }), 500
+            
     except Exception as e:
         logger.error(f"Error in update_database: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-def background_process(session_id, user_id, rebuild_vector=False, reset_progress=False):
-    """
-    Background task to process bookmarks and update database
-    """
+def check_tweet_content_column():
+    """Check if the tweet_content column exists in bookmarks table and add it if missing"""
     try:
-        process = psutil.Process(os.getpid())
-        initial_memory = process.memory_info().rss / 1024 / 1024
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        logger.info(f"Starting background process for user {user_id} (session: {session_id}) - Initial memory: {initial_memory:.2f} MB")
+        # Check if column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='bookmarks' AND column_name='tweet_content'
+        """)
         
-        # Update status to processing
-        status_data = {
-            'status': 'processing',
-            'user_id': user_id,
-            'timestamp': datetime.now().isoformat(),
-            'message': 'Processing bookmarks',
-            'is_complete': False,
-            'success': False,
-            'data': {
-                'total_processed': 0,
-                'new_count': 0,
-                'updated_count': 0,
-                'errors': 0,
-                'memory_usage': initial_memory,
-                'rebuild_vector': rebuild_vector,
-                'reset_progress': reset_progress
-            }
-        }
+        if cursor.fetchone() is None:
+            # Add tweet_content column if it doesn't exist
+            logger.info("Adding tweet_content column to bookmarks table")
+            cursor.execute("""
+                ALTER TABLE bookmarks 
+                ADD COLUMN IF NOT EXISTS tweet_content TEXT
+            """)
+            conn.commit()
+            logger.info("Added tweet_content column successfully")
         
-        # Save to database
-        save_session_status(session_id, status_data)
-        
-        # Clean up old sessions - do this periodically
-        cleanup_old_sessions()
-        
-        # If we're only rebuilding vectors
-        if rebuild_vector and not reset_progress:
-            # Use the dedicated rebuild function
-            background_rebuild_vectors(session_id, user_id)
-            return
-        
-        # Otherwise process bookmarks from file
-        # Determine the target directory
-        user_dir = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), f"user_{user_id}")
-        os.makedirs(user_dir, exist_ok=True)
-        
-        # Find the most recent bookmark file
-        bookmark_files = glob.glob(os.path.join(user_dir, "bookmarks_*.json"))
-        if not bookmark_files:
-            logger.error(f"No bookmark files found for user {user_id}")
-            
-            # Update status with error in database
-            status_data = {
-                'status': 'error',
-                'user_id': user_id,
-                'timestamp': datetime.now().isoformat(),
-                'message': 'No bookmark files found',
-                'is_complete': True,
-                'success': False,
-                'error': 'No bookmark files found',
-                'data': {
-                    'memory_usage': process.memory_info().rss / 1024 / 1024
-                }
-            }
-            save_session_status(session_id, status_data)
-            return
-            
-        # Sort by modification time (newest first)
-        bookmark_files.sort(key=os.path.getmtime, reverse=True)
-        latest_file = bookmark_files[0]
-        logger.info(f"Using most recent bookmark file: {latest_file}")
-        
-        # Process bookmarks
-        try:
-            from database.multi_user_db.update_bookmarks_final import process_bookmarks
-            
-            # Update status
-            status_data = {
-                'status': 'processing',
-                'user_id': user_id,
-                'timestamp': datetime.now().isoformat(),
-                'message': 'Processing bookmarks from file',
-                'is_complete': False,
-                'success': False,
-                'data': {
-                    'file': latest_file,
-                    'memory_usage': process.memory_info().rss / 1024 / 1024
-                }
-            }
-            save_session_status(session_id, status_data)
-            
-            # Process the bookmarks
-            result = process_bookmarks(
-                user_id=user_id,
-                json_file=latest_file,
-                rebuild_vector=rebuild_vector
-            )
-            
-            # Final memory usage
-            final_memory = process.memory_info().rss / 1024 / 1024
-            
-            # Update status with results
-            status_data = {
-                'status': 'completed',
-                'user_id': user_id,
-                'timestamp': datetime.now().isoformat(),
-                'message': 'Processing completed',
-                'is_complete': True,
-                'success': result.get('success', False),
-                'data': {
-                    'results': result,
-                    'memory_usage': {
-                        'initial': initial_memory,
-                        'final': final_memory,
-                        'difference': final_memory - initial_memory
-                    },
-                    'completed_at': datetime.now().isoformat()
-                }
-            }
-            save_session_status(session_id, status_data)
-            
-            logger.info(f"Background processing completed for user {user_id}")
-            logger.info(f"Final memory usage: {final_memory:.2f} MB (Difference: {final_memory - initial_memory:.2f} MB)")
-            
-        except Exception as e:
-            logger.error(f"Error in process_bookmarks: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Update status with error
-            status_data = {
-                'status': 'error',
-                'user_id': user_id,
-                'timestamp': datetime.now().isoformat(),
-                'message': f'Error processing bookmarks: {str(e)}',
-                'is_complete': True,
-                'success': False,
-                'error': str(e),
-                'data': {
-                    'traceback': traceback.format_exc(),
-                    'memory_usage': process.memory_info().rss / 1024 / 1024
-                }
-            }
-            save_session_status(session_id, status_data)
-        
+        cursor.close()
+        conn.close()
     except Exception as e:
-        logger.error(f"Error in background_process: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        try:
-            # Update status with error
-            status_data = {
-                'status': 'error',
-                'user_id': user_id,
-                'timestamp': datetime.now().isoformat(),
-                'message': f'Error in background process: {str(e)}',
-                'is_complete': True,
-                'success': False,
-                'error': str(e),
-                'data': {
-                    'traceback': traceback.format_exc()
-                }
-            }
-            save_session_status(session_id, status_data)
-        except:
-            logger.error("Failed to save error status to database")
-
-def background_rebuild_vectors(session_id, user_id):
-    """Background task to rebuild vectors for a user"""
-    try:
-        process = psutil.Process(os.getpid())
-        initial_memory = process.memory_info().rss / 1024 / 1024
-        
-        logger.info(f"Starting vector rebuild for user {user_id} - Initial memory: {initial_memory:.2f} MB")
-        
-        # Update status
-        status_data = {
-            'status': 'processing',
-            'user_id': user_id,
-            'timestamp': datetime.now().isoformat(),
-            'message': 'Rebuilding vector store',
-            'is_complete': False,
-            'success': False,
-            'data': {
-                'total_processed': 0,
-                'errors': 0,
-                'memory_usage': initial_memory
-            }
-        }
-        
-        # Save to database
-        save_session_status(session_id, status_data)
-        
-        # Import vector store
-        from database.multi_user_db.vector_store_final import VectorStore
-        
-        # Initialize vector store
-        vector_store = VectorStore()
-        
-        # Rebuild vectors - the method will fetch bookmarks if needed
-        success_count, error_count = vector_store.rebuild_user_vectors(
-            user_id=user_id,
-            bookmarks=[]  # Let the method fetch bookmarks
-        )
-        
-        # Get final memory usage
-        final_memory = process.memory_info().rss / 1024 / 1024
-        
-        # Update status
-        status_data = {
-            'status': 'completed',
-            'user_id': user_id,
-            'timestamp': datetime.now().isoformat(),
-            'message': f'Vector rebuild completed: {success_count} successful, {error_count} errors',
-            'is_complete': True,
-            'success': success_count > 0,
-            'data': {
-                'total_processed': success_count + error_count,
-                'errors': error_count,
-                'memory_usage': {
-                    'initial': initial_memory,
-                    'final': final_memory,
-                    'difference': final_memory - initial_memory
-                }
-            }
-        }
-        
-        # Save to database
-        save_session_status(session_id, status_data)
-        
-        logger.info(f"Vector rebuild completed for user {user_id}: {success_count} successful, {error_count} errors")
-        logger.info(f"Final memory usage: {final_memory:.2f} MB (Difference: {final_memory - initial_memory:.2f} MB)")
-        
-    except Exception as e:
-        logger.error(f"Error in background_rebuild_vectors: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        # Update status with error
-        status_data = {
-            'status': 'error',
-            'user_id': user_id,
-            'timestamp': datetime.now().isoformat(),
-            'message': f'Error rebuilding vectors: {str(e)}',
-            'is_complete': True,
-            'success': False,
-            'error': str(e),
-            'data': {
-                'traceback': traceback.format_exc()
-            }
-        }
-        
-        # Save to database
-        save_session_status(session_id, status_data)
+        logger.error(f"Error checking/adding tweet_content column: {str(e)}")
+        raise
 
 @app.route('/search')
 def search():
