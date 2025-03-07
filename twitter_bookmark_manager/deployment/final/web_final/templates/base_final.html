@@ -175,7 +175,13 @@
           /* Add db_error control */
           showDbError: {{ 'true' if db_error and error_message else 'false' }}
       }"
-      @file-selected.window="handleFileSelect($event.detail)">
+      @file-selected.window="handleFileSelect($event.detail)"
+      @update-progress.window="
+        progressSteps = $event.detail.steps;
+        if ($event.detail.isProcessing !== undefined) {
+            isProcessing = $event.detail.isProcessing;
+        }
+      ">
     <!-- Main content - centered -->
     <div class="min-h-screen flex flex-col items-center px-6">
         <!-- Logo section -->
@@ -461,6 +467,7 @@
                                             type="checkbox" 
                                             id="rebuild-vector" 
                                             class="mr-2 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-600"
+                                            onchange="toggleRebuildButton()"
                                         >
                                         <label for="rebuild-vector" class="text-gray-300">Rebuild Vector Store</label>
                                     </div>
@@ -521,6 +528,14 @@
 
                         <!-- Buttons -->
                         <div class="flex justify-end gap-3 mt-4">
+                            <button 
+                                type="button"
+                                id="process-rebuild-btn"
+                                onclick="processRebuildOnly()"
+                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                                style="display: none;">
+                                Process Rebuild
+                            </button>
                             <button 
                                 type="button" 
                                 @click="uploadModal = false"
@@ -984,6 +999,205 @@
             alert('Processing failed: ' + (results.error || 'Unknown error'));
             console.error('Processing failed:', results);
         }
+        
+        // Reset retry count
+        window.pollRetryCount = 0;
+    }
+
+    function toggleRebuildButton() {
+        const rebuildVector = document.getElementById('rebuild-vector');
+        const processRebuildBtn = document.getElementById('process-rebuild-btn');
+        
+        if (rebuildVector.checked) {
+            processRebuildBtn.style.display = 'block';
+        } else {
+            processRebuildBtn.style.display = 'none';
+        }
+    }
+
+    function processRebuildOnly() {
+        // Show progress indicators
+        const rebuildBtn = document.getElementById('process-rebuild-btn');
+        rebuildBtn.disabled = true;
+        rebuildBtn.textContent = 'Processing...';
+        
+        // Get reset progress option
+        const resetProgress = document.getElementById('reset-progress').checked;
+        
+        // Initialize progress steps in Alpine.js
+        const progressSteps = [
+            { status: 'processing', message: 'Starting vector rebuild...' }
+        ];
+        
+        // Dispatch custom event to update Alpine.js state
+        document.dispatchEvent(new CustomEvent('update-progress', {
+            detail: { steps: progressSteps, isProcessing: true }
+        }));
+        
+        // Call the async-update-database endpoint
+        fetch('/async-update-database', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                rebuild_vector: true,
+                reset_progress: resetProgress
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success || data.session_id) {
+                console.log('Vector rebuild started:', data);
+                
+                // Update progress message
+                const updatedSteps = [
+                    { status: 'done', message: 'Rebuild process started' },
+                    { status: 'processing', message: 'Rebuilding vector database...' }
+                ];
+                
+                // Dispatch custom event to update Alpine.js state
+                document.dispatchEvent(new CustomEvent('update-progress', {
+                    detail: { steps: updatedSteps }
+                }));
+                
+                // Start polling for status
+                if (data.session_id) {
+                    pollRebuildStatus(data.session_id);
+                }
+            } else {
+                // Error starting process
+                const errorSteps = [
+                    { status: 'error', message: data.error || 'Failed to start rebuild process' }
+                ];
+                
+                // Dispatch custom event to update Alpine.js state
+                document.dispatchEvent(new CustomEvent('update-progress', {
+                    detail: { steps: errorSteps, isProcessing: false }
+                }));
+                
+                rebuildBtn.disabled = false;
+                rebuildBtn.textContent = 'Process Rebuild';
+                
+                console.error('Rebuild error:', data);
+            }
+        })
+        .catch(error => {
+            // Network or other error
+            const errorSteps = [
+                { status: 'error', message: 'Error connecting to server: ' + error.message }
+            ];
+            
+            // Dispatch custom event to update Alpine.js state
+            document.dispatchEvent(new CustomEvent('update-progress', {
+                detail: { steps: errorSteps, isProcessing: false }
+            }));
+            
+            rebuildBtn.disabled = false;
+            rebuildBtn.textContent = 'Process Rebuild';
+            
+            console.error('Rebuild error:', error);
+        });
+    }
+
+    function pollRebuildStatus(sessionId) {
+        // Poll the status endpoint to check progress
+        fetch(`/update-status?session_id=${sessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            console.log('Rebuild status:', data);
+            
+            // Update progress based on status
+            updateRebuildProgress(data);
+            
+            // Continue polling if not complete
+            if (data.is_complete === false) {
+                setTimeout(() => pollRebuildStatus(sessionId), 2000);
+            } else {
+                finishRebuild(data.success === true, data);
+            }
+        })
+        .catch(error => {
+            console.error('Error polling status:', error);
+            
+            // Try again a few times
+            if (window.pollRetryCount === undefined) {
+                window.pollRetryCount = 0;
+            }
+            
+            if (window.pollRetryCount < 3) {
+                window.pollRetryCount++;
+                setTimeout(() => pollRebuildStatus(sessionId), 5000);
+            } else {
+                const errorSteps = [
+                    { status: 'done', message: 'Rebuild process started' },
+                    { status: 'error', message: 'Error checking status: ' + error.message }
+                ];
+                
+                // Dispatch custom event to update Alpine.js state
+                document.dispatchEvent(new CustomEvent('update-progress', {
+                    detail: { steps: errorSteps, isProcessing: false }
+                }));
+                
+                const rebuildBtn = document.getElementById('process-rebuild-btn');
+                rebuildBtn.disabled = false;
+                rebuildBtn.textContent = 'Process Rebuild';
+                
+                window.pollRetryCount = 0;
+            }
+        });
+    }
+
+    function updateRebuildProgress(data) {
+        // Update progress messages based on status
+        const progress = data.progress || {};
+        const message = data.message || 'Processing...';
+        
+        let updatedSteps = [
+            { status: 'done', message: 'Rebuild process started' },
+            { 
+                status: data.is_complete ? 'done' : 'processing', 
+                message: message
+            }
+        ];
+        
+        // Add detailed progress if available
+        if (progress.total_processed) {
+            updatedSteps.push({
+                status: 'processing',
+                message: `Processed ${progress.total_processed} bookmarks`
+            });
+        }
+        
+        // Dispatch custom event to update Alpine.js state
+        document.dispatchEvent(new CustomEvent('update-progress', {
+            detail: { steps: updatedSteps }
+        }));
+    }
+
+    function finishRebuild(success, data) {
+        const rebuildBtn = document.getElementById('process-rebuild-btn');
+        rebuildBtn.disabled = false;
+        rebuildBtn.textContent = 'Process Rebuild';
+        
+        let finalSteps = [
+            { status: 'done', message: 'Rebuild process started' }
+        ];
+        
+        if (success) {
+            finalSteps.push(
+                { status: 'done', message: 'Vector database rebuild completed successfully!' }
+            );
+        } else {
+            finalSteps.push(
+                { status: 'error', message: data.error || 'Error during rebuild process' }
+            );
+        }
+        
+        // Dispatch custom event to update Alpine.js state
+        document.dispatchEvent(new CustomEvent('update-progress', {
+            detail: { steps: finalSteps, isProcessing: false }
+        }));
         
         // Reset retry count
         window.pollRetryCount = 0;
