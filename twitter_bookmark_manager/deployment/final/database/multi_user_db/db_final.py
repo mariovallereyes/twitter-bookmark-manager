@@ -158,13 +158,13 @@ def get_pg_direct_params() -> Dict[str, str]:
         params["database"] = os.environ.get("POSTGRES_DB")
         if params["database"]:
             logger.info("Using POSTGRES_DB as fallback")
-            
-    # CRITICAL FIX: For Railway, ALWAYS use postgres.railway.internal as host
-    # Do not rely on any other environment variable for the hostname
-    if 'RAILWAY_PROJECT_ID' in os.environ:
-        original_host = params["host"]
+    
+    # MODIFIED: Don't force postgres.railway.internal - use environment variables as provided
+    # This allows using the external proxy hostname when needed
+    if 'RAILWAY_PROJECT_ID' in os.environ and not params["host"]:
+        # Only use internal hostname as fallback if no host is specified
         params["host"] = "postgres.railway.internal"
-        logger.info(f"🔧 OVERRIDE: Using fixed internal PostgreSQL hostname: {params['host']} (was: {original_host})")
+        logger.info(f"Using default internal PostgreSQL hostname: {params['host']}")
     
     # If we're still missing critical parameters, try to extract from DATABASE_URL
     if not all([params["user"], params["password"], params["host"], params["database"]]):
@@ -182,11 +182,9 @@ def get_pg_direct_params() -> Dict[str, str]:
                 if not params["password"] and parsed_url.password:
                     params["password"] = parsed_url.password
                 
-                # Don't extract host from DATABASE_URL in Railway - always use the internal endpoint
-                if not params["host"] and parsed_url.hostname and 'RAILWAY_PROJECT_ID' not in os.environ:
+                # MODIFIED: Don't override host from DATABASE_URL if already set
+                if not params["host"] and parsed_url.hostname:
                     params["host"] = parsed_url.hostname
-                elif 'RAILWAY_PROJECT_ID' in os.environ:
-                    params["host"] = "postgres.railway.internal"
                 
                 if not params["port"] and parsed_url.port:
                     params["port"] = str(parsed_url.port)
@@ -195,11 +193,6 @@ def get_pg_direct_params() -> Dict[str, str]:
                     params["database"] = parsed_url.path.lstrip('/')
             except Exception as e:
                 logger.error(f"Error parsing DATABASE_URL: {e}")
-    
-    # SAFETY CHECK - ensure we're always using postgres.railway.internal in Railway
-    if 'RAILWAY_PROJECT_ID' in os.environ and params["host"] != "postgres.railway.internal":
-        logger.warning(f"⚠️ Incorrect host detected: {params['host']}. Forcing to postgres.railway.internal")
-        params["host"] = "postgres.railway.internal"
     
     # Log which parameters we were able to resolve (without revealing the password)
     safe_params = {**params}
@@ -264,10 +257,6 @@ def get_db_url() -> str:
         # Construct URL from individual parameters
         params = get_pg_direct_params()
         
-        # CRITICAL: Always use postgres.railway.internal for Railway
-        if 'RAILWAY_PROJECT_ID' in os.environ:
-            params['host'] = 'postgres.railway.internal'
-        
         # Construct URL
         db_url = (
             f"postgresql://{params['user']}:{params['password']}@"
@@ -277,63 +266,50 @@ def get_db_url() -> str:
     else:
         logger.info("Using DATABASE_URL from environment")
         
-        # For Railway, always ensure we're using the internal endpoint
-        if 'RAILWAY_PROJECT_ID' in os.environ:
+        # Check if we need to adapt the DATABASE_URL to use a custom host/port
+        custom_host = os.environ.get("PGHOST")
+        custom_port = os.environ.get("PGPORT")
+        
+        if custom_host or custom_port:
             from urllib.parse import urlparse, urlunparse
             
             parsed_url = urlparse(db_url)
-            railway_host = "postgres.railway.internal"
+            parts = list(parsed_url)
+            netloc = parsed_url.netloc
             
-            # Force the hostname to be postgres.railway.internal
-            if parsed_url.hostname != railway_host:
-                parts = list(parsed_url)
-                netloc = parsed_url.netloc
+            # Replace host/port if specified in environment
+            netloc_parts = netloc.split('@')
+            if len(netloc_parts) > 1:
+                host_port = netloc_parts[1].split(':')
                 
-                # Replace just the hostname part
-                netloc_parts = netloc.split('@')
-                if len(netloc_parts) > 1:
-                    host_port = netloc_parts[1].split(':')
-                    if len(host_port) > 1:
-                        netloc_parts[1] = f"{railway_host}:{host_port[1]}"
-                    else:
-                        netloc_parts[1] = railway_host
-                    
-                    parts[1] = '@'.join(netloc_parts)
-                    db_url = urlunparse(parts)
-                    logger.info(f"Updated DATABASE_URL to use Railway internal endpoint: {railway_host}")
+                if custom_host and len(host_port) > 0:
+                    host_port[0] = custom_host
+                    logger.info(f"Overriding hostname in DATABASE_URL with {custom_host}")
+                
+                if custom_port and len(host_port) > 1:
+                    host_port[1] = custom_port
+                    logger.info(f"Overriding port in DATABASE_URL with {custom_port}")
+                elif custom_port:
+                    host_port.append(custom_port)
+                    logger.info(f"Adding port {custom_port} to DATABASE_URL")
+                
+                netloc_parts[1] = ':'.join(host_port)
+                parts[1] = '@'.join(netloc_parts)
+                db_url = urlunparse(parts)
     
-    # Safety check to ensure we're always using postgres.railway.internal in Railway
-    if 'RAILWAY_PROJECT_ID' in os.environ:
-        from urllib.parse import urlparse
-        parsed_url = urlparse(db_url)
-        if parsed_url.hostname != "postgres.railway.internal":
-            logger.error(f"⚠️ URL still using incorrect hostname: {parsed_url.hostname}. This should not happen!")
-            # Force correct the URL by simple string replacement
-            if '@' in db_url:
-                prefix, suffix = db_url.split('@', 1)
-                if ':' in suffix:
-                    # Handle host:port case
-                    _, rest = suffix.split(':', 1)
-                    db_url = f"{prefix}@postgres.railway.internal:{rest}"
-                else:
-                    # Handle host/db case
-                    if '/' in suffix:
-                        _, rest = suffix.split('/', 1)
-                        db_url = f"{prefix}@postgres.railway.internal/{rest}"
-    
-    # Log the URL with password masked
-    log_url = db_url
-    if ":" in log_url and "@" in log_url:
-        parts = log_url.split(":")
-        if len(parts) >= 3:
-            # Format: postgresql://user:password@host:port/database
-            user_part = parts[1].lstrip("/")
-            try:
-                masked_url = f"{parts[0]}://{user_part}:******@{parts[2].split('@', 1)[1]}"
-                logger.info(f"Using database URL: {masked_url}")
-            except:
-                logger.info("Using database URL: [ERROR MASKING URL]")
-    
+    # Log the URL we're using (with password masked)
+    safe_url = db_url
+    if "://" in safe_url:
+        parts = safe_url.split("://", 1)
+        if "@" in parts[1]:
+            auth_rest = parts[1].split("@", 1)
+            if ":" in auth_rest[0]:
+                user_pass = auth_rest[0].split(":", 1)
+                user_pass[1] = "********"
+                auth_rest[0] = ":".join(user_pass)
+            safe_url = parts[0] + "://" + auth_rest[0] + "@" + auth_rest[1]
+            
+    logger.info(f"Using database URL: {safe_url}")
     return db_url
 
 def setup_database(force_reconnect: bool = False, show_sql: bool = False) -> Engine:
@@ -850,7 +826,8 @@ def check_database_status() -> Dict[str, Any]:
         "connection": "failed",
         "tables_exist": False,
         "record_counts": {},
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "healthy": False
     }
     
     try:
@@ -865,19 +842,38 @@ def check_database_status() -> Dict[str, Any]:
             results = {}
             tables = ["users", "bookmarks", "categories", "bookmark_categories"]
             
+            all_tables_exist = True
             for table in tables:
                 try:
                     result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
                     count = result.scalar()
                     results[table] = count
                 except Exception as e:
+                    all_tables_exist = False
                     results[table] = f"Error: {str(e)}"
                     
-            status["tables_exist"] = True
+            status["tables_exist"] = all_tables_exist
             status["record_counts"] = results
+            
+            # If connection is OK but tables don't exist, try to create them
+            if status["connection"] == "ok" and not all_tables_exist:
+                logger.warning("Database connection successful but tables are missing. Attempting to create tables...")
+                
+                try:
+                    # Run create_tables function to ensure all tables exist
+                    create_tables()
+                    status["tables_exist"] = True
+                    status["message"] = "Tables created successfully"
+                    status["healthy"] = True
+                except Exception as table_error:
+                    status["message"] = f"Failed to create tables: {str(table_error)}"
+            else:
+                # If connection and tables are OK, mark as healthy
+                status["healthy"] = True
             
     except Exception as e:
         status["error"] = str(e)
+        status["message"] = str(e)
         
     return status
 
