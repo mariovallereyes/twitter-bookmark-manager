@@ -891,17 +891,36 @@ def update_database():
         rebuild_vector = data.get('rebuild_vector', False)
         reset_progress = data.get('reset_progress', False)
         
-        # Get user context
-        user_context = g.get('user_context', None)
-        if not user_context or not user_context.user_id:
+        # Get user context - with fallback methods
+        user_id = None
+        
+        # Try different ways to get user_id
+        if hasattr(g, 'user_context') and g.user_context and g.user_context.user_id:
+            user_id = g.user_context.user_id
+            logger.info(f"Using user_id from g.user_context: {user_id}")
+        elif 'user_id' in session:
+            user_id = session['user_id']
+            logger.info(f"Using user_id from session: {user_id}")
+        elif hasattr(g, 'user') and g.user and hasattr(g.user, 'id'):
+            user_id = g.user.id
+            logger.info(f"Using user_id from g.user: {user_id}")
+        elif 'user' in session and isinstance(session['user'], dict) and 'id' in session['user']:
+            user_id = session['user']['id']
+            logger.info(f"Using user_id from session['user']: {user_id}")
+            
+        # For debugging, log all session data (be careful with sensitive data)
+        logger.info(f"Session data: {session}")
+        
+        if not user_id:
+            logger.error("No user_id found in context, session, or user object")
             return jsonify({
                 'success': False,
-                'error': 'User not authenticated'
+                'error': 'User not authenticated or user ID not found'
             }), 401
         
         # If rebuilding vectors only, handle this special case
         if rebuild_vector and not reset_progress:
-            logger.info(f"Starting vector rebuild for user {user_context.user_id}")
+            logger.info(f"Starting vector rebuild for user {user_id}")
             
             # Create session_id for this operation
             session_id = str(uuid.uuid4())
@@ -909,7 +928,7 @@ def update_database():
             # Start background process
             thread = threading.Thread(
                 target=background_rebuild_vectors,
-                args=(session_id, user_context.user_id)
+                args=(session_id, user_id)
             )
             thread.daemon = True
             thread.start()
@@ -926,7 +945,7 @@ def update_database():
         # Store status in session
         session_status[session_id] = {
             'status': 'starting',
-            'user_id': user_context.user_id,
+            'user_id': user_id,
             'rebuild_vector': rebuild_vector,
             'reset_progress': reset_progress,
             'timestamp': datetime.now().isoformat(),
@@ -941,7 +960,7 @@ def update_database():
         # Start background process
         thread = threading.Thread(
             target=background_process,
-            args=(session_id, user_context.user_id, rebuild_vector, reset_progress)
+            args=(session_id, user_id, rebuild_vector, reset_progress)
         )
         thread.daemon = True
         thread.start()
@@ -1643,16 +1662,30 @@ def update_status():
         # Get status
         status_data = session_status[session_id]
         
-        # Get user context
-        user_context = g.get('user_context', None)
-        if not user_context or not user_context.user_id:
+        # Get user context - with fallback methods
+        user_id = None
+        
+        # Try different ways to get user_id
+        if hasattr(g, 'user_context') and g.user_context and g.user_context.user_id:
+            user_id = g.user_context.user_id
+        elif 'user_id' in session:
+            user_id = session['user_id']
+        elif hasattr(g, 'user') and g.user and hasattr(g.user, 'id'):
+            user_id = g.user.id
+        elif 'user' in session and isinstance(session['user'], dict) and 'id' in session['user']:
+            user_id = session['user']['id']
+            
+        if not user_id:
+            logger.error("No user_id found in context, session, or user object")
             return jsonify({
                 'success': False,
-                'error': 'User not authenticated'
+                'error': 'User not authenticated or user ID not found'
             }), 401
             
-        # Security check - only allow access to your own jobs
-        if str(status_data.get('user_id')) != str(user_context.user_id):
+        # Security check - only allow access to your own jobs or skip for admin users
+        job_user_id = str(status_data.get('user_id', ''))
+        if str(user_id) != job_user_id and not is_admin_user(user_id):
+            logger.warning(f"Unauthorized access attempt: User {user_id} tried to access job for user {job_user_id}")
             return jsonify({
                 'success': False,
                 'error': 'Unauthorized access to job status'
@@ -1672,6 +1705,18 @@ def update_status():
             'success': False,
             'error': str(e)
         }), 500
+
+# Helper function to check if user is admin        
+def is_admin_user(user_id):
+    """Check if the given user_id belongs to an admin user"""
+    try:
+        # Implement your admin check logic here
+        # For example, check against a list of admin user IDs or a database field
+        admin_users = [1, 2, 3]  # Replace with your admin user IDs
+        return int(user_id) in admin_users
+    except Exception as e:
+        logger.error(f"Error checking admin status: {str(e)}")
+        return False
 
 # Add error handlers to capture all exceptions
 @app.errorhandler(Exception)
