@@ -935,7 +935,7 @@ def process_bookmarks():
                                 continue
                                 
                             # Extract content
-                            text = tweet.get('full_text', tweet.get('text', ''))
+                            tweet_text = tweet.get('full_text', tweet.get('text', ''))
                             
                             # Handle different date formats
                             created_at = tweet.get('created_at', '')
@@ -964,7 +964,7 @@ def process_bookmarks():
                                 {
                                     "bookmark_id": bookmark_id,
                                     "user_id": user_id,
-                                    "text": text,
+                                    "text": tweet_text,
                                     "tweet_content": tweet_content,
                                     "created_at": created_at,
                                     "author": author,
@@ -1024,7 +1024,7 @@ def process_bookmarks():
                                 continue
                                 
                             # Extract content
-                            text = tweet.get('full_text', tweet.get('text', ''))
+                            tweet_text = tweet.get('full_text', tweet.get('text', ''))
                             
                             # Handle different date formats
                             created_at = tweet.get('created_at', '')
@@ -1051,7 +1051,7 @@ def process_bookmarks():
                             """, (
                                 bookmark_id,
                                 user_id,
-                                text,
+                                tweet_text,
                                 tweet_content,
                                 created_at,
                                 author,
