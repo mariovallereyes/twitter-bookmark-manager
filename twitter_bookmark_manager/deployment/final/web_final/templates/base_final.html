@@ -459,7 +459,7 @@
 
                         <!-- Advanced Options -->
                         <div id="advanced-options" class="mt-4 border-t border-gray-700 pt-4">
-                            <details class="text-sm">
+                            <details class="text-sm" open>
                                 <summary class="cursor-pointer text-gray-300 hover:text-white">Advanced Options</summary>
                                 <div class="mt-2 text-gray-400">
                                     <div class="mt-3 flex flex-col gap-3">
@@ -489,14 +489,21 @@
                                                 </p>
                                             </div>
                                         </div>
-                                        <div class="mt-3">
+                                        <div class="mt-3 flex justify-between">
                                             <button 
                                                 type="button"
                                                 onclick="applyAdvancedOptions()"
                                                 class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
                                                 Apply Selected Options
                                             </button>
+                                            <button 
+                                                type="button"
+                                                onclick="checkAuthStatus()"
+                                                class="px-4 py-2 bg-gray-600 text-white rounded-lg text-sm hover:bg-gray-700">
+                                                Check Auth Status
+                                            </button>
                                         </div>
+                                        <div id="auth-status-display" class="mt-2 text-xs"></div>
                                     </div>
                                 </div>
                             </details>
@@ -655,6 +662,12 @@
         } catch (error) {
             console.error('Upload error:', error);
             updateStepStatus('step-upload', 'error');
+            
+            // Show detailed error message
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
+            errorDiv.textContent = 'Upload failed: ' + error.message;
+            document.getElementById('progress-steps').appendChild(errorDiv);
         }
     }
 
@@ -665,7 +678,8 @@
             updateStepStatus('step-upload', 'processing');
             const uploadResponse = await fetch('/process-bookmarks', {
                 method: 'POST',
-                body: formData
+                body: formData,
+                credentials: 'include'
             });
             
             if (!uploadResponse.ok) {
@@ -722,7 +736,8 @@
 
         try {
             const response = await fetch('/update-database', {
-                method: 'POST'
+                method: 'POST',
+                credentials: 'include'
             });
             
             const result = await response.json();
@@ -1236,7 +1251,8 @@
                     body: JSON.stringify({
                         rebuild_vector: true,
                         direct_call: true
-                    })
+                    }),
+                    credentials: 'include'
                 });
                 
                 const data = await response.json();
@@ -1382,6 +1398,23 @@
             // Handle dropped files
             dropZone.addEventListener('drop', handleDrop, false);
         }
+        
+        // Check if user is authenticated
+        checkAuthStatus();
+        
+        // Override fetch to always include credentials
+        const originalFetch = window.fetch;
+        window.fetch = function() {
+            let [resource, config] = arguments;
+            if(!config) {
+                config = {};
+            }
+            // Always include credentials in all fetch requests
+            if(!config.credentials) {
+                config.credentials = 'include';
+            }
+            return originalFetch(resource, config);
+        };
     });
 
     // Helper functions for drag and drop
@@ -1440,7 +1473,8 @@
                 const resetResponse = await fetch('/update-database', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ reset_progress: true })
+                    body: JSON.stringify({ reset_progress: true }),
+                    credentials: 'include'
                 });
                 
                 const resetResult = await resetResponse.json();
@@ -1476,7 +1510,8 @@
                     body: JSON.stringify({ 
                         rebuild_vector: true,
                         direct_call: true
-                    })
+                    }),
+                    credentials: 'include'
                 });
                 
                 const rebuildResult = await rebuildResponse.json();
@@ -1499,6 +1534,51 @@
                 errorDiv.textContent = 'Error rebuilding vector store: ' + error.message;
                 document.getElementById('progress-steps').appendChild(errorDiv);
             }
+        }
+    }
+
+    // Function to check authentication status
+    async function checkAuthStatus() {
+        const statusDisplay = document.getElementById('auth-status-display');
+        statusDisplay.innerHTML = 'Checking authentication status...';
+        statusDisplay.className = 'mt-2 text-xs text-blue-400';
+        
+        try {
+            // First try to use user info endpoint if available
+            const response = await fetch('/api/user-info', {
+                method: 'GET',
+                credentials: 'include'
+            }).catch(() => {
+                // If that fails, try a different endpoint
+                return fetch('/user/profile', {
+                    method: 'GET',
+                    credentials: 'include'
+                }).catch(() => null);
+            });
+            
+            if (!response) {
+                // If neither endpoint is available, just check session cookie existence
+                const hasCookies = document.cookie.length > 0;
+                statusDisplay.innerHTML = hasCookies 
+                    ? 'You appear to have session cookies, but no auth endpoint was found to verify.'
+                    : 'No session cookies found. You may need to log in again.';
+                statusDisplay.className = hasCookies 
+                    ? 'mt-2 text-xs text-yellow-400' 
+                    : 'mt-2 text-xs text-red-400';
+                return;
+            }
+            
+            if (response.ok) {
+                statusDisplay.innerHTML = 'You are authenticated. Session appears to be valid.';
+                statusDisplay.className = 'mt-2 text-xs text-green-400';
+            } else {
+                statusDisplay.innerHTML = 'Authentication check failed. Status: ' + response.status + '. You may need to log out and log in again.';
+                statusDisplay.className = 'mt-2 text-xs text-red-400';
+            }
+        } catch (error) {
+            console.error('Error checking authentication:', error);
+            statusDisplay.innerHTML = 'Error checking authentication: ' + error.message;
+            statusDisplay.className = 'mt-2 text-xs text-red-400';
         }
     }
     </script>
