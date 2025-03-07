@@ -735,13 +735,13 @@ def upload_bookmarks():
     Handle file upload for bookmarks JSON file
     """
     try:
-        # Get user info
-        user_context = g.get('user_context', None)
-        if not user_context or not user_context.user_id:
-            logger.error("No user context or user ID found for upload")
+        # Get user info using UserContext
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user found for upload - UserContext check failed")
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
-        user_id = user_context.user_id
+        user_id = user.id
         logger.info(f"Processing upload for user {user_id}")
         
         # Check if file is in the request
@@ -812,13 +812,13 @@ def process_bookmarks():
     Handles both FormData uploads and JSON requests.
     """
     try:
-        # Get user info
-        user_context = g.get('user_context', None)
-        if not user_context or not user_context.user_id:
-            logger.error("No user context or user ID found for processing")
+        # Get user info using UserContext instead of accessing g directly
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user found for processing - UserContext check failed")
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
-        user_id = user_context.user_id
+        user_id = user.id
         logger.info(f"Processing bookmarks for user {user_id}")
         
         # Check if this is a FormData file upload or a JSON request
@@ -1064,17 +1064,17 @@ def process_status():
 @app.route('/update-database', methods=['POST'])
 def update_database():
     """
-    Endpoint to rebuild vector database for a user
+    Update the database with bookmarks, with option to rebuild vector store
     """
     try:
-        # Get user info
-        user_context = g.get('user_context', None)
-        if not user_context or not user_context.user_id:
-            logger.error("No user context or user ID found for vector rebuild")
+        # Get user info using UserContext
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user found for database update - UserContext check failed")
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
             
-        user_id = user_context.user_id
-        logger.info(f"Starting vector database rebuild for user {user_id}")
+        user_id = user.id
+        logger.info(f"Processing database update for user {user_id}")
         
         # Get rebuild flag
         data = request.get_json(silent=True) or {}
