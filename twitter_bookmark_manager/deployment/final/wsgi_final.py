@@ -109,18 +109,24 @@ error_details = None
 
 # Attempt to import the full application
 try:
-    if db_status.get('healthy', False):
-        logger.info("Loading full application from auth.api_server_multi_user")
-        from auth.api_server_multi_user import app as full_application
-        logger.info("✅ Successfully loaded full application")
-        
-        # Set the application
-        application = full_application
-        logger.info("Full application is active")
+    # MODIFIED: Always try to load the full application even with DB issues
+    # This allows the application's retry mechanisms to work
+    logger.info("Loading full application from auth.api_server_multi_user")
+    from auth.api_server_multi_user import app as full_application
+    logger.info("✅ Successfully loaded full application")
+    
+    # Set the application
+    application = full_application
+    
+    # Add DB status info for frontend templates
+    if not db_status.get('healthy', False):
+        logger.warning(f"⚠️ Database issues detected, but still loading full application: {db_status.get('message', 'Unknown issue')}")
+        # Inject DB status into application config for templates
+        application.config['DB_ERROR'] = True
+        application.config['DB_ERROR_MESSAGE'] = db_status.get('message', 'Database connection issues')
     else:
-        logger.warning(f"⚠️ Database issues detected, not loading full application: {db_status.get('message', 'Unknown issue')}")
-        application_error = f"Database not healthy: {db_status.get('message', 'Unknown issue')}"
-        raise ImportError(f"Skipping full application due to database issues: {db_status.get('message', 'Unknown issue')}")
+        logger.info("Full application is active with healthy database")
+        application.config['DB_ERROR'] = False
 except Exception as e:
     error_details = traceback.format_exc()
     application_error = str(e)
