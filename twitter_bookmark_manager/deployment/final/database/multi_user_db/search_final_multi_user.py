@@ -114,10 +114,7 @@ class BookmarkSearchMultiUser:
             
     @with_user_context
     def get_recent(self, limit=10, user_id=1):
-        """
-        Get recent bookmarks with multi-user support.
-        Filters by user_id.
-        """
+        """Get recent bookmarks for a user."""
         # Use the provided user_id or default from the class
         self.user_id = user_id
         
@@ -125,22 +122,23 @@ class BookmarkSearchMultiUser:
         results = []
         
         try:
-            # Get recent bookmarks for this user
+            # Get recent bookmarks
             cursor.execute("""
-            SELECT b.id, b.text, b.author, b.created_at 
-            FROM bookmarks b 
-            WHERE b.user_id = %s
-            ORDER BY b.created_at DESC 
+            SELECT id, text, author, created_at, bookmark_id, author_id
+            FROM bookmarks
+            WHERE user_id = %s
+            ORDER BY created_at DESC
             LIMIT %s
             """, (self.user_id, limit))
             
-            # Process results
             for row in cursor.fetchall():
                 bookmark = {
                     'id': row[0],
                     'text': row[1],
                     'author': row[2],
-                    'created_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None
+                    'created_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                    'bookmark_id': row[4],
+                    'author_id': row[5]
                 }
                 
                 # Get categories for this bookmark
@@ -161,11 +159,34 @@ class BookmarkSearchMultiUser:
                 bookmark['categories'] = categories
                 results.append(bookmark)
                 
-            return results
-            
         except Exception as e:
-            logger.error(f"Error in get_recent: {e}")
-            return []
+            logger.error(f"Error getting recent bookmarks: {e}")
+            # Return empty list on error
+            
+        return results
+        
+    @with_user_context
+    def get_recent_bookmarks(self, limit=5, user_id=1):
+        """Get recent bookmarks formatted for the template display"""
+        # Use the provided user_id or default from the class
+        self.user_id = user_id
+        
+        bookmarks = self.get_recent(limit=limit, user_id=user_id)
+        
+        # Format for template display
+        formatted_bookmarks = []
+        for bookmark in bookmarks:
+            # Format the bookmark data
+            formatted_bookmark = {
+                'id': bookmark.get('bookmark_id', bookmark.get('id', '')),
+                'text': bookmark.get('text', ''),
+                'author_username': bookmark.get('author', '').replace('@', ''),
+                'created_at': bookmark.get('created_at', ''),
+                'categories': [cat['name'] for cat in bookmark.get('categories', [])]
+            }
+            formatted_bookmarks.append(formatted_bookmark)
+            
+        return formatted_bookmarks
             
     @with_user_context
     def get_bookmark_count(self, user_id=1):

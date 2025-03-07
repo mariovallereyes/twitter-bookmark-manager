@@ -303,19 +303,17 @@
                 <div id="base-categories" class="mt-3 flex flex-wrap gap-1.5">
                     {% for category in categories %}
                         {% if category is mapping %}
-                            <button 
+                            <a href="/category/{{ category.name }}"
                                 data-category="{{ category.name }}"
-                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}"
-                                onclick="toggleCategory('{{ category.name }}')">
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category.name %}bg-blue-900 text-blue-200{% endif %}">
                                 {{ category.name }} {% if category.count %}({{ category.count }}){% endif %}
-                            </button>
+                            </a>
                         {% else %}
-                            <button 
+                            <a href="/category/{{ category }}"
                                 data-category="{{ category }}"
-                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}"
-                                onclick="toggleCategory('{{ category }}')">
+                                class="category-btn px-2 py-1 rounded-md text-xs font-medium bg-[#1a1a1a] text-gray-400 hover:bg-gray-800 transition-colors {% if category_filter == category %}bg-blue-900 text-blue-200{% endif %}">
                                 {{ category }}
-                            </button>
+                            </a>
                         {% endif %}
                     {% endfor %}
                 </div>

@@ -398,7 +398,7 @@ def index():
     is_admin = getattr(user, 'is_admin', False)
     
     # If all database methods failed, show a simplified interface with error message
-    if all_methods_tried and not categories:
+    if all_methods_tried and error_message and not categories:
         logger.error(f"All database connection methods failed. Last error: {error_message}")
         
         # Return a simplified interface
@@ -411,13 +411,32 @@ def index():
             error_message="Database connection issues. Some features may be unavailable."
         )
     
-    # Return normal template if we have categories
+    # Get latest bookmarks
+    latest_tweets = []
+    try:
+        if not all_methods_tried:
+            # Connect to database
+            conn = get_db_connection()
+            try:
+                # Create a searcher instance
+                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                
+                # Get 5 most recent bookmarks
+                latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.warning(f"Failed to retrieve latest bookmarks: {e}")
+    
+    # Return normal template if we have successfully connected, even if no categories
     return render_template(
         template, 
-        categories=categories, 
+        categories=categories or [], 
         user=user, 
         is_admin=is_admin,
-        db_error=False
+        db_error=False,
+        latest_tweets=latest_tweets
     )
 
 # Upload bookmarks endpoint
@@ -870,6 +889,237 @@ def update_database():
         logger.error(f"❌ [UPDATE-{session_id}] Error: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
+
+@app.route('/search')
+def search():
+    """Search bookmarks by query or category"""
+    logger.info("Search route accessed")
+    user = UserContext.get_current_user()
+    
+    if not user:
+        logger.info("User not authenticated, redirecting to login")
+        return redirect(url_for('auth.login'))
+    
+    # Get search parameters
+    query = request.args.get('q', '')
+    user_query = request.args.get('user', '')
+    category_filter = request.args.getlist('categories[]')
+    
+    logger.info(f"Search params: query='{query}', user='{user_query}', categories={category_filter}")
+    
+    # Get categories for the sidebar
+    categories = []
+    results = []
+    total_results = 0
+    error_message = None
+    
+    try:
+        # Connect to database
+        conn = get_db_connection()
+        try:
+            # Create a searcher instance
+            searcher = BookmarkSearchMultiUser(conn, user.id)
+            
+            # Get categories for sidebar
+            categories = searcher.get_categories()
+            
+            # Convert category names to IDs if needed
+            category_ids = []
+            if category_filter:
+                # Find category IDs by name
+                for cat_name in category_filter:
+                    for cat in categories:
+                        if cat['name'] == cat_name:
+                            category_ids.append(cat['id'])
+                            break
+            
+            # Perform search
+            results = searcher.search(
+                query=query, 
+                user=user_query, 
+                category_ids=category_ids, 
+                limit=100
+            )
+            
+            # Format results for template
+            formatted_results = []
+            for bookmark in results:
+                # Format the bookmark data
+                formatted_bookmark = {
+                    'id': bookmark.get('id', ''),
+                    'text': bookmark.get('text', ''),
+                    'author_username': bookmark.get('author', '').replace('@', ''),
+                    'created_at': bookmark.get('created_at', ''),
+                    'categories': [cat['name'] for cat in bookmark.get('categories', [])]
+                }
+                formatted_results.append(formatted_bookmark)
+            
+            total_results = len(formatted_results)
+            results = formatted_results
+            
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        error_message = str(e)
+    
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    
+    # Render template with results
+    return render_template(
+        'index_final.html',
+        categories=categories,
+        results=results,
+        query=query,
+        user_query=user_query,
+        category_filter=category_filter,
+        showing_results=len(results),
+        total_results=total_results,
+        is_recent=False,
+        user=user,
+        is_admin=is_admin,
+        db_error=bool(error_message),
+        error_message=error_message
+    )
+
+@app.route('/recent')
+def recent():
+    """Show recent bookmarks"""
+    logger.info("Recent bookmarks route accessed")
+    user = UserContext.get_current_user()
+    
+    if not user:
+        logger.info("User not authenticated, redirecting to login")
+        return redirect(url_for('auth.login'))
+    
+    # Get categories for the sidebar
+    categories = []
+    results = []
+    error_message = None
+    
+    try:
+        # Connect to database
+        conn = get_db_connection()
+        try:
+            # Create a searcher instance
+            searcher = BookmarkSearchMultiUser(conn, user.id)
+            
+            # Get categories for sidebar
+            categories = searcher.get_categories()
+            
+            # Get recent bookmarks
+            results = searcher.get_recent_bookmarks(limit=100)
+            
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Recent bookmarks error: {e}")
+        error_message = str(e)
+    
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    
+    # Render template with results
+    return render_template(
+        'index_final.html',
+        categories=categories,
+        results=results,
+        query='',
+        user_query='',
+        category_filter=[],
+        showing_results=len(results),
+        total_results=len(results),
+        is_recent=True,
+        user=user,
+        is_admin=is_admin,
+        db_error=bool(error_message),
+        error_message=error_message
+    )
+
+@app.route('/category/<category_name>')
+def category(category_name):
+    """Show bookmarks for a specific category"""
+    logger.info(f"Category route accessed for: {category_name}")
+    user = UserContext.get_current_user()
+    
+    if not user:
+        logger.info("User not authenticated, redirecting to login")
+        return redirect(url_for('auth.login'))
+    
+    # Get categories for the sidebar
+    categories = []
+    results = []
+    error_message = None
+    category_id = None
+    
+    try:
+        # Connect to database
+        conn = get_db_connection()
+        try:
+            # Create a searcher instance
+            searcher = BookmarkSearchMultiUser(conn, user.id)
+            
+            # Get categories for sidebar
+            categories = searcher.get_categories()
+            
+            # Find category ID by name
+            for cat in categories:
+                if cat['name'] == category_name:
+                    category_id = cat['id']
+                    break
+            
+            if category_id:
+                # Perform search by category
+                results = searcher.search(
+                    query='', 
+                    user='', 
+                    category_ids=[category_id], 
+                    limit=100
+                )
+                
+                # Format results for template
+                formatted_results = []
+                for bookmark in results:
+                    # Format the bookmark data
+                    formatted_bookmark = {
+                        'id': bookmark.get('id', ''),
+                        'text': bookmark.get('text', ''),
+                        'author_username': bookmark.get('author', '').replace('@', ''),
+                        'created_at': bookmark.get('created_at', ''),
+                        'categories': [cat['name'] for cat in bookmark.get('categories', [])]
+                    }
+                    formatted_results.append(formatted_bookmark)
+                
+                results = formatted_results
+            else:
+                logger.warning(f"Category not found: {category_name}")
+                
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Category view error: {e}")
+        error_message = str(e)
+    
+    # Check if user is admin
+    is_admin = getattr(user, 'is_admin', False)
+    
+    # Render template with results
+    return render_template(
+        'index_final.html',
+        categories=categories,
+        results=results,
+        query='',
+        user_query='',
+        category_filter=[category_name],
+        showing_results=len(results),
+        total_results=len(results),
+        is_recent=False,
+        user=user,
+        is_admin=is_admin,
+        db_error=bool(error_message),
+        error_message=error_message
+    )
 
 # Add error handlers to capture all exceptions
 @app.errorhandler(Exception)
