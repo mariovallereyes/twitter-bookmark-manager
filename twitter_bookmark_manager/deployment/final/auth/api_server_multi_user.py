@@ -185,9 +185,8 @@ app.register_blueprint(user_api_bp)
 # Initialize user context middleware
 UserContextMiddleware(app, lambda user_id: get_user_by_id(get_db_connection(), user_id))
 
-# Debug database at startup
-@app.before_first_request
-def debug_database_startup():
+# Debug database initialization function (to be called at startup)
+def init_app_debug():
     """Check database at startup and ensure guest user exists"""
     try:
         logger.info("STARTUP DEBUG - Checking database initialization")
@@ -228,6 +227,9 @@ def debug_database_startup():
     except Exception as e:
         logger.error(f"STARTUP DEBUG - Error: {e}")
         logger.error(traceback.format_exc())
+
+# Call the init function right away
+init_app_debug()
 
 # Define login_required decorator
 def login_required(f):
