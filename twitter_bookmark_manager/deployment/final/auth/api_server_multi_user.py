@@ -19,6 +19,7 @@ from sqlalchemy import text
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
+from typing import Dict, Any, Optional, List, Tuple
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -121,6 +122,9 @@ app.config.update(
     MAX_CONTENT_LENGTH=32 * 1024 * 1024,  # 32MB max file size
     UPLOAD_FOLDER=UPLOADS_DIR
 )
+
+# Global session status tracking
+session_status: Dict[str, Dict[str, Any]] = {}
 
 # Register cleanup function to run on app shutdown
 @app.teardown_appcontext
@@ -871,125 +875,244 @@ def process_status():
 
 @app.route('/update-database', methods=['POST'])
 def update_database():
-    """Update database endpoint based on PythonAnywhere implementation"""
-    session_id = str(uuid.uuid4())[:8]
-    user = UserContext.get_current_user()
-    user_id = user.id if user else None
+    """
+    Process uploaded bookmark JSON file and update the database.
     
-    logger.info(f"🚀 [UPDATE-{session_id}] Starting database update for user {user_id}")
-    
+    This endpoint can be used to:
+    1. Process a previously uploaded file (using session_id)
+    2. Rebuild vector store only (using rebuild_vector=true)
+    3. Reset update progress (using reset_progress=true)
+    """
     try:
-        # Get parameters
-        data = request.json if request.is_json else {}
-        start_index = data.get('start_index', 0)
+        # Get request data
+        data = request.get_json() or {}
+        
+        # Check for vector rebuild flag
         rebuild_vector = data.get('rebuild_vector', False)
+        reset_progress = data.get('reset_progress', False)
         
-        # Determine the target directory and status file
-        user_dir = get_user_directory(user_id)
-        status_file = os.path.join(user_dir, f"update_status_{session_id}.json")
+        # Get user context
+        user_context = g.get('user_context', None)
+        if not user_context or not user_context.user_id:
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
         
-        # Create a new status file for tracking
-        status_data = {
-            'session_id': session_id,
-            'user_id': user_id,
-            'status': 'initializing',
-            'start_time': datetime.now().isoformat(),
-            'params': {
-                'start_index': start_index,
-                'rebuild_vector': rebuild_vector
+        # If rebuilding vectors only, handle this special case
+        if rebuild_vector and not reset_progress:
+            logger.info(f"Starting vector rebuild for user {user_context.user_id}")
+            
+            # Create session_id for this operation
+            session_id = str(uuid.uuid4())
+            
+            # Start background process
+            thread = threading.Thread(
+                target=background_rebuild_vectors,
+                args=(session_id, user_context.user_id)
+            )
+            thread.daemon = True
+            thread.start()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Vector rebuild started',
+                'session_id': session_id
+            })
+            
+        # Initialize session to track progress
+        session_id = str(uuid.uuid4())
+        
+        # Store status in session
+        session_status[session_id] = {
+            'status': 'starting',
+            'user_id': user_context.user_id,
+            'rebuild_vector': rebuild_vector,
+            'reset_progress': reset_progress,
+            'timestamp': datetime.now().isoformat(),
+            'progress': {
+                'total_processed': 0,
+                'new_count': 0,
+                'updated_count': 0,
+                'errors': 0
             }
         }
         
-        # Ensure directory exists
-        os.makedirs(user_dir, exist_ok=True)
+        # Start background process
+        thread = threading.Thread(
+            target=background_process,
+            args=(session_id, user_context.user_id, rebuild_vector, reset_progress)
+        )
+        thread.daemon = True
+        thread.start()
         
-        # Write initial status
-        with open(status_file, 'w') as f:
-            json.dump(status_data, f)
+        return jsonify({
+            'success': True,
+            'message': 'Processing started',
+            'session_id': session_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in update_database: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+def background_process(session_id, user_id, rebuild_vector=False, reset_progress=False):
+    """
+    Background task to process bookmarks and update database
+    """
+    try:
+        logger.info(f"Starting background process for user {user_id} (session: {session_id})")
+        
+        # Update status to processing
+        session_status[session_id]['status'] = 'processing'
+        session_status[session_id]['message'] = 'Processing bookmarks'
+        
+        # If we're only rebuilding vectors
+        if rebuild_vector and not reset_progress:
+            # Import vector store
+            from database.multi_user_db.vector_store_final import VectorStore
+            
+            # Initialize vector store
+            vector_store = VectorStore()
+            
+            # Rebuild vectors
+            success_count, error_count = vector_store.rebuild_user_vectors(
+                user_id=user_id,
+                bookmarks=[]  # Let the method fetch bookmarks
+            )
+            
+            # Update status
+            session_status[session_id].update({
+                'status': 'completed',
+                'message': f'Vector rebuild completed: {success_count} successful, {error_count} errors',
+                'is_complete': True,
+                'success': success_count > 0,
+                'progress': {
+                    'total_processed': success_count + error_count,
+                    'errors': error_count
+                }
+            })
+            return
+        
+        # Otherwise process bookmarks from file
+        # Determine the target directory
+        user_dir = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), f"user_{user_id}")
+        os.makedirs(user_dir, exist_ok=True)
         
         # Find the most recent bookmark file
         bookmark_files = glob.glob(os.path.join(user_dir, "bookmarks_*.json"))
         if not bookmark_files:
-            logger.error(f"❌ [UPDATE-{session_id}] No bookmark files found for user {user_id}")
-            return jsonify({
+            logger.error(f"No bookmark files found for user {user_id}")
+            session_status[session_id].update({
+                'status': 'error',
+                'message': 'No bookmark files found',
+                'is_complete': True,
                 'success': False,
-                'error': 'No bookmark files found',
-                'message': 'Please upload a bookmarks file first'
-            }), 400
+                'error': 'No bookmark files found'
+            })
+            return
             
         # Sort by modification time (newest first)
         bookmark_files.sort(key=os.path.getmtime, reverse=True)
         latest_file = bookmark_files[0]
-        logger.info(f"📂 [UPDATE-{session_id}] Using most recent bookmark file: {latest_file}")
+        logger.info(f"Using most recent bookmark file: {latest_file}")
         
-        # Start processing in background
-        def background_process():
-            logger.info(f"🔄 [UPDATE-{session_id}] Starting background processing")
-            try:
-                # Process bookmarks
-                result = final_update_bookmarks(
-                    user_id=user_id,
-                    json_file=latest_file,
-                    session_id=session_id,
-                    start_index=start_index,
-                    rebuild_vector=rebuild_vector,
-                    status_file=status_file
-                )
-                
-                # Update status file with results
-                with open(status_file, 'r') as f:
-                    current_status = json.load(f)
-                    
-                current_status['status'] = 'completed' if result.get('success') else 'error'
-                current_status['completed_at'] = datetime.now().isoformat()
-                current_status['results'] = result
-                
-                with open(status_file, 'w') as f:
-                    json.dump(current_status, f)
-                    
-                logger.info(f"✅ [UPDATE-{session_id}] Background processing completed")
-                
-            except Exception as e:
-                logger.error(f"❌ [UPDATE-{session_id}] Background processing error: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Update status file with error
-                try:
-                    with open(status_file, 'r') as f:
-                        current_status = json.load(f)
-                        
-                    current_status['status'] = 'error'
-                    current_status['error'] = str(e)
-                    current_status['traceback'] = traceback.format_exc()
-                    current_status['error_time'] = datetime.now().isoformat()
-                    
-                    with open(status_file, 'w') as f:
-                        json.dump(current_status, f)
-                except Exception as file_error:
-                    logger.error(f"❌ [UPDATE-{session_id}] Error updating status file: {str(file_error)}")
+        # Process bookmarks
+        from database.multi_user_db.update_bookmarks_final import process_bookmarks
         
-        # Start processing in background thread
-        processing_thread = threading.Thread(
-            target=background_process,
-            daemon=True,
-            name=f"UpdateProcessor-{session_id}"
+        result = process_bookmarks(
+            user_id=user_id,
+            json_file=latest_file,
+            rebuild_vector=rebuild_vector
         )
-        processing_thread.start()
         
-        # Return immediately with processing status
-        return jsonify({
-            'success': True,
-            'message': 'Database update started in background',
-            'session_id': session_id,
-            'status': 'initializing',
-            'status_file': status_file,
-            'check_endpoint': f"/update-status?session_id={session_id}"
+        # Update status with results
+        session_status[session_id].update({
+            'status': 'completed',
+            'message': 'Processing completed',
+            'is_complete': True,
+            'success': result.get('success', False),
+            'results': result,
+            'completed_at': datetime.now().isoformat()
         })
         
+        logger.info(f"Background processing completed for user {user_id}")
+        
     except Exception as e:
-        logger.error(f"❌ [UPDATE-{session_id}] Error: {str(e)}")
+        logger.error(f"Error in background_process: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': 'Server error', 'details': str(e)}), 500
+        
+        # Update status with error
+        session_status[session_id].update({
+            'status': 'error',
+            'message': f'Error processing bookmarks: {str(e)}',
+            'is_complete': True,
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
+
+def background_rebuild_vectors(session_id, user_id):
+    """Background task to rebuild vectors for a user"""
+    try:
+        # Update status
+        session_status[session_id] = {
+            'status': 'processing',
+            'user_id': user_id,
+            'timestamp': datetime.now().isoformat(),
+            'message': 'Rebuilding vector store',
+            'is_complete': False,
+            'success': False,
+            'progress': {
+                'total_processed': 0,
+                'errors': 0
+            }
+        }
+        
+        # Import vector store
+        from database.multi_user_db.vector_store_final import VectorStore
+        
+        # Initialize vector store
+        vector_store = VectorStore()
+        
+        # Rebuild vectors - the method will fetch bookmarks if needed
+        success_count, error_count = vector_store.rebuild_user_vectors(
+            user_id=user_id,
+            bookmarks=[]  # Let the method fetch bookmarks
+        )
+        
+        # Update status
+        session_status[session_id] = {
+            'status': 'completed',
+            'user_id': user_id,
+            'timestamp': datetime.now().isoformat(),
+            'message': f'Vector rebuild completed: {success_count} successful, {error_count} errors',
+            'is_complete': True,
+            'success': success_count > 0,
+            'progress': {
+                'total_processed': success_count + error_count,
+                'errors': error_count
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in background_rebuild_vectors: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Update status with error
+        session_status[session_id] = {
+            'status': 'error',
+            'user_id': user_id,
+            'timestamp': datetime.now().isoformat(),
+            'message': f'Error rebuilding vectors: {str(e)}',
+            'is_complete': True,
+            'success': False,
+            'error': str(e)
+        }
 
 @app.route('/search')
 def search():
@@ -1494,6 +1617,60 @@ def debug_database():
         return jsonify({
             "error": str(e),
             "traceback": traceback.format_exc()
+        }), 500
+
+@app.route('/update-status', methods=['GET'])
+def update_status():
+    """
+    Get the status of a background update job
+    """
+    try:
+        # Get session ID from query parameters
+        session_id = request.args.get('session_id')
+        if not session_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing session_id parameter'
+            }), 400
+            
+        # Check if session exists
+        if session_id not in session_status:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid session_id or job expired'
+            }), 404
+            
+        # Get status
+        status_data = session_status[session_id]
+        
+        # Get user context
+        user_context = g.get('user_context', None)
+        if not user_context or not user_context.user_id:
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
+            
+        # Security check - only allow access to your own jobs
+        if str(status_data.get('user_id')) != str(user_context.user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Unauthorized access to job status'
+            }), 403
+            
+        # Return status data
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'status': status_data
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in update_status: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
         }), 500
 
 # Add error handlers to capture all exceptions

@@ -13,6 +13,7 @@ import json
 import time
 from sqlalchemy import text
 import traceback
+from typing import List, Dict, Any
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -587,3 +588,53 @@ class BookmarkSearchMultiUser:
             logger.error(f"Error adding bookmark to category: {e}")
             logger.error(traceback.format_exc())
             return {"error": str(e)} 
+
+    def get_all_bookmarks_for_user(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all bookmarks for a specific user for vector embedding.
+        
+        Args:
+            user_id (str): The user ID to get bookmarks for
+            
+        Returns:
+            List[Dict[str, Any]]: List of bookmark dictionaries with id, text, tweet_content, author
+        """
+        try:
+            self.logger.info(f"Fetching all bookmarks for user {user_id}")
+            
+            with self._get_cursor() as cur:
+                # Query for all bookmarks belonging to the user
+                cur.execute(
+                    """
+                    SELECT 
+                        id, text, tweet_content, author, created_at
+                    FROM 
+                        bookmarks 
+                    WHERE 
+                        user_id = %s
+                    """, 
+                    (user_id,)
+                )
+                
+                result = cur.fetchall()
+                self.logger.info(f"Found {len(result)} bookmarks for user {user_id}")
+                
+                # Convert to list of dictionaries
+                bookmarks = []
+                for row in result:
+                    # Combine text and tweet_content for embedding
+                    bookmark = {
+                        'id': row['id'],
+                        'text': row['text'] or '',
+                        'tweet_content': row['tweet_content'] or '',
+                        'author': row['author'] or '',
+                        'created_at': row['created_at'].isoformat() if row['created_at'] else None
+                    }
+                    bookmarks.append(bookmark)
+                    
+                return bookmarks
+                
+        except Exception as e:
+            self.logger.error(f"Error fetching all bookmarks for user {user_id}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return [] 

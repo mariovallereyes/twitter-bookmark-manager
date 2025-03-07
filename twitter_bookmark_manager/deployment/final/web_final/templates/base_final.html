@@ -360,215 +360,91 @@
 
             <!-- New Upload Modal -->
             <div x-show="uploadModal" 
-                 class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center"
-                 @click.away="uploadModal = false"
-                 x-cloak>
-                <div class="bg-[#1a1a1a] p-6 rounded-lg w-96">
-                    <h3 class="text-lg font-medium mb-4">Update Bookmark Database</h3>
-                    
-                    <!-- Upload Form -->
-                    <form id="upload-form" 
-                          class="space-y-4" 
-                          @submit.prevent="handleUpload"
-                          enctype="multipart/form-data">
-                        <!-- File Input Container -->
-                        <div class="border-2 border-dashed border-gray-700 rounded-lg p-4 text-center">
-                            <input type="file" 
-                                   id="json-file" 
-                                   accept=".json"
-                                   class="hidden"
-                                   onchange="handleFileSelectDirect(this)">
-                            
-                            <div class="space-y-2">
-                                <svg class="mx-auto h-8 w-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
-                                </svg>
-                                
-                                <div class="text-sm text-gray-400">
-                                    <label for="json-file" class="cursor-pointer text-blue-400 hover:text-blue-300">
-                                        Choose a file
-                                    </label>
-                                    or drag it here
-                                </div>
-                                
-                                <div id="file-name" class="text-sm text-blue-400"></div>
-                            </div>
-                        </div>
-
-                        <!-- Progress Section -->
-                        <div id="progress-steps" class="mt-4 space-y-2" style="display: none;">
-                            <div id="step-upload" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Uploading file...</span>
-                            </div>
-                            <div id="step-validate" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Validating JSON...</span>
-                            </div>
-                            <div id="step-find-new" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Finding new bookmarks...</span>
-                            </div>
-                            <div id="step-init-ai" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Initializing AI models...</span>
-                            </div>
-                            <div id="step-dedup" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Checking for duplicates...</span>
-                            </div>
-                            <div id="step-sql" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Updating SQL database...</span>
-                            </div>
-                            <div id="step-categories" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Processing categories...</span>
-                            </div>
-                            <div id="step-vectors" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Rebuilding vector store...</span>
-                            </div>
-                            <div id="step-sync" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Verifying database sync...</span>
-                            </div>
-                        </div>
-
-                        <!-- Upload Button -->
-                        <div id="upload-actions" class="flex justify-end gap-3 mt-4" style="display: none;">
-                            <button 
-                                type="button"
-                                onclick="console.log('Button clicked'); window.handleUploadDirect(); return false;"
-                                class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">
-                                Upload File
-                            </button>
+               class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50" 
+               x-transition:enter="transition ease-out duration-300"
+               x-transition:enter-start="opacity-0"
+               x-transition:enter-end="opacity-100"
+               x-transition:leave="transition ease-in duration-200"
+               x-transition:leave-start="opacity-100"
+               x-transition:leave-end="opacity-0">
+                <div class="bg-white rounded-lg shadow-xl overflow-hidden max-w-2xl w-full" 
+                     @click.away="uploadModal = false">
+                    <div class="px-6 py-4 bg-gray-100 border-b flex justify-between items-center">
+                        <h3 class="text-lg font-semibold text-gray-800">Upload Twitter Bookmarks</h3>
+                        <button @click="uploadModal = false" class="text-gray-500 hover:text-gray-700">
+                            <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="p-6">
+                        <!-- Instructions -->
+                        <div class="bg-blue-50 p-4 rounded-lg mb-6 border border-blue-200">
+                            <h4 class="font-semibold text-blue-800 mb-2">Instructions</h4>
+                            <p class="text-sm text-blue-700 mb-3">
+                                <span class="font-bold">1. Download your Twitter bookmarks:</span><br>
+                                - Go to Twitter and request your data archive<br>
+                                - Wait for the email and download your archive (ZIP file)<br>
+                                - Extract and find the <code class="bg-blue-100 px-1 rounded">bookmarks.js</code> file
+                            </p>
+                            <p class="text-sm text-blue-700">
+                                <span class="font-bold">2. Convert the file:</span><br>
+                                - Open <code class="bg-blue-100 px-1 rounded">bookmarks.js</code> in a text editor<br>
+                                - Remove the first line: <code class="bg-blue-100 px-1 rounded">window.YTD.bookmarks.part0 = </code><br>
+                                - Save as <code class="bg-blue-100 px-1 rounded">bookmarks.json</code>
+                            </p>
                         </div>
                         
-                        <!-- Process Button (hidden until file is uploaded) -->
-                        <div id="process-button-container" class="flex justify-end gap-3 mt-4">
-                            <button 
-                                id="process-button"
-                                type="button"
-                                onclick="window.processBookmarks(this); return false;"
-                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-                                style="display: none;">
-                                Process File
-                            </button>
-                        </div>
-
-                        <!-- Advanced Options -->
-                        <div id="advanced-options" class="mt-4 border-t border-gray-700 pt-4">
-                            <details class="text-sm" open>
-                                <summary class="cursor-pointer text-gray-300 hover:text-white">Advanced Options</summary>
-                                <div class="mt-3 flex flex-col gap-3">
-                                    <div class="flex items-center">
-                                        <input 
-                                            type="checkbox" 
-                                            id="rebuild-vector" 
-                                            class="mr-2 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-600"
-                                            onchange="toggleRebuildButton()"
-                                        >
-                                        <label for="rebuild-vector" class="text-gray-300">Rebuild Vector Store</label>
-                                    </div>
-                                    <p class="text-xs text-gray-400 ml-6 -mt-1">
-                                        Use this if search results are incorrect or missing. This rebuilds the search index from the database.
-                                    </p>
-                                    
-                                    <div class="flex items-center mt-2">
-                                        <input 
-                                            type="checkbox" 
-                                            id="reset-progress" 
-                                            class="mr-2 rounded bg-gray-700 border-gray-600 text-yellow-500 focus:ring-yellow-600"
-                                        >
-                                        <label for="reset-progress" class="text-gray-300">Reset Update Progress</label>
-                                    </div>
-                                    <p class="text-xs text-gray-400 ml-6 -mt-1">
-                                        Use this if database updates are stuck in a loop or not completing. This will start the process from the beginning.
-                                    </p>
-                                    
-                                    <!-- Direct API call button -->
-                                    <div class="mt-3">
-                                        <button 
-                                            type="button"
-                                            onclick="directRebuildCall()"
-                                            class="w-full px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
-                                            Direct Rebuild Vector Store
-                                        </button>
-                                        <p class="text-xs text-gray-400 mt-1">
-                                            Alternative direct API call if the Process Rebuild button doesn't work.
-                                        </p>
-                                    </div>
-                                    
-                                    <!-- Legacy buttons - keep for backward compatibility but hide with JavaScript -->
-                                    <div id="legacy-buttons" style="display: none;">
-                                        <div>
-                                            <button 
-                                                type="button"
-                                                onclick="rebuildVectorStore()"
-                                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
-                                                Rebuild Vector Store
-                                            </button>
-                                        </div>
-                                        <div>
-                                            <button 
-                                                type="button"
-                                                onclick="resetUpdateProgress()"
-                                                class="px-4 py-2 bg-yellow-600 text-white rounded-lg text-sm hover:bg-yellow-700">
-                                                Reset Update Progress
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </details>
-                        </div>
-
-                        <!-- Progress Messages -->
-                        <div x-show="progressSteps.length > 0" class="mt-4 p-4 bg-[#1a1a1a] rounded-lg">
-                            <template x-for="(step, index) in progressSteps" :key="index">
-                                <div class="flex items-center gap-2 mb-2">
-                                    <span x-show="step.status === 'processing'" class="animate-spin h-4 w-4">⚡</span>
-                                    <span x-show="step.status === 'done'" class="text-green-500">✓</span>
-                                    <span x-show="step.status === 'error'" class="text-red-500">✗</span>
-                                    <span x-text="step.message" :class="{
-                                        'text-gray-400': step.status === 'processing',
-                                        'text-green-500': step.status === 'done',
-                                        'text-red-500': step.status === 'error'
-                                    }"></span>
-                                </div>
-                            </template>
-                        </div>
-
-                        <!-- Buttons -->
-                        <div class="flex justify-end gap-3 mt-4">
-                            <button 
-                                type="button"
-                                id="process-rebuild-btn"
-                                onclick="processRebuildOnly(); console.log('Button clicked');"
-                                class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-                                style="display: none;">
-                                Process Rebuild
-                            </button>
-                            <button 
-                                type="button" 
-                                @click="uploadModal = false"
-                                :disabled="isProcessing"
-                                class="px-4 py-2 text-sm text-gray-400 hover:text-white disabled:opacity-50">
-                                Close
-                            </button>
+                        <!-- File Upload Form -->
+                        <form id="uploadForm" @submit.prevent="uploadBookmarks" class="space-y-5">
+                            <div>
+                                <label for="bookmarksFile" class="block text-sm font-medium text-gray-700 mb-1">Select Bookmarks JSON File:</label>
+                                <input type="file" id="bookmarksFile" name="file" accept=".json"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                                <p class="mt-1 text-sm text-gray-500">Upload your prepared bookmarks.json file.</p>
+                            </div>
                             
-                            <button 
-                                x-ref="updateDatabaseBtn"
-                                x-show="uploadStatus === 'success'"
-                                type="button"
-                                @click="updateDatabase"
-                                :disabled="isProcessing"
-                                class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50">
-                                <span x-show="!isProcessing">Update Database</span>
-                                <span x-show="isProcessing">Processing...</span>
+                            <div class="flex items-center">
+                                <input id="rebuildVectors" name="rebuildVectors" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                                <label for="rebuildVectors" class="ml-2 block text-sm text-gray-700">Rebuild vector database after processing</label>
+                            </div>
+                            <p class="text-xs text-gray-500 -mt-4 ml-6">Recommended if searches aren't returning expected results.</p>
+                            
+                            <!-- Status Section -->
+                            <div id="uploadStatusSection" class="hidden mt-4">
+                                <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                    <div id="uploadProgressBar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+                                </div>
+                                <p id="uploadStatusMessage" class="mt-2 text-sm text-center text-gray-600"></p>
+                            </div>
+                            
+                            <!-- Error Messages -->
+                            <div id="uploadErrorMsg" class="hidden mt-4 bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded"></div>
+                            
+                            <!-- Success Message -->
+                            <div id="uploadSuccessMsg" class="hidden mt-4 bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded"></div>
+                        </form>
+                    </div>
+                    
+                    <!-- Footer Actions -->
+                    <div class="px-6 py-4 bg-gray-50 border-t flex justify-between">
+                        <div>
+                            <button id="directRebuildButton" class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-2 mr-2">
+                                Direct Rebuild Vector Store
+                            </button>
+                            <button id="processRebuildOnlyButton" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2">
+                                Process Rebuild Only
                             </button>
                         </div>
-                    </form>
+                        <div>
+                            <button @click="uploadModal = false" class="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-2 mr-2">
+                                Cancel
+                            </button>
+                            <button id="uploadSubmitButton" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                                Upload & Process
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1295,6 +1171,269 @@
             alert('Error checking status: ' + error.message);
         });
     }
+
+    // Upload form handlers
+    document.addEventListener('DOMContentLoaded', function() {
+        // Define elements
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadSubmitButton = document.getElementById('uploadSubmitButton');
+        const processRebuildOnlyButton = document.getElementById('processRebuildOnlyButton');
+        const directRebuildButton = document.getElementById('directRebuildButton');
+        const fileInput = document.getElementById('bookmarksFile');
+        const rebuildVectorsCheckbox = document.getElementById('rebuildVectors');
+        const uploadStatusSection = document.getElementById('uploadStatusSection');
+        const uploadProgressBar = document.getElementById('uploadProgressBar');
+        const uploadStatusMessage = document.getElementById('uploadStatusMessage');
+        const uploadErrorMsg = document.getElementById('uploadErrorMsg');
+        const uploadSuccessMsg = document.getElementById('uploadSuccessMsg');
+        
+        // Function to show status
+        function showStatus(message, progress = 0) {
+            uploadStatusSection.classList.remove('hidden');
+            uploadStatusMessage.textContent = message;
+            uploadProgressBar.style.width = `${progress}%`;
+        }
+        
+        // Function to show error
+        function showError(message) {
+            uploadErrorMsg.classList.remove('hidden');
+            uploadErrorMsg.textContent = message;
+            uploadStatusSection.classList.add('hidden');
+        }
+        
+        // Function to show success
+        function showSuccess(message) {
+            uploadSuccessMsg.classList.remove('hidden');
+            uploadSuccessMsg.textContent = message;
+            uploadStatusSection.classList.add('hidden');
+        }
+        
+        // Function to reset form
+        function resetForm() {
+            uploadStatusSection.classList.add('hidden');
+            uploadErrorMsg.classList.add('hidden');
+            uploadSuccessMsg.classList.add('hidden');
+            uploadProgressBar.style.width = '0%';
+        }
+        
+        // Function to check update status
+        function checkUpdateStatus(sessionId) {
+            let attempts = 0;
+            const maxAttempts = 60; // 5 minutes (checking every 5 seconds)
+            
+            const statusChecker = setInterval(() => {
+                fetch(`/update-status?session_id=${sessionId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Status update:', data);
+                        
+                        if (data.success) {
+                            const statusData = data.status;
+                            
+                            // Update progress bar based on status
+                            if (statusData.status === 'processing') {
+                                const progress = statusData.progress || {};
+                                const total = progress.total_processed || 0;
+                                const errors = progress.errors || 0;
+                                
+                                showStatus(`Processing: ${total} items processed, ${errors} errors`, 50);
+                            } else if (statusData.status === 'completed') {
+                                showSuccess(statusData.message || 'Processing completed successfully!');
+                                clearInterval(statusChecker);
+                            } else if (statusData.status === 'error') {
+                                showError(statusData.message || 'An error occurred during processing');
+                                clearInterval(statusChecker);
+                            }
+                        } else {
+                            attempts++;
+                            if (attempts >= maxAttempts) {
+                                showError('Timed out waiting for status updates. The process might still be running in the background.');
+                                clearInterval(statusChecker);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error checking status:', error);
+                        attempts++;
+                        if (attempts >= maxAttempts) {
+                            showError('Failed to get status updates after multiple attempts.');
+                            clearInterval(statusChecker);
+                        }
+                    });
+            }, 5000); // Check every 5 seconds
+        }
+        
+        // Function to upload file and process bookmarks
+        function uploadAndProcess() {
+            // Check if file is selected
+            if (!fileInput.files || fileInput.files.length === 0) {
+                showError('Please select a file to upload');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            // Set rebuild vectors flag
+            const rebuildVectors = rebuildVectorsCheckbox.checked;
+            
+            // Reset form
+            resetForm();
+            
+            // Show status
+            showStatus('Uploading file...', 10);
+            
+            // Upload file
+            fetch('/upload-bookmarks', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('File uploaded successfully. Starting processing...', 30);
+                    
+                    // Start processing
+                    return fetch('/update-database', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            rebuild_vector: rebuildVectors
+                        })
+                    });
+                } else {
+                    throw new Error(data.error || 'Failed to upload file');
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('Processing started...', 40);
+                    
+                    // Check status regularly
+                    if (data.session_id) {
+                        checkUpdateStatus(data.session_id);
+                    } else {
+                        showSuccess('Processing started. No session ID returned for tracking progress.');
+                    }
+                } else {
+                    throw new Error(data.error || 'Failed to start processing');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showError('Error: ' + error.message);
+            });
+        }
+        
+        // Function to process rebuild only
+        function processRebuildOnly() {
+            // Reset form
+            resetForm();
+            
+            // Show status
+            showStatus('Starting vector rebuild...', 10);
+            
+            console.log('Calling /update-database endpoint to rebuild vectors');
+            
+            // Call rebuild API
+            fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rebuild_vector: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Rebuild response:', data);
+                
+                if (data.success) {
+                    showStatus('Vector rebuild started...', 30);
+                    
+                    // Check status regularly
+                    if (data.session_id) {
+                        checkUpdateStatus(data.session_id);
+                    } else {
+                        showSuccess('Vector rebuild started. No session ID returned for tracking progress.');
+                    }
+                } else {
+                    throw new Error(data.error || 'Failed to start vector rebuild');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showError('Error: ' + error.message);
+            });
+        }
+        
+        // Function for direct vector rebuild call
+        function directRebuildCall() {
+            // Reset form
+            resetForm();
+            
+            // Show status
+            showStatus('Starting direct vector rebuild...', 10);
+            
+            console.log('Making direct call to /update-database endpoint to rebuild vectors');
+            
+            // Call rebuild API
+            fetch('/update-database', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rebuild_vector: true,
+                    direct_call: true
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Direct rebuild response:', data);
+                
+                if (data.success) {
+                    showStatus('Vector rebuild started directly...', 40);
+                    
+                    // Check status regularly
+                    if (data.session_id) {
+                        checkUpdateStatus(data.session_id);
+                    } else {
+                        showSuccess('Vector rebuild started directly. No session ID returned for tracking progress.');
+                    }
+                } else {
+                    throw new Error(data.error || 'Failed to start direct vector rebuild');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showError('Error: ' + error.message);
+            });
+        }
+        
+        // Attach event listeners
+        if (uploadSubmitButton) {
+            uploadSubmitButton.addEventListener('click', uploadAndProcess);
+        }
+        
+        if (processRebuildOnlyButton) {
+            processRebuildOnlyButton.addEventListener('click', processRebuildOnly);
+        }
+        
+        if (directRebuildButton) {
+            directRebuildButton.addEventListener('click', directRebuildCall);
+        }
+    });
     </script>
 </body>
 </html> 
