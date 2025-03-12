@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Union
+import psutil  # Add psutil for memory tracking
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
@@ -115,15 +116,29 @@ class VectorStore:
             return False
             
         try:
+            # Ensure consistent ID format - convert to string
+            bookmark_id_str = str(bookmark_id)
+            
+            # Skip if text is empty
+            if not text or not text.strip():
+                logger.warning(f"Skipping bookmark {bookmark_id} due to empty text")
+                return False
+                
+            # Limit text size to avoid processing extremely large texts
+            text = text[:10000] if len(text) > 10000 else text
+            
             # Generate embedding
             embedding = self.model.encode(text)
             
+            # Create a stable hash for the ID that combines the user ID and bookmark ID
+            point_id = f"{user_id}_{bookmark_id_str}"
+            
             # Create point with metadata
             point = PointStruct(
-                id=bookmark_id,
+                id=point_id,
                 vector=embedding.tolist(),
                 payload={
-                    "bookmark_id": bookmark_id,
+                    "bookmark_id": bookmark_id_str,
                     "text": text[:1000] if text else "",  # Limit text size in payload
                     "user_id": user_id,
                     "timestamp": datetime.now().isoformat()
@@ -211,6 +226,7 @@ class VectorStore:
         """
         try:
             logger.info(f"Starting vector rebuild for user {user_id}")
+            logger.info(f"Initial memory usage: {get_memory_usage()}")
             
             # Check if bookmarks were provided
             if bookmarks is None or len(bookmarks) == 0:
@@ -226,6 +242,7 @@ class VectorStore:
                     # Fetch bookmarks from database
                     bookmarks = search_obj.get_all_bookmarks_for_user(user_id)
                     logger.info(f"Fetched {len(bookmarks)} bookmarks from database for user {user_id}")
+                    logger.info(f"Memory after fetching bookmarks: {get_memory_usage()}")
                     
                     if not bookmarks:
                         logger.warning(f"No bookmarks found in database for user {user_id}")
@@ -251,8 +268,11 @@ class VectorStore:
             
             # Prepare texts and metadata for embedding
             texts = []
-            metadatas = []
-            ids = []
+            bookmark_ids = []
+            combined_texts = []
+            
+            # Log memory usage before processing
+            logger.info(f"Memory before processing bookmarks: {get_memory_usage()}")
             
             for bookmark in bookmarks:
                 # Combine text and tweet content for better embeddings
@@ -268,21 +288,33 @@ class VectorStore:
                 # Create combined text
                 combined_text = text
                 if tweet_content and tweet_content != text:
-                    combined_text = f"{text}\n{tweet_content}"
+                    # Try to parse tweet_content if it's a JSON string
+                    if isinstance(tweet_content, str) and tweet_content.startswith('{'):
+                        try:
+                            tweet_json = json.loads(tweet_content)
+                            if 'full_text' in tweet_json:
+                                combined_text = tweet_json.get('full_text', text)
+                            elif 'text' in tweet_json:
+                                combined_text = tweet_json.get('text', text)
+                        except:
+                            # If JSON parsing fails, just use the text field
+                            pass
+                    else:
+                        combined_text = f"{text}\n{tweet_content}"
                     
                 if not combined_text.strip():
                     logger.warning(f"Skipping bookmark {bookmark_id} with empty text")
                     continue
                     
+                # Limit text length to avoid memory issues
+                if len(combined_text) > 10000:
+                    logger.warning(f"Truncating very long bookmark text ({len(combined_text)} chars) for bookmark {bookmark_id}")
+                    combined_text = combined_text[:10000]
+                
                 # Add to lists for batch processing
-                texts.append(combined_text)
-                metadatas.append({
-                    'bookmark_id': bookmark_id,
-                    'user_id': user_id,
-                    'author': bookmark.get('author', ''),
-                    'created_at': bookmark.get('created_at', '')
-                })
-                ids.append(f"{user_id}_{bookmark_id}")
+                texts.append(text)
+                bookmark_ids.append(bookmark_id)
+                combined_texts.append(combined_text)
             
             if not texts:
                 logger.warning(f"No valid bookmark texts to process for user {user_id}")
@@ -294,44 +326,70 @@ class VectorStore:
                 
             # Delete existing vectors for this user
             try:
+                logger.info(f"Memory before deleting old vectors: {get_memory_usage()}")
                 self._delete_vectors_for_user(user_id)
+                logger.info(f"Memory after deleting old vectors: {get_memory_usage()}")
             except Exception as delete_error:
                 logger.error(f"Error deleting existing vectors for user {user_id}: {str(delete_error)}")
                 # Continue with the rebuild process
             
             # Add vectors in batches
-            batch_size = 100  # Process in smaller batches to save memory
+            batch_size = 50  # Process in smaller batches to save memory
             total_batches = math.ceil(len(texts) / batch_size)
             successful = 0
             failed = 0
             
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
-                batch_texts = texts[i:batch_end]
-                batch_metadatas = metadatas[i:batch_end]
-                batch_ids = ids[i:batch_end]
+                batch_texts = combined_texts[i:batch_end]
+                batch_ids = bookmark_ids[i:batch_end]
                 
                 try:
                     logger.info(f"Processing batch {i//batch_size + 1}/{total_batches} ({len(batch_texts)} bookmarks)")
+                    logger.info(f"Memory before batch {i//batch_size + 1}: {get_memory_usage()}")
                     
-                    # Add documents to vector store
-                    self.vector_store.add_documents(
-                        documents=batch_texts,
-                        metadatas=batch_metadatas,
-                        ids=batch_ids
-                    )
+                    # Process each bookmark in the batch individually
+                    for j, (text, bookmark_id) in enumerate(zip(batch_texts, batch_ids)):
+                        try:
+                            # Use the existing add_bookmark method directly
+                            success = self.add_bookmark(
+                                bookmark_id=bookmark_id,
+                                text=text,
+                                user_id=user_id
+                            )
+                            
+                            if success:
+                                successful += 1
+                            else:
+                                logger.warning(f"Failed to add bookmark {bookmark_id} to vector store")
+                                failed += 1
+                                
+                            # Log progress within batch
+                            if (j + 1) % 10 == 0:
+                                logger.info(f"Processed {j + 1}/{len(batch_texts)} in current batch")
+                                
+                        except Exception as item_error:
+                            logger.error(f"Error processing bookmark {bookmark_id}: {str(item_error)}")
+                            failed += 1
                     
-                    successful += len(batch_texts)
-                    logger.info(f"Batch {i//batch_size + 1}/{total_batches} processed successfully")
+                    logger.info(f"Batch {i//batch_size + 1}/{total_batches} processed: {successful} successful, {failed} failed")
+                    logger.info(f"Memory after batch {i//batch_size + 1}: {get_memory_usage()}")
+                    
+                    # Force garbage collection after each batch to free memory
+                    import gc
+                    gc.collect()
+                    logger.info(f"Memory after GC: {get_memory_usage()}")
                     
                 except Exception as batch_error:
                     logger.error(f"Error processing batch {i//batch_size + 1}/{total_batches}: {str(batch_error)}")
+                    logger.error(traceback.format_exc())
                     failed += len(batch_texts)
             
             # Get processing time
             processing_time = time.time() - start_time
             
             logger.info(f"Vector rebuild completed for user {user_id} in {processing_time:.2f} seconds: {successful} successful, {failed} failed")
+            logger.info(f"Final memory usage: {get_memory_usage()}")
             
             return {
                 'success': successful > 0,
@@ -341,7 +399,8 @@ class VectorStore:
                     'successful': successful,
                     'failed': failed,
                     'total_processed': successful + failed,
-                    'processing_time_seconds': processing_time
+                    'processing_time_seconds': processing_time,
+                    'memory_usage': get_memory_usage()
                 }
             }
             
@@ -476,3 +535,24 @@ def get_vector_store(persist_directory=None):
             raise
             
     return _vector_store_instance 
+
+# Add this function to match what's called in api_server_multi_user.py
+def get_multi_user_vector_store(persist_directory=None):
+    """
+    Get a vector store instance for the multi-user environment.
+    This is a wrapper around get_vector_store for compatibility.
+    
+    Args:
+        persist_directory: Optional directory to persist vectors
+        
+    Returns:
+        VectorStore instance
+    """
+    return get_vector_store(persist_directory) 
+
+def get_memory_usage():
+    """Get current memory usage as a formatted string"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / (1024 * 1024)  # Convert to MB
+    return f"{memory_mb:.1f}MB" 

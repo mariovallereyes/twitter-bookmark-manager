@@ -1227,8 +1227,19 @@ def update_database():
                 # Use the vector store class directly
                 logger.info(f"Using vector store class for rebuild (user {user_id})")
                 
-                # Get the vector store instance
-                vector_store = get_multi_user_vector_store()
+                # Import and get the vector store instance
+                try:
+                    from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                    vector_store = get_multi_user_vector_store()
+                except ImportError:
+                    # Fall back to regular get_vector_store if the multi-user version isn't available
+                    try:
+                        from database.multi_user_db.vector_store_final import get_vector_store
+                        vector_store = get_vector_store()
+                    except Exception as import_error:
+                        logger.error(f"Failed to import vector store: {str(import_error)}")
+                        return jsonify({'success': False, 'error': f'Vector store import failed: {str(import_error)}'}), 500
+                
                 if not vector_store:
                     logger.error(f"Failed to get vector store for user {user_id}")
                     return jsonify({'success': False, 'error': 'Vector store initialization failed'}), 500
@@ -1240,22 +1251,44 @@ def update_database():
                     logger.warning(f"Issue with tweet_content column check: {str(column_error)}")
                     # Continue as this is non-critical
                 
-                # Initiate rebuild
-                result = vector_store.rebuild_user_vectors(user_id=user_id)
-                
-                if result.get('success'):
-                    logger.info(f"Vector rebuild successful for user {user_id}: {result.get('message', '')}")
-                    return jsonify({
-                        'success': True,
-                        'message': result.get('message', 'Vector database rebuilt successfully'),
-                        'details': result
-                    })
-                else:
-                    logger.error(f"Vector rebuild failed for user {user_id}: {result.get('error', '')}")
+                # Initiate rebuild with timeout protection
+                try:
+                    # Set a timeout for the operation (5 minutes)
+                    max_time = 300  # seconds
+                    start_time = time.time()
+                    
+                    # Initiate rebuild
+                    result = vector_store.rebuild_user_vectors(user_id=user_id)
+                    
+                    # Check how long it took
+                    elapsed_time = time.time() - start_time
+                    logger.info(f"Vector rebuild took {elapsed_time:.2f} seconds for user {user_id}")
+                    
+                    if result.get('success'):
+                        logger.info(f"Vector rebuild successful for user {user_id}: {result.get('message', '')}")
+                        return jsonify({
+                            'success': True,
+                            'message': result.get('message', 'Vector database rebuilt successfully'),
+                            'details': result,
+                            'elapsed_time': elapsed_time
+                        })
+                    else:
+                        logger.error(f"Vector rebuild failed for user {user_id}: {result.get('error', '')}")
+                        return jsonify({
+                            'success': False,
+                            'error': result.get('error', 'Failed to rebuild vector database'),
+                            'details': result,
+                            'elapsed_time': elapsed_time
+                        }), 500
+                except Exception as rebuild_inner_error:
+                    logger.error(f"Exception during vector rebuild for user {user_id}: {str(rebuild_inner_error)}")
+                    logger.error(traceback.format_exc())
                     return jsonify({
                         'success': False,
-                        'error': result.get('error', 'Failed to rebuild vector database'),
-                        'details': result
+                        'error': f'Vector rebuild inner error: {str(rebuild_inner_error)}',
+                        'details': {
+                            'traceback': traceback.format_exc()
+                        }
                     }), 500
                 
         except Exception as rebuild_error:
