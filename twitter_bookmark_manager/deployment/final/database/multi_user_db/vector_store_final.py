@@ -47,7 +47,7 @@ class VectorStore:
             persist_directory: Directory to persist the vector store. If None,
                               a default location in the user's directory is used.
         """
-        self.model = None
+        self.model = None  # Will be loaded lazily when needed
         self.client = None
         self.collection_name = "bookmark_embeddings"
         self.vector_size = 384  # BERT embedding size
@@ -63,15 +63,9 @@ class VectorStore:
         # Ensure directory exists
         os.makedirs(self.persist_directory, exist_ok=True)
         
-        # Initialize the embedding model
-        try:
-            logger.info(f"Initializing SentenceTransformer model for vector embeddings")
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info(f"Model initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize SentenceTransformer model: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+        # Don't initialize model right away - lazy load when needed
+        # We'll defer loading until first use to save memory initially
+        logger.info("Using lazy loading for model - will load when first needed")
             
         # Initialize Qdrant client
         try:
@@ -101,6 +95,55 @@ class VectorStore:
             logger.error(traceback.format_exc())
             raise
             
+    def _ensure_model_loaded(self):
+        """Ensure the model is loaded before using it"""
+        if self.model is None:
+            self._initialize_model_with_low_memory()
+            
+    def _initialize_model_with_low_memory(self):
+        """Initialize the model with techniques to minimize memory usage"""
+        # Force garbage collection before model loading
+        gc.collect()
+        logger.info(f"Pre-model loading memory usage: {self.get_memory_usage()}")
+        
+        # Set environment variables to reduce memory usage
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging
+        os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizers parallelism
+        
+        # Try clearing CUDA cache if using GPU (won't affect CPU usage)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
+        
+        logger.info(f"Initializing SentenceTransformer model for vector embeddings")
+        
+        # Try to use a smaller model first - all-MiniLM-L12-v2 has good balance of quality vs size
+        try:
+            # Use a tiny model to save memory while still getting decent results
+            self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
+            logger.info(f"Successfully loaded smaller paraphrase-MiniLM-L3-v2 model")
+        except Exception as e:
+            # Fallback to the original model if the smaller one fails
+            logger.warning(f"Failed to load smaller model, falling back to standard model: {str(e)}")
+            self.model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        
+        # Convert to half precision to reduce memory usage
+        try:
+            self.model.half()  # Convert to fp16 to reduce memory usage
+            logger.info(f"Successfully converted model to half precision")
+        except Exception as e:
+            logger.warning(f"Could not convert model to half precision: {str(e)}")
+        
+        logger.info(f"Model initialized successfully")
+        logger.info(f"Post-model loading memory usage: {self.get_memory_usage()}")
+        
+        # Force garbage collection after model loading
+        gc.collect()
+        logger.info(f"After GC memory usage: {self.get_memory_usage()}")
+            
     def add_bookmark(self, bookmark_id: int, text: str, user_id: int) -> bool:
         """
         Add a bookmark to the vector store.
@@ -113,11 +156,14 @@ class VectorStore:
         Returns:
             True if successful, False otherwise
         """
-        if not self.model or not self.client:
+        if not self.client:
             logger.error("Vector store not properly initialized")
             return False
             
         try:
+            # Ensure model is loaded
+            self._ensure_model_loaded()
+            
             # Ensure consistent ID format - convert to string
             bookmark_id_str = str(bookmark_id)
             
@@ -173,11 +219,14 @@ class VectorStore:
         Returns:
             List of dictionaries containing bookmark IDs and scores
         """
-        if not self.model or not self.client:
+        if not self.client:
             logger.error("Vector store not properly initialized")
             return []
             
         try:
+            # Ensure model is loaded
+            self._ensure_model_loaded()
+            
             # Generate embedding for query
             query_embedding = self.model.encode(query)
             
@@ -240,6 +289,10 @@ class VectorStore:
             self._delete_vectors_for_user(user_id)
             logger.info(f"Memory after deleting old vectors: {self.get_memory_usage()}")
             
+            # Ensure model is loaded (lazy loading)
+            self._ensure_model_loaded()
+            logger.info(f"Memory after loading model: {self.get_memory_usage()}")
+            
             # Process in smaller batches
             success_count = 0
             error_count = 0
@@ -276,14 +329,27 @@ class VectorStore:
                 progress = ((i + len(batch)) / total) * 100
                 logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
             
+            # Unload model to free memory when done
+            self._unload_model()
             logger.info(f"Final memory usage: {self.get_memory_usage()}")
             logger.info(f"Vector rebuild completed: {success_count} successes, {error_count} errors")
             return True
             
         except Exception as e:
             logger.error(f"Error during vector rebuild for user {user_id}: {str(e)}")
+            # Try to unload model even after error
+            self._unload_model()
             return False
             
+    def _unload_model(self):
+        """Unload the model to free memory"""
+        if self.model is not None:
+            logger.info(f"Unloading model to free memory")
+            self.model = None
+            # Force garbage collection
+            gc.collect()
+            logger.info(f"Model unloaded, memory usage: {self.get_memory_usage()}")
+        
     def _delete_vectors_for_user(self, user_id: int) -> bool:
         """
         Delete all vectors for a specific user.
