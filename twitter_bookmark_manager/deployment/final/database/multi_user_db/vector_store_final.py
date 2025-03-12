@@ -14,6 +14,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Union
 import psutil  # Add psutil for memory tracking
+import uuid
+import gc  # Add import for garbage collection
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
@@ -211,207 +213,76 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, bookmarks=None):
-        """
-        Rebuild vector database for a user with given bookmarks.
-        If bookmarks is None, fetch bookmarks from the database.
+    def rebuild_user_vectors(self, user_id, batch_size=20):
+        """Rebuild vector store for a specific user's bookmarks with enhanced memory management"""
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
         
-        Args:
-            user_id: User ID to rebuild vectors for
-            bookmarks: List of bookmark dicts with 'id', 'text', 'tweet_content' fields. 
-                      If None, bookmarks will be fetched from DB.
+        session_id = str(uuid.uuid4())[:8]
+        logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store rebuild for user {user_id}")
         
-        Returns:
-            dict: Result with success flag and details
-        """
+        # Force garbage collection before starting
+        gc.collect()
+        logger.info(f"Initial memory usage: {self.get_memory_usage()}")
+        
         try:
-            logger.info(f"Starting vector rebuild for user {user_id}")
-            logger.info(f"Initial memory usage: {get_memory_usage()}")
+            # Get all bookmarks for the user
+            bookmarks = get_bookmarks_for_user(user_id)
+            total = len(bookmarks)
+            logger.info(f"Found {total} bookmarks for user {user_id}")
+            logger.info(f"Memory after fetching bookmarks: {self.get_memory_usage()}")
             
-            # Check if bookmarks were provided
-            if bookmarks is None or len(bookmarks) == 0:
-                logger.warning(f"No bookmarks provided for user {user_id}, attempting to fetch from database")
+            if total == 0:
+                logger.info(f"No bookmarks found for user {user_id}, nothing to rebuild")
+                return True
+            
+            # Clear existing vectors first
+            logger.info(f"Memory before deleting old vectors: {self.get_memory_usage()}")
+            self._delete_vectors_for_user(user_id)
+            logger.info(f"Memory after deleting old vectors: {self.get_memory_usage()}")
+            
+            # Process in smaller batches
+            success_count = 0
+            error_count = 0
+            
+            for i in range(0, total, batch_size):
+                batch = bookmarks[i:i+batch_size]
+                current_batch = i//batch_size + 1
+                total_batches = (total+batch_size-1)//batch_size
                 
-                try:
-                    # Import bookmark search class
-                    from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
-                    
-                    # Initialize search object
-                    search_obj = BookmarkSearchMultiUser()
-                    
-                    # Fetch bookmarks from database
-                    bookmarks = search_obj.get_all_bookmarks_for_user(user_id)
-                    logger.info(f"Fetched {len(bookmarks)} bookmarks from database for user {user_id}")
-                    logger.info(f"Memory after fetching bookmarks: {get_memory_usage()}")
-                    
-                    if not bookmarks:
-                        logger.warning(f"No bookmarks found in database for user {user_id}")
-                        return {
-                            'success': False,
-                            'error': 'No bookmarks found for user',
-                            'user_id': user_id,
-                            'bookmark_count': 0
-                        }
-                    
-                except Exception as fetch_error:
-                    logger.error(f"Failed to fetch bookmarks for user {user_id}: {str(fetch_error)}")
-                    logger.error(traceback.format_exc())
-                    return {
-                        'success': False,
-                        'error': f"Failed to fetch bookmarks: {str(fetch_error)}",
-                        'user_id': user_id
-                    }
-            
-            # Track metrics
-            start_time = time.time()
-            logger.info(f"Processing {len(bookmarks)} bookmarks for vector rebuild")
-            
-            # Prepare texts and metadata for embedding
-            texts = []
-            bookmark_ids = []
-            combined_texts = []
-            
-            # Log memory usage before processing
-            logger.info(f"Memory before processing bookmarks: {get_memory_usage()}")
-            
-            for bookmark in bookmarks:
-                # Combine text and tweet content for better embeddings
-                # Handle possible formats based on the data source
-                text = bookmark.get('text', '')
-                tweet_content = bookmark.get('tweet_content', '')
-                bookmark_id = bookmark.get('id', bookmark.get('bookmark_id', ''))
+                logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} bookmarks)")
                 
-                if not bookmark_id:
-                    logger.warning(f"Skipping bookmark without ID: {bookmark}")
-                    continue
-                    
-                # Create combined text
-                combined_text = text
-                if tweet_content and tweet_content != text:
-                    # Try to parse tweet_content if it's a JSON string
-                    if isinstance(tweet_content, str) and tweet_content.startswith('{'):
-                        try:
-                            tweet_json = json.loads(tweet_content)
-                            if 'full_text' in tweet_json:
-                                combined_text = tweet_json.get('full_text', text)
-                            elif 'text' in tweet_json:
-                                combined_text = tweet_json.get('text', text)
-                        except:
-                            # If JSON parsing fails, just use the text field
-                            pass
-                    else:
-                        combined_text = f"{text}\n{tweet_content}"
-                    
-                if not combined_text.strip():
-                    logger.warning(f"Skipping bookmark {bookmark_id} with empty text")
-                    continue
-                    
-                # Limit text length to avoid memory issues
-                if len(combined_text) > 10000:
-                    logger.warning(f"Truncating very long bookmark text ({len(combined_text)} chars) for bookmark {bookmark_id}")
-                    combined_text = combined_text[:10000]
+                # Process each bookmark in the batch with individual error handling
+                for bookmark in batch:
+                    try:
+                        self.add_bookmark(
+                            bookmark_id=bookmark.id,
+                            user_id=user_id,
+                            text=bookmark.text or "",
+                            metadata={
+                                'author': bookmark.author_username,
+                                'created_at': str(bookmark.created_at) if bookmark.created_at else None
+                            }
+                        )
+                        success_count += 1
+                    except Exception as e:
+                        error_count += 1
+                        logger.error(f"Error adding bookmark {bookmark.id} to vector store: {str(e)}")
                 
-                # Add to lists for batch processing
-                texts.append(text)
-                bookmark_ids.append(bookmark_id)
-                combined_texts.append(combined_text)
-            
-            if not texts:
-                logger.warning(f"No valid bookmark texts to process for user {user_id}")
-                return {
-                    'success': False,
-                    'error': 'No valid bookmark texts found',
-                    'user_id': user_id
-                }
+                # Force garbage collection after each batch
+                gc.collect()
+                logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
                 
-            # Delete existing vectors for this user
-            try:
-                logger.info(f"Memory before deleting old vectors: {get_memory_usage()}")
-                self._delete_vectors_for_user(user_id)
-                logger.info(f"Memory after deleting old vectors: {get_memory_usage()}")
-            except Exception as delete_error:
-                logger.error(f"Error deleting existing vectors for user {user_id}: {str(delete_error)}")
-                # Continue with the rebuild process
+                # Log progress
+                progress = ((i + len(batch)) / total) * 100
+                logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
             
-            # Add vectors in batches
-            batch_size = 50  # Process in smaller batches to save memory
-            total_batches = math.ceil(len(texts) / batch_size)
-            successful = 0
-            failed = 0
-            
-            for i in range(0, len(texts), batch_size):
-                batch_end = min(i + batch_size, len(texts))
-                batch_texts = combined_texts[i:batch_end]
-                batch_ids = bookmark_ids[i:batch_end]
-                
-                try:
-                    logger.info(f"Processing batch {i//batch_size + 1}/{total_batches} ({len(batch_texts)} bookmarks)")
-                    logger.info(f"Memory before batch {i//batch_size + 1}: {get_memory_usage()}")
-                    
-                    # Process each bookmark in the batch individually
-                    for j, (text, bookmark_id) in enumerate(zip(batch_texts, batch_ids)):
-                        try:
-                            # Use the existing add_bookmark method directly
-                            success = self.add_bookmark(
-                                bookmark_id=bookmark_id,
-                                text=text,
-                                user_id=user_id
-                            )
-                            
-                            if success:
-                                successful += 1
-                            else:
-                                logger.warning(f"Failed to add bookmark {bookmark_id} to vector store")
-                                failed += 1
-                                
-                            # Log progress within batch
-                            if (j + 1) % 10 == 0:
-                                logger.info(f"Processed {j + 1}/{len(batch_texts)} in current batch")
-                                
-                        except Exception as item_error:
-                            logger.error(f"Error processing bookmark {bookmark_id}: {str(item_error)}")
-                            failed += 1
-                    
-                    logger.info(f"Batch {i//batch_size + 1}/{total_batches} processed: {successful} successful, {failed} failed")
-                    logger.info(f"Memory after batch {i//batch_size + 1}: {get_memory_usage()}")
-                    
-                    # Force garbage collection after each batch to free memory
-                    import gc
-                    gc.collect()
-                    logger.info(f"Memory after GC: {get_memory_usage()}")
-                    
-                except Exception as batch_error:
-                    logger.error(f"Error processing batch {i//batch_size + 1}/{total_batches}: {str(batch_error)}")
-                    logger.error(traceback.format_exc())
-                    failed += len(batch_texts)
-            
-            # Get processing time
-            processing_time = time.time() - start_time
-            
-            logger.info(f"Vector rebuild completed for user {user_id} in {processing_time:.2f} seconds: {successful} successful, {failed} failed")
-            logger.info(f"Final memory usage: {get_memory_usage()}")
-            
-            return {
-                'success': successful > 0,
-                'message': f"Processed {successful} bookmarks, {failed} failed",
-                'user_id': user_id,
-                'details': {
-                    'successful': successful,
-                    'failed': failed,
-                    'total_processed': successful + failed,
-                    'processing_time_seconds': processing_time,
-                    'memory_usage': get_memory_usage()
-                }
-            }
+            logger.info(f"Final memory usage: {self.get_memory_usage()}")
+            logger.info(f"Vector rebuild completed: {success_count} successes, {error_count} errors")
+            return True
             
         except Exception as e:
-            logger.error(f"Error in rebuild_user_vectors for user {user_id}: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {
-                'success': False,
-                'error': str(e),
-                'user_id': user_id
-            }
+            logger.error(f"Error during vector rebuild for user {user_id}: {str(e)}")
+            return False
             
     def _delete_vectors_for_user(self, user_id: int) -> bool:
         """
@@ -510,6 +381,13 @@ class VectorStore:
             logger.error(f"Error getting collection info: {str(e)}")
             logger.error(traceback.format_exc())
             return {"error": str(e)}
+
+    def get_memory_usage(self):
+        """Get the current memory usage of the process"""
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        return f"{memory_mb:.2f}MB"
 
 # Create a singleton instance
 _vector_store_instance = None
