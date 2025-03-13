@@ -42,7 +42,6 @@ print(f"Current directory: {os.getcwd()}")
 print(f"Python path: {sys.path}")
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g, flash
-from flask_login import current_user, login_required
 from flask.sessions import SecureCookieSessionInterface
 import uuid
 import traceback
@@ -182,9 +181,11 @@ def save_session_status(session_id, status_data):
     try:
         # Get user ID from status data or current user
         user_id = status_data.get('user_id')
-        if not user_id and current_user and current_user.is_authenticated:
-            user_id = current_user.id
-            status_data['user_id'] = user_id
+        if not user_id:
+            user = UserContext.get_current_user()
+            if user:
+                user_id = user.id
+                status_data['user_id'] = user_id
             
         if not user_id:
             logger.warning(f"No user ID found for session {session_id}")
@@ -1153,7 +1154,8 @@ def update_database():
     Returns:
         JSON response
     """
-    if not current_user.is_authenticated:
+    user = UserContext.get_current_user()
+    if not user:
         flash('You need to be logged in to update the database.', 'error')
         return jsonify({'error': 'Not authenticated', 'success': False}), 401
     
@@ -1165,14 +1167,14 @@ def update_database():
     session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
     save_session_status(session_id, {'status': 'started', 'timestamp': time.time()})
     
-    logger.info(f"Update database requested by user {current_user.id}, rebuild={rebuild}, direct_call={direct_call}")
+    logger.info(f"Update database requested by user {user.id}, rebuild={rebuild}, direct_call={direct_call}")
     
     # If vector rebuilding is requested
     if rebuild:
         try:
             if direct_call:
                 # Direct approach (may be memory intensive)
-                logger.info(f"Direct vector rebuild requested by user {current_user.id}")
+                logger.info(f"Direct vector rebuild requested by user {user.id}")
                 
                 try:
                     from deployment.final.database.multi_user_db.vector_store_final import get_multi_user_vector_store
@@ -1180,15 +1182,15 @@ def update_database():
                     
                     # Check if vector store initialized correctly
                     if hasattr(vector_store, 'rebuild_user_vectors'):
-                        logger.info(f"Starting vector rebuild for user {current_user.id}")
-                        success = vector_store.rebuild_user_vectors(current_user.id)
+                        logger.info(f"Starting vector rebuild for user {user.id}")
+                        success = vector_store.rebuild_user_vectors(user.id)
                         
                         if success:
-                            logger.info(f"Vector rebuild completed for user {current_user.id}")
+                            logger.info(f"Vector rebuild completed for user {user.id}")
                             save_session_status(session_id, {'status': 'completed', 'timestamp': time.time()})
                             return jsonify({'success': True, 'message': 'Vector store rebuilt successfully'})
                         else:
-                            logger.error(f"Vector rebuild failed for user {current_user.id}")
+                            logger.error(f"Vector rebuild failed for user {user.id}")
                             save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': 'Vector rebuild failed'})
                             return jsonify({'success': False, 'error': 'Vector rebuild failed'})
                     else:
@@ -1207,17 +1209,17 @@ def update_database():
                     return jsonify({'success': False, 'error': f'Error: {str(e)}'})
             else:
                 # Background approach using a separate process
-                logger.info(f"Background vector rebuild requested by user {current_user.id}")
+                logger.info(f"Background vector rebuild requested by user {user.id}")
                 
                 try:
                     from deployment.final.database.multi_user_db.update_bookmarks_final import run_vector_rebuild
                     
                     # Start background rebuild
-                    thread = threading.Thread(target=run_vector_rebuild, args=(current_user.id, session_id))
+                    thread = threading.Thread(target=run_vector_rebuild, args=(user.id, session_id))
                     thread.daemon = True
                     thread.start()
                     
-                    logger.info(f"Background vector rebuild started for user {current_user.id}")
+                    logger.info(f"Background vector rebuild started for user {user.id}")
                     save_session_status(session_id, {'status': 'processing', 'timestamp': time.time()})
                     return jsonify({'success': True, 'session_id': session_id, 'message': 'Vector rebuild started in background'})
                     
@@ -1231,7 +1233,7 @@ def update_database():
             return jsonify({'success': False, 'error': f'Unexpected error: {str(e)}'})
     else:
         # Skip vector rebuilding entirely, just return success
-        logger.info(f"Vector rebuild skipped (rebuild=False) for user {current_user.id}")
+        logger.info(f"Vector rebuild skipped (rebuild=False) for user {user.id}")
         save_session_status(session_id, {'status': 'completed', 'timestamp': time.time(), 'message': 'Vector rebuild skipped'})
         return jsonify({'success': True, 'message': 'Vector rebuild skipped per request', 'session_id': session_id})
 
