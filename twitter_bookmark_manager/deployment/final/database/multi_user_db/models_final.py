@@ -29,14 +29,38 @@ class Bookmark:
             
         # Row order: bookmark_id, text, created_at, author_name, author_username, media_files, raw_data, user_id
         try:
+            # Handle media_files - could be JSON string or already a dict
+            if row[5]:
+                try:
+                    if isinstance(row[5], dict):
+                        media_files = row[5]
+                    else:
+                        media_files = json.loads(row[5])
+                except:
+                    media_files = {}
+            else:
+                media_files = {}
+                
+            # Handle raw_data - could be JSON string or already a dict
+            if row[6]:
+                try:
+                    if isinstance(row[6], dict):
+                        raw_data = row[6]
+                    else:
+                        raw_data = json.loads(row[6])
+                except:
+                    raw_data = {}
+            else:
+                raw_data = {}
+                
             return cls(
                 id=row[0],                # bookmark_id
                 text=row[1],              # text
                 created_at=row[2],        # created_at
                 author_name=row[3],       # author_name
                 author_username=row[4],   # author_username
-                media_files=json.loads(row[5]) if row[5] else {},  # media_files
-                raw_data=json.loads(row[6]) if row[6] else {},     # raw_data
+                media_files=media_files,  # media_files (handled above)
+                raw_data=raw_data,        # raw_data (handled above)
                 user_id=row[7]            # user_id
             )
         except Exception as e:

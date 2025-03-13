@@ -395,6 +395,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
                     vector_store.add_bookmark(
                         bookmark_id=str(bookmark.id),
                         text=bookmark.text or '',
+                        user_id=bookmark.user_id,
                         metadata=metadata
                     )
                     
