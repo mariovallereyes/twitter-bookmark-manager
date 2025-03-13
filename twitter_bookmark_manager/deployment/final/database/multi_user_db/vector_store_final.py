@@ -118,23 +118,30 @@ class VectorStore:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
-            pass
+                
+            # Limit PyTorch threads to reduce memory usage
+            torch.set_num_threads(1)
+            logger.info(f"Limited PyTorch to 1 thread")
+        except Exception as e:
+            logger.warning(f"Failed to configure PyTorch optimizations: {str(e)}")
         
         logger.info(f"Initializing SentenceTransformer model for vector embeddings")
         
-        # Try to use a smaller model first - all-MiniLM-L12-v2 has good balance of quality vs size
+        # Always use the smaller model to save memory - critical for Railway deployment
         try:
-            # Use a tiny model to save memory while still getting decent results
+            # Use the smallest viable model to save memory
             self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
             logger.info(f"Successfully loaded smaller paraphrase-MiniLM-L3-v2 model")
+            
+            # Set model to evaluation mode to save memory
+            self.model.eval()
+            logger.info(f"Set model to evaluation mode")
         except Exception as e:
-            # Fallback to the original model if the smaller one fails
-            logger.warning(f"Failed to load smaller model, falling back to standard model: {str(e)}")
-            self.model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+            logger.error(f"Failed to load model: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise RuntimeError(f"Could not initialize embedding model: {str(e)}")
         
-        # NOTE: We previously tried to convert to half precision to save memory with:
-        # self.model.half()
+        # NOTE: We previously tried to convert to half precision with model.half()
         # But this caused "LayerNormKernelImpl not implemented for 'Half'" errors in Railway
         # We now use full precision (fp32) for better compatibility with different environments
         logger.info(f"Using full precision (fp32) model for better compatibility")
@@ -208,6 +215,9 @@ class VectorStore:
                 collection_name=self.collection_name,
                 points=[point]
             )
+            
+            # Clear embedding variable to free memory
+            del embedding
             
             logger.info(f"Added bookmark {bookmark_id} to vector store for user {user_id}")
             return True
@@ -465,6 +475,27 @@ class VectorStore:
         memory_info = process.memory_info()
         memory_mb = memory_info.rss / 1024 / 1024
         return f"{memory_mb:.2f}MB"
+
+    def clean_memory(self):
+        """
+        Perform aggressive memory cleanup to avoid out-of-memory errors.
+        Call this after processing each batch of bookmarks.
+        """
+        # Force garbage collection
+        gc.collect()
+        
+        # Try to clean PyTorch cache if it's available
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("Cleared PyTorch CUDA cache")
+        except:
+            pass
+        
+        # Log current memory usage
+        memory_usage = self.get_memory_usage()
+        logger.info(f"After cleanup, memory usage: {memory_usage}")
 
 # Create a singleton instance
 _vector_store_instance = None

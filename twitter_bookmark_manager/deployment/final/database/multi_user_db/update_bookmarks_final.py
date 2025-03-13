@@ -18,6 +18,7 @@ import re
 import glob
 import hashlib
 import time
+import gc
 
 # Import the Bookmark model and db_session
 from .db_final import db_session, get_db_session, get_bookmarks_for_user
@@ -345,8 +346,20 @@ def rebuild_vector_store(user_id=None, session_id=None):
                 "duration_seconds": (datetime.now() - start_time).total_seconds()
             }
         
-        # Process bookmarks in batches
-        BATCH_SIZE = 50
+        # Pre-filter bookmarks with empty text to avoid unnecessary processing
+        valid_bookmarks = []
+        for bookmark in bookmarks:
+            if bookmark.text and bookmark.text.strip():
+                valid_bookmarks.append(bookmark)
+            else:
+                logger.info(f"⚠️ [REBUILD-{session_id}] Pre-filtering bookmark {bookmark.id} due to empty text")
+                
+        original_count = total_count
+        total_count = len(valid_bookmarks)
+        logger.info(f"📊 [REBUILD-{session_id}] After filtering empty text: {total_count}/{original_count} valid bookmarks")
+        
+        # Process bookmarks in small batches to manage memory usage
+        BATCH_SIZE = 10  # Reduced from 50 to 10 for lower memory footprint
         processed_count = 0
         success_count = 0
         error_count = 0
@@ -370,12 +383,17 @@ def rebuild_vector_store(user_id=None, session_id=None):
             except Exception as e:
                 logger.error(f"❌ [REBUILD-{session_id}] Error clearing existing vectors: {e}")
         
+        # Force garbage collection before starting batch processing
+        gc.collect()
+        
         # Process batches
         for i in range(0, total_count, BATCH_SIZE):
-            batch = bookmarks[i:i+BATCH_SIZE]
+            batch = valid_bookmarks[i:i+BATCH_SIZE]
             batch_size = len(batch)
             
             logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i//BATCH_SIZE + 1}: {batch_size} bookmarks")
+            memory_before = get_memory_usage()
+            logger.info(f"📊 [REBUILD-{session_id}] Memory before batch: {memory_before}")
             
             # Process each bookmark in batch
             for bookmark in batch:
@@ -418,9 +436,18 @@ def rebuild_vector_store(user_id=None, session_id=None):
             memory_usage = get_memory_usage()
             logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i//BATCH_SIZE + 1}: {processed_count}/{total_count} ({progress:.1f}%) - Memory: {memory_usage}")
             
-            # Force garbage collection
-            import gc
+            # Force aggressive garbage collection after each batch
             gc.collect()
+            
+            # Add a small delay between batches to allow memory to be freed
+            time.sleep(0.5)
+            
+            # Use the vector store's cleanup method for thorough memory management
+            vector_store.clean_memory()
+            
+            # Log memory after cleanup
+            memory_after = get_memory_usage()
+            logger.info(f"📊 [REBUILD-{session_id}] Memory after cleanup: {memory_after}")
         
         # Final verification
         collection_info = vector_store.get_collection_info()
@@ -430,7 +457,8 @@ def rebuild_vector_store(user_id=None, session_id=None):
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed in {duration:.2f} seconds")
         logger.info(f"📊 [REBUILD-{session_id}] Summary:")
-        logger.info(f"  - Database bookmark count: {total_count}")
+        logger.info(f"  - Original database bookmark count: {original_count}")
+        logger.info(f"  - Valid bookmarks processed: {total_count}")
         logger.info(f"  - Vector store count: {vector_count}")
         logger.info(f"  - Successful additions: {success_count}")
         logger.info(f"  - Errors: {error_count}")
@@ -438,6 +466,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
         return {
             "success": True,
             "bookmark_count": total_count,
+            "original_count": original_count,
             "vector_count": vector_count,
             "successful_additions": success_count,
             "errors": error_count,
@@ -836,7 +865,6 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                         current_batch = []
                         
                         # Force garbage collection to free memory
-                        import gc
                         gc.collect()
                 except Exception as e:
                     logger.error(f"Error in batch processing loop: {e}")
