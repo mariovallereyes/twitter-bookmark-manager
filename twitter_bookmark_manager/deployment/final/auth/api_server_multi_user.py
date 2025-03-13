@@ -354,7 +354,7 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(user_api_bp)
 
 # Initialize user context middleware
-UserContextMiddleware(app, lambda user_id: get_user_by_id(get_db_connection(), user_id))
+UserContextMiddleware(app, lambda conn, user_id: get_user_by_id(conn, user_id))
 
 # Debug database initialization function (to be called at startup)
 def init_app_debug():
