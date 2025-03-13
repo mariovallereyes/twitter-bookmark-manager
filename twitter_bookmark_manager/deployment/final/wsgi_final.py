@@ -5,7 +5,7 @@ import traceback
 from pathlib import Path
 from flask import Flask, jsonify, request, redirect, url_for, render_template_string
 from flask_cors import CORS
-from database.multi_user_db.db_final import init_database, test_connection
+from database.multi_user_db.db_final import init_database
 from auth.auth_routes_final import auth_bp
 from auth.user_api_final import user_api_bp
 
