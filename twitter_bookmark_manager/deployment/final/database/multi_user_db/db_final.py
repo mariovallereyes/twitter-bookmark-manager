@@ -582,7 +582,7 @@ def get_db_session():
 def get_bookmarks_for_user(user_id):
     """
     Get all bookmarks for a specific user.
-    Uses direct SQL for reliability rather than ORM.
+    Uses SQLAlchemy for consistency like the PythonAnywhere implementation.
     
     Args:
         user_id: User ID to get bookmarks for
@@ -592,50 +592,34 @@ def get_bookmarks_for_user(user_id):
     """
     from .models_final import Bookmark
     
-    logger.info(f"Fetching bookmarks for user {user_id} using direct SQL")
+    logger.info(f"Fetching bookmarks for user {user_id}")
     
     bookmarks = []
-    conn = None
     
     try:
-        # Get connection
-        conn = get_db_connection()
-        
-        # Build query with parameterized SQL matching actual database schema
-        query = """
-            SELECT bookmark_id, text, created_at, author_name, author_username, 
-                   media_files, raw_data, user_id
-            FROM bookmarks
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
-        """
-        
-        # Check connection type and execute query appropriately
-        if hasattr(conn, 'execute'):
-            # This is a SQLAlchemy connection
-            logger.info("Using SQLAlchemy connection")
-            result = conn.execute(text(query), {"user_id": user_id})
-            rows = result.fetchall()
-        else:
-            # This is a psycopg2 connection
-            logger.info("Using psycopg2 connection")
-            cursor = conn.cursor()
-            # For psycopg2, convert back to %s style and use tuple parameters
-            psycopg2_query = query.replace(':user_id', '%s')
-            cursor.execute(psycopg2_query, (user_id,))
-            rows = cursor.fetchall()
-            cursor.close()
+        # Get connection using session for consistency
+        with db_session() as session:
+            # Use SQLAlchemy session.execute with text query for better control
+            query = """
+                SELECT id, text, created_at, author_name, author_username, 
+                       media_files, raw_data, user_id
+                FROM bookmarks
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+            """
             
-        logger.info(f"Found {len(rows)} bookmarks for user {user_id}")
-        
-        # Convert to Bookmark objects
-        for row in rows:
-            try:
-                bookmarks.append(Bookmark.from_row(row))
-            except Exception as e:
-                logger.error(f"Error converting row to Bookmark: {e}")
-                logger.error(f"Problematic row: {row}")
-                # Continue to next row
+            result = session.execute(text(query), {"user_id": user_id})
+            rows = result.fetchall()
+            logger.info(f"Found {len(rows)} bookmarks for user {user_id}")
+            
+            # Convert to Bookmark objects with error handling for each row
+            for row in rows:
+                try:
+                    bookmarks.append(Bookmark.from_row(row))
+                except Exception as e:
+                    logger.error(f"Error converting row to Bookmark: {e}")
+                    logger.error(f"Problematic row: {row}")
+                    # Continue to next row
             
         return bookmarks
         
@@ -643,15 +627,6 @@ def get_bookmarks_for_user(user_id):
         logger.error(f"Error fetching bookmarks for user {user_id}: {e}")
         logger.error(traceback.format_exc())
         return []
-        
-    finally:
-        # Close connection if exists
-        if conn and not isinstance(conn, Engine):
-            try:
-                conn.close()
-                logger.debug("Closed database connection")
-            except:
-                pass
 
 def create_tables():
     """Create database tables if they don't already exist using the most reliable available method"""

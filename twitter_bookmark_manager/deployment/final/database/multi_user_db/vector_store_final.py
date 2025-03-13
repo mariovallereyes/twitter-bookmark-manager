@@ -65,18 +65,16 @@ class VectorStore:
         # Ensure directory exists
         os.makedirs(self.persist_directory, exist_ok=True)
         
-        # Don't initialize model right away - lazy load when needed
-        # We'll defer loading until first use to save memory initially
-        logger.info("Using lazy loading for model - will load when first needed")
-            
-        # Initialize Qdrant client - USING IN-MEMORY MODE TO AVOID FILE LOCKING
+        # Initialize Qdrant client in memory mode to avoid file locking issues
         try:
-            logger.info(f"Initializing Qdrant client in IN-MEMORY mode to avoid file locking issues")
-            # Use in-memory mode instead of file-based to avoid locking conflicts
-            self.client = QdrantClient(location=":memory:")
+            logger.info(f"Initializing Qdrant client in memory mode to avoid file locking issues")
+            self.client = QdrantClient(
+                location=":memory:",  # Always use in-memory mode like PythonAnywhere
+                timeout=10.0  # Add timeout for operations
+            )
             logger.info(f"Qdrant client initialized successfully in memory mode")
             
-            # Create collection if it doesn't exist
+            # Create collection
             try:
                 collection_info = self.client.get_collection(self.collection_name)
                 logger.info(f"Found existing collection: {self.collection_name}")
@@ -87,9 +85,6 @@ class VectorStore:
                     vectors_config=VectorParams(
                         size=self.vector_size,
                         distance=Distance.COSINE
-                    ),
-                    optimizers_config=rest.OptimizersConfigDiff(
-                        indexing_threshold=0,  # Index immediately
                     )
                 )
                 logger.info(f"Created collection: {self.collection_name}")
@@ -101,57 +96,38 @@ class VectorStore:
     def _ensure_model_loaded(self):
         """Ensure the model is loaded before using it"""
         if self.model is None:
-            self._initialize_model_with_low_memory()
+            self._initialize_model()
             
-    def _initialize_model_with_low_memory(self):
-        """Initialize the model with techniques to minimize memory usage"""
-        # Force garbage collection before model loading
-        gc.collect()
-        logger.info(f"Pre-model loading memory usage: {self.get_memory_usage()}")
+    def _initialize_model(self):
+        """Initialize the model with a simple, reliable approach like PythonAnywhere"""
+        # Log memory before loading
+        memory_before = self.get_memory_usage()
+        logger.info(f"Memory before model loading: {memory_before}")
         
-        # Set environment variables to reduce memory usage
+        # Basic environment settings to reduce memory usage
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging
         os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizers parallelism
         
-        # Try clearing CUDA cache if using GPU (won't affect CPU usage)
+        # Initialize model - use a smaller model consistently like PA does
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-            # Limit PyTorch threads to reduce memory usage
-            torch.set_num_threads(1)
-            logger.info(f"Limited PyTorch to 1 thread")
-        except Exception as e:
-            logger.warning(f"Failed to configure PyTorch optimizations: {str(e)}")
-        
-        logger.info(f"Initializing SentenceTransformer model for vector embeddings")
-        
-        # Always use the smaller model to save memory - critical for Railway deployment
-        try:
-            # Use the smallest viable model to save memory
+            logger.info(f"Initializing SentenceTransformer model")
+            # Use paraphrase-MiniLM-L3-v2 which is smaller but effective
             self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
-            logger.info(f"Successfully loaded smaller paraphrase-MiniLM-L3-v2 model")
+            logger.info(f"Model initialized successfully")
             
-            # Set model to evaluation mode to save memory
+            # Set model to evaluation mode to reduce memory usage
             self.model.eval()
-            logger.info(f"Set model to evaluation mode")
         except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}")
+            logger.error(f"Failed to initialize model: {str(e)}")
             logger.error(traceback.format_exc())
-            raise RuntimeError(f"Could not initialize embedding model: {str(e)}")
+            raise
+            
+        # Log memory after loading
+        memory_after = self.get_memory_usage()
+        logger.info(f"Memory after model loading: {memory_after}")
         
-        # NOTE: We previously tried to convert to half precision with model.half()
-        # But this caused "LayerNormKernelImpl not implemented for 'Half'" errors in Railway
-        # We now use full precision (fp32) for better compatibility with different environments
-        logger.info(f"Using full precision (fp32) model for better compatibility")
-        
-        logger.info(f"Model initialized successfully")
-        logger.info(f"Post-model loading memory usage: {self.get_memory_usage()}")
-        
-        # Force garbage collection after model loading
+        # Force garbage collection
         gc.collect()
-        logger.info(f"After GC memory usage: {self.get_memory_usage()}")
             
     def add_bookmark(self, bookmark_id: int, text: str, user_id: int, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -185,7 +161,7 @@ class VectorStore:
             # Limit text size to avoid processing extremely large texts
             text = text[:10000] if len(text) > 10000 else text
             
-            # Generate embedding
+            # Generate embedding - simple approach like PythonAnywhere
             embedding = self.model.encode(text)
             
             # Create a stable hash for the ID that combines the user ID and bookmark ID
@@ -216,10 +192,9 @@ class VectorStore:
                 points=[point]
             )
             
-            # Clear embedding variable to free memory
+            # Clean up to reduce memory usage
             del embedding
             
-            logger.info(f"Added bookmark {bookmark_id} to vector store for user {user_id}")
             return True
             
         except Exception as e:
@@ -435,6 +410,46 @@ class VectorStore:
             
         except Exception as e:
             logger.error(f"Error deleting bookmark {bookmark_id} from vector store: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+            
+    def delete_bookmarks(self, bookmark_ids: List[str]) -> bool:
+        """
+        Delete multiple bookmarks from the vector store.
+        
+        Args:
+            bookmark_ids: List of bookmark IDs to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.client or not bookmark_ids:
+            logger.error("Vector store client not initialized or empty bookmark_ids list")
+            return False
+            
+        try:
+            # Delete points in batches to avoid overwhelming the client
+            logger.info(f"Deleting {len(bookmark_ids)} bookmarks from vector store")
+            
+            # Convert all IDs to strings for consistency
+            ids_as_strings = [str(id) for id in bookmark_ids]
+            
+            # Use batches of 100 IDs at a time
+            BATCH_SIZE = 100
+            for i in range(0, len(ids_as_strings), BATCH_SIZE):
+                batch = ids_as_strings[i:i+BATCH_SIZE]
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=rest.PointIdsList(
+                        points=batch
+                    )
+                )
+                logger.info(f"Deleted batch of {len(batch)} bookmarks from vector store")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting multiple bookmarks from vector store: {str(e)}")
             logger.error(traceback.format_exc())
             return False
             

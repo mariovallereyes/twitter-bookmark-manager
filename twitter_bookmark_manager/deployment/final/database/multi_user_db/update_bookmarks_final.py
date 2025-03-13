@@ -290,7 +290,7 @@ def get_user_directory(user_id):
 
 def rebuild_vector_store(user_id=None, session_id=None):
     """
-    Rebuild the vector store from the database with memory monitoring and improved error handling.
+    Rebuild the vector store from the database with improved error handling based on PythonAnywhere's approach.
     
     Args:
         user_id (int, optional): User ID to filter bookmarks
@@ -310,7 +310,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
         vector_store = VectorStore()
         logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
         
-        # Get all bookmarks from database - Use the SQL-based function instead of ORM
+        # Get all bookmarks from database
         from .db_final import get_bookmarks_for_user
         
         # Get bookmarks for user
@@ -318,7 +318,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
         if user_id:
             bookmarks = get_bookmarks_for_user(user_id)
         else:
-            # Since we don't have get_all_bookmarks function, we use SQL directly
+            # Get bookmarks for all users using direct SQL
             with db_session() as session:
                 cursor = session.connection().connection.cursor()
                 cursor.execute("""
@@ -346,7 +346,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
                 "duration_seconds": (datetime.now() - start_time).total_seconds()
             }
         
-        # Pre-filter bookmarks with empty text to avoid unnecessary processing
+        # Pre-filter bookmarks with empty text (learned from our Railway fixes)
         valid_bookmarks = []
         for bookmark in bookmarks:
             if bookmark.text and bookmark.text.strip():
@@ -358,50 +358,35 @@ def rebuild_vector_store(user_id=None, session_id=None):
         total_count = len(valid_bookmarks)
         logger.info(f"📊 [REBUILD-{session_id}] After filtering empty text: {total_count}/{original_count} valid bookmarks")
         
-        # Process bookmarks in small batches to manage memory usage
-        BATCH_SIZE = 10  # Reduced from 50 to 10 for lower memory footprint
-        processed_count = 0
-        success_count = 0
-        error_count = 0
-        
-        # First, clear existing vectors for this user
+        # Clear existing vectors for this user if specified
         if user_id:
             try:
-                # Get IDs of all bookmarks for this user using direct SQL
-                bookmark_ids = []
-                with db_session() as session:
-                    cursor = session.connection().connection.cursor()
-                    cursor.execute("SELECT id FROM bookmarks WHERE user_id = %s", (user_id,))
-                    rows = cursor.fetchall()
-                    bookmark_ids = [str(row[0]) for row in rows]
-                    cursor.close()
-                
-                if bookmark_ids:
-                    logger.info(f"🗑️ [REBUILD-{session_id}] Deleting existing vectors for user {user_id}")
-                    vector_store.delete_bookmarks(bookmark_ids)
-                    logger.info(f"✅ [REBUILD-{session_id}] Deleted existing vectors for {len(bookmark_ids)} bookmarks")
+                logger.info(f"🗑️ [REBUILD-{session_id}] Deleting existing vectors for user {user_id}")
+                vector_store._delete_vectors_for_user(user_id)
+                logger.info(f"✅ [REBUILD-{session_id}] Deleted existing vectors for user {user_id}")
             except Exception as e:
                 logger.error(f"❌ [REBUILD-{session_id}] Error clearing existing vectors: {e}")
         
-        # Force garbage collection before starting batch processing
-        gc.collect()
+        # Process bookmarks in batches (using PythonAnywhere's approach)
+        BATCH_SIZE = 20  # Compromise between our 10 and PA's 50
+        processed_count = 0
+        success_count = 0
+        error_count = 0
         
         # Process batches
         for i in range(0, total_count, BATCH_SIZE):
             batch = valid_bookmarks[i:i+BATCH_SIZE]
             batch_size = len(batch)
             
-            logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i//BATCH_SIZE + 1}: {batch_size} bookmarks")
-            memory_before = get_memory_usage()
-            logger.info(f"📊 [REBUILD-{session_id}] Memory before batch: {memory_before}")
+            logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i//BATCH_SIZE + 1}/{(total_count+BATCH_SIZE-1)//BATCH_SIZE}: {batch_size} bookmarks")
             
-            # Process each bookmark in batch
+            # Process each bookmark in batch with individual error handling
             for bookmark in batch:
                 try:
                     # Extract tweet URL for logging
                     tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
                     
-                    # Prepare metadata for vector store
+                    # Prepare metadata
                     metadata = {
                         'tweet_url': tweet_url,
                         'screen_name': bookmark.author_username or '',
@@ -409,45 +394,40 @@ def rebuild_vector_store(user_id=None, session_id=None):
                         'user_id': str(bookmark.user_id) if bookmark.user_id else '1'
                     }
                     
-                    # Add bookmark to vector store
-                    vector_store.add_bookmark(
+                    # Add bookmark to vector store with simplified error handling
+                    result = vector_store.add_bookmark(
                         bookmark_id=str(bookmark.id),
                         text=bookmark.text or '',
                         user_id=bookmark.user_id,
                         metadata=metadata
                     )
                     
-                    success_count += 1
-                    
-                    # Log progress periodically
-                    if success_count % 10 == 0:
-                        memory_usage = get_memory_usage()
-                        logger.debug(f"🔍 [REBUILD-{session_id}] Added bookmark {success_count}/{total_count} - Memory: {memory_usage}")
+                    if result:
+                        success_count += 1
+                        
+                        # Log progress periodically
+                        if success_count % 10 == 0:
+                            logger.debug(f"🔍 [REBUILD-{session_id}] Added bookmark {success_count}/{total_count}")
+                    else:
+                        error_count += 1
                         
                 except Exception as e:
                     error_msg = f"Error adding bookmark {bookmark.id} to vector store: {str(e)}"
                     logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
                     error_count += 1
+                    # Continue processing other bookmarks
             
             processed_count += batch_size
             
             # Log batch completion with progress
             progress = (processed_count / total_count) * 100
-            memory_usage = get_memory_usage()
-            logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i//BATCH_SIZE + 1}: {processed_count}/{total_count} ({progress:.1f}%) - Memory: {memory_usage}")
+            logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i//BATCH_SIZE + 1}: {processed_count}/{total_count} ({progress:.1f}%)")
             
-            # Force aggressive garbage collection after each batch
+            # Basic memory cleanup like PythonAnywhere
             gc.collect()
             
             # Add a small delay between batches to allow memory to be freed
-            time.sleep(0.5)
-            
-            # Use the vector store's cleanup method for thorough memory management
-            vector_store.clean_memory()
-            
-            # Log memory after cleanup
-            memory_after = get_memory_usage()
-            logger.info(f"📊 [REBUILD-{session_id}] Memory after cleanup: {memory_after}")
+            time.sleep(0.2)
         
         # Final verification
         collection_info = vector_store.get_collection_info()
@@ -466,26 +446,23 @@ def rebuild_vector_store(user_id=None, session_id=None):
         return {
             "success": True,
             "bookmark_count": total_count,
-            "original_count": original_count,
+            "original_count": original_count, 
             "vector_count": vector_count,
             "successful_additions": success_count,
             "errors": error_count,
             "duration_seconds": duration,
             "user_id": user_id,
-            "is_in_sync": total_count == vector_count
+            "is_in_sync": success_count == vector_count
         }
-        
     except Exception as e:
-        error_msg = f"Error during vector store rebuild: {str(e)}"
-        logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
+        logger.error(f"❌ [REBUILD-{session_id}] Vector store rebuild failed: {str(e)}")
         logger.error(traceback.format_exc())
-        
         return {
             "success": False,
-            "error": error_msg,
-            "user_id": user_id,
+            "error": str(e),
             "traceback": traceback.format_exc(),
-            "duration_seconds": (datetime.now() - start_time).total_seconds()
+            "duration_seconds": (datetime.now() - start_time).total_seconds(),
+            "user_id": user_id
         }
 
 def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
@@ -658,7 +635,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         if is_in_loop:
             logger.warning(f"⚠️ [UPDATE-{session_id}] Update loop detected! Breaking out of loop and forcing vector rebuild")
             # Force a vector rebuild to break the loop
-            rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id, batch_size=15, force_full_rebuild=True)
+            rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id)
             
             # Reset progress file to start fresh
             if os.path.exists(progress_file):
