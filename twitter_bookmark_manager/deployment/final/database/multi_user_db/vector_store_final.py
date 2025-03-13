@@ -69,11 +69,12 @@ class VectorStore:
         # We'll defer loading until first use to save memory initially
         logger.info("Using lazy loading for model - will load when first needed")
             
-        # Initialize Qdrant client
+        # Initialize Qdrant client - USING IN-MEMORY MODE TO AVOID FILE LOCKING
         try:
-            logger.info(f"Initializing Qdrant client with persist directory: {self.persist_directory}")
-            self.client = QdrantClient(path=self.persist_directory)
-            logger.info(f"Qdrant client initialized successfully")
+            logger.info(f"Initializing Qdrant client in IN-MEMORY mode to avoid file locking issues")
+            # Use in-memory mode instead of file-based to avoid locking conflicts
+            self.client = QdrantClient(location=":memory:")
+            logger.info(f"Qdrant client initialized successfully in memory mode")
             
             # Create collection if it doesn't exist
             try:
@@ -146,7 +147,7 @@ class VectorStore:
         gc.collect()
         logger.info(f"After GC memory usage: {self.get_memory_usage()}")
             
-    def add_bookmark(self, bookmark_id: int, text: str, user_id: int) -> bool:
+    def add_bookmark(self, bookmark_id: int, text: str, user_id: int, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         Add a bookmark to the vector store.
         
@@ -154,6 +155,7 @@ class VectorStore:
             bookmark_id: ID of the bookmark
             text: Text content of the bookmark
             user_id: User ID who owns the bookmark
+            metadata: Optional metadata for the bookmark
             
         Returns:
             True if successful, False otherwise
@@ -183,16 +185,23 @@ class VectorStore:
             # Create a stable hash for the ID that combines the user ID and bookmark ID
             point_id = f"{user_id}_{bookmark_id_str}"
             
+            # Create payload with metadata
+            payload = {
+                "bookmark_id": bookmark_id_str,
+                "text": text[:1000] if text else "",  # Limit text size in payload
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Add metadata if provided
+            if metadata:
+                payload.update(metadata)
+            
             # Create point with metadata
             point = PointStruct(
                 id=point_id,
                 vector=embedding.tolist(),
-                payload={
-                    "bookmark_id": bookmark_id_str,
-                    "text": text[:1000] if text else "",  # Limit text size in payload
-                    "user_id": user_id,
-                    "timestamp": datetime.now().isoformat()
-                }
+                payload=payload
             )
             
             # Upsert point to collection
@@ -265,7 +274,7 @@ class VectorStore:
             return []
             
     def rebuild_user_vectors(self, user_id, batch_size=20):
-        """Rebuild vector store for a specific user's bookmarks using a temporary directory to avoid locking issues"""
+        """Rebuild vector store for a specific user's bookmarks in memory to avoid locking issues"""
         from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
         
         session_id = str(uuid.uuid4())[:8]
@@ -274,13 +283,6 @@ class VectorStore:
         # Force garbage collection before starting
         gc.collect()
         logger.info(f"Initial memory usage: {self.get_memory_usage()}")
-        
-        # Create a temporary directory for rebuilding the vector store
-        temp_dir = tempfile.mkdtemp(prefix=f"vector_store_rebuild_{user_id}_")
-        logger.info(f"Created temporary directory for rebuild: {temp_dir}")
-        
-        # Save the original persist directory
-        original_persist_dir = self.persist_directory
         
         try:
             # Get all bookmarks for the user
@@ -291,21 +293,20 @@ class VectorStore:
             
             if total == 0:
                 logger.info(f"No bookmarks found for user {user_id}, nothing to rebuild")
-                # Clean up temp directory
-                shutil.rmtree(temp_dir, ignore_errors=True)
                 return True
             
-            # Create a temporary vector store in the temp directory
-            temp_vector_store = VectorStore(persist_directory=temp_dir)
-            logger.info(f"Temporary vector store created at {temp_dir}")
+            # Clear existing vectors first
+            logger.info(f"Memory before deleting old vectors: {self.get_memory_usage()}")
+            self._delete_vectors_for_user(user_id)
+            logger.info(f"Memory after deleting old vectors: {self.get_memory_usage()}")
+            
+            # Ensure model is loaded (lazy loading)
+            self._ensure_model_loaded()
+            logger.info(f"Memory after loading model: {self.get_memory_usage()}")
             
             # Process in smaller batches
             success_count = 0
             error_count = 0
-            
-            # Ensure model is loaded for the temporary store
-            temp_vector_store._ensure_model_loaded()
-            logger.info(f"Memory after loading model: {self.get_memory_usage()}")
             
             for i in range(0, total, batch_size):
                 batch = bookmarks[i:i+batch_size]
@@ -317,13 +318,13 @@ class VectorStore:
                 # Process each bookmark in the batch with individual error handling
                 for bookmark in batch:
                     try:
-                        temp_vector_store.add_bookmark(
+                        self.add_bookmark(
                             bookmark_id=bookmark.id,
                             user_id=user_id,
                             text=bookmark.text or "",
                             metadata={
-                                'author': bookmark.author_username,
-                                'created_at': str(bookmark.created_at) if bookmark.created_at else None
+                                'author': bookmark.author_username if hasattr(bookmark, 'author_username') else None,
+                                'created_at': str(bookmark.created_at) if hasattr(bookmark, 'created_at') and bookmark.created_at else None
                             }
                         )
                         success_count += 1
@@ -333,81 +334,16 @@ class VectorStore:
                 
                 # Force garbage collection after each batch
                 gc.collect()
-                logger.info(f"Memory after batch {current_batch}/{total_batches}: {temp_vector_store.get_memory_usage()}")
+                logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
                 
                 # Log progress
                 progress = ((i + len(batch)) / total) * 100
                 logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
             
-            # Unload model to free memory before swapping directories
-            temp_vector_store._unload_model()
-            logger.info(f"Temporary vector store build complete with {success_count} successes and {error_count} errors")
-            
-            # Filter old vectors for this user from the primary vector store
-            logger.info(f"Deleting old vectors for user {user_id} from main vector store")
-            self._delete_vectors_for_user(user_id)
-            
-            # Get a list of all the vectors we built in the temp store
-            # We'll directly copy the vectors from temp to main store
-            logger.info(f"Copying vectors from temporary store to main store")
-            
-            # Search all points for this user in temp vector store
-            search_filter = rest.Filter(
-                must=[
-                    rest.FieldCondition(
-                        key="user_id",
-                        match=rest.MatchValue(value=user_id)
-                    )
-                ]
-            )
-            
-            # Use scroll to get all points
-            offset = 0
-            limit = 100
-            total_copied = 0
-            
-            while True:
-                points = temp_vector_store.client.scroll(
-                    collection_name=temp_vector_store.collection_name,
-                    scroll_filter=search_filter,
-                    limit=limit,
-                    offset=offset
-                )[0]
-                
-                if not points:
-                    break
-                    
-                # Copy these points to the main vector store
-                point_structs = []
-                for point in points:
-                    point_structs.append(
-                        PointStruct(
-                            id=point.id,
-                            vector=point.vector,
-                            payload=point.payload
-                        )
-                    )
-                
-                if point_structs:
-                    self.client.upsert(
-                        collection_name=self.collection_name,
-                        points=point_structs
-                    )
-                    total_copied += len(point_structs)
-                    
-                offset += len(points)
-                logger.info(f"Copied {total_copied} vectors so far")
-                
-                if len(points) < limit:
-                    break
-            
-            logger.info(f"Successfully copied {total_copied} vectors for user {user_id}")
-            logger.info(f"Vector rebuild completed through temporary directory approach")
-            
-            # Force garbage collection and check final memory usage
-            gc.collect()
+            # Unload model to free memory when done
+            self._unload_model()
             logger.info(f"Final memory usage: {self.get_memory_usage()}")
-            
+            logger.info(f"Vector rebuild completed: {success_count} successes, {error_count} errors")
             return True
             
         except Exception as e:
@@ -416,14 +352,6 @@ class VectorStore:
             # Try to unload model even after error
             self._unload_model()
             return False
-            
-        finally:
-            # Always clean up the temporary directory
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.info(f"Cleaned up temporary directory: {temp_dir}")
-            except Exception as cleanup_error:
-                logger.error(f"Error cleaning up temporary directory: {str(cleanup_error)}")
             
     def _unload_model(self):
         """Unload the model to free memory"""
@@ -547,7 +475,7 @@ def get_vector_store(persist_directory=None):
     Get a singleton instance of the vector store.
     
     Args:
-        persist_directory: Optional directory to persist vectors
+        persist_directory: Ignored - using in-memory mode to avoid locking issues
         
     Returns:
         VectorStore instance
@@ -556,7 +484,9 @@ def get_vector_store(persist_directory=None):
     
     if _vector_store_instance is None:
         try:
-            _vector_store_instance = VectorStore(persist_directory)
+            # Force in-memory mode to avoid file locking regardless of passed parameter
+            logger.info("Creating vector store instance in memory mode")
+            _vector_store_instance = VectorStore(persist_directory=None)
         except Exception as e:
             logger.error(f"Error initializing vector store: {str(e)}")
             logger.error(traceback.format_exc())
@@ -569,14 +499,15 @@ def get_multi_user_vector_store(persist_directory=None):
     """
     Get a vector store instance for the multi-user environment.
     This is a wrapper around get_vector_store for compatibility.
+    Always uses in-memory mode to avoid file locking issues.
     
     Args:
-        persist_directory: Optional directory to persist vectors
+        persist_directory: Ignored - using in-memory mode to avoid locking issues
         
     Returns:
         VectorStore instance
     """
-    return get_vector_store(persist_directory) 
+    return get_vector_store(None)  # Force in-memory mode
 
 def get_memory_usage():
     """Get current memory usage as a formatted string"""
