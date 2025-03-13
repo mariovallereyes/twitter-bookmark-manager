@@ -603,7 +603,7 @@ def get_bookmarks_for_user(user_id):
         
         # Build query with parameterized SQL
         query = """
-            SELECT id, text, created_at, author_name, author_username, 
+            SELECT bookmark_id as id, text, created_at, author as author_name, author_id as author_username, 
                    media_files, raw_data, user_id
             FROM bookmarks
             WHERE user_id = :user_id
