@@ -11,17 +11,21 @@ import threading
 import secrets
 import contextlib
 import functools
-from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, timedelta
 import traceback
+import json
+import re
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple, Union
+from datetime import datetime, timedelta
 import psycopg2  # Add direct psycopg2 import
 
 import sqlalchemy
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text, event, inspect
 from sqlalchemy.orm import sessionmaker, scoped_session, Session
 from sqlalchemy.pool import QueuePool, NullPool
 from sqlalchemy import exc, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError, OperationalError, InterfaceError
 
 # Configure logging
 logging.basicConfig(
@@ -574,6 +578,67 @@ def get_db_connection():
 def get_db_session():
     """Alias for create_session for backward compatibility"""
     return create_session()
+
+def get_bookmarks_for_user(user_id):
+    """
+    Get all bookmarks for a specific user.
+    Uses direct SQL for reliability rather than ORM.
+    
+    Args:
+        user_id: User ID to get bookmarks for
+        
+    Returns:
+        List of Bookmark objects
+    """
+    from twitter_bookmark_manager.deployment.final.database.multi_user_db.models_final import Bookmark
+    
+    logger.info(f"Fetching bookmarks for user {user_id} using direct SQL")
+    
+    bookmarks = []
+    conn = None
+    
+    try:
+        # Get connection
+        conn = get_db_connection()
+        
+        # Build query with parameterized SQL
+        query = """
+            SELECT id, text, created_at, author_name, author_username, 
+                   media_files, raw_data, user_id
+            FROM bookmarks
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+        
+        # Execute query
+        cursor = conn.cursor()
+        cursor.execute(query, (user_id,))
+        
+        # Process results
+        rows = cursor.fetchall()
+        logger.info(f"Found {len(rows)} bookmarks for user {user_id}")
+        
+        # Convert to Bookmark objects
+        for row in rows:
+            bookmarks.append(Bookmark.from_row(row))
+            
+        cursor.close()
+        
+        return bookmarks
+        
+    except Exception as e:
+        logger.error(f"Error fetching bookmarks for user {user_id}: {e}")
+        logger.error(traceback.format_exc())
+        return []
+        
+    finally:
+        # Close connection if exists
+        if conn and not isinstance(conn, Engine):
+            try:
+                conn.close()
+                logger.debug("Closed database connection")
+            except:
+                pass
 
 def create_tables():
     """Create database tables if they don't already exist using the most reliable available method"""
