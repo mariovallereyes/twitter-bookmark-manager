@@ -201,51 +201,41 @@ class BookmarkSearchMultiUser:
         return categories
 
     @with_user_context
-    def get_recent(self, limit=5):
-        """Get recent bookmarks for the user"""
-        logger.info(f"RECENT DEBUG - Using user_id: {self.user_id} (type: {type(self.user_id)})")
+    def get_recent(self, limit=5, user_id=1):
+        """Get recent bookmarks for a user"""
+        # Use the provided user_id or default from the class
+        self.user_id = user_id
+        
+        cursor, is_sqlalchemy = self._get_cursor()
+        results = []
         
         try:
-            # Check total number of bookmarks in database
-            count_sql = text("SELECT COUNT(*) FROM bookmarks")
-            result = self.conn.execute(count_sql)
-            total_count = result.scalar()
-            logger.info(f"RECENT DEBUG - Total bookmarks in database: {total_count}")
-            
-            # Validate user_id type
-            user_id = self.user_id
-            if isinstance(user_id, str) and user_id.isdigit():
-                user_id = int(user_id)
-            
-            logger.info(f"RECENT DEBUG - User ID: {user_id}, Type: {type(user_id)}")
-            
-            # First check if the user has any bookmarks
-            check_sql = text("""
-            SELECT id, bookmark_id, text, author, created_at, author_id
-            FROM bookmarks
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
-            LIMIT :limit
-            """)
-            
-            # Fix: Pass parameters as a dictionary instead of a list
-            result = self.conn.execute(check_sql, {"user_id": user_id, "limit": limit})
-            rows = result.fetchall()
-            
-            logger.info(f"RECENT DEBUG - Query returned {len(rows)} results")
-            
-            # Debug raw row data
-            if len(rows) > 0:
-                logger.info(f"RECENT DEBUG - First row sample: {rows[0]}")
+            if is_sqlalchemy:
+                query = text("""
+                SELECT b.id, b.text, b.url, b.author, b.created_at, b.author_id
+                FROM bookmarks b
+                WHERE b.user_id = :user_id
+                ORDER BY b.created_at DESC
+                LIMIT :limit
+                """)
+                result = self.conn.execute(query, {"user_id": self.user_id, "limit": limit})
+                rows = result.fetchall()
             else:
-                logger.info("RECENT DEBUG - No rows returned")
-            
-            results = []
+                query = """
+                SELECT b.id, b.text, b.url, b.author, b.created_at, b.author_id
+                FROM bookmarks b
+                WHERE b.user_id = %s
+                ORDER BY b.created_at DESC
+                LIMIT %s
+                """
+                cursor.execute(query, (self.user_id, limit))
+                rows = cursor.fetchall()
+                
             for row in rows:
                 bookmark = {
                     'id': row[0],
-                    'bookmark_id': row[1],  # Include the Twitter bookmark_id
-                    'text': row[2],
+                    'text': row[1],
+                    'url': row[2],
                     'author': row[3],
                     'author_username': row[3].replace('@', '') if row[3] else '',
                     'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
@@ -253,7 +243,7 @@ class BookmarkSearchMultiUser:
                 }
                 
                 # Get categories for this bookmark
-                categories = self._get_bookmark_categories(bookmark['id'], True)
+                categories = self._get_bookmark_categories(bookmark['id'], is_sqlalchemy, cursor)
                 bookmark['categories'] = [cat['name'] for cat in categories]
                 results.append(bookmark)
                 

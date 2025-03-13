@@ -7,6 +7,8 @@ import logging
 from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, current_app, request
 from auth.user_context import UserContext, login_required
+from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+import traceback
 
 # Set up logging
 logger = logging.getLogger('user_api_final')
@@ -211,4 +213,27 @@ def get_user_bookmarks():
             'bookmarks': []
         }), 500
     finally:
-        conn.close() 
+        conn.close()
+
+@user_api_bp.route('/api/categories', methods=['GET'])
+@login_required
+def get_categories():
+    """Get all categories for the current user"""
+    try:
+        user_id = UserContext.get_user_id()
+        conn = get_db_connection()
+        
+        # Create search instance
+        searcher = BookmarkSearchMultiUser(conn, user_id)
+        
+        # Get categories with counts
+        categories = searcher.get_categories(user_id=user_id)
+        
+        return jsonify(categories)
+    except Exception as e:
+        logger.error(f"Error getting categories: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'error': 'Failed to retrieve categories',
+            'categories': []
+        }), 500 
