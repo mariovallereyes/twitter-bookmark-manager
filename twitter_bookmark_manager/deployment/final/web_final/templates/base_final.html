@@ -805,7 +805,7 @@
         ];
 
         try {
-            const response = await fetch('/update-database', {
+            const response = await fetch('/api/update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1041,10 +1041,10 @@
         // Show status
         showStatus('Starting vector rebuild...', 10);
         
-        console.log('Calling /update-database endpoint to rebuild vectors');
+        console.log('Calling /api/update-database endpoint to rebuild vectors');
         
         // Call rebuild API
-        fetch('/update-database', {
+        fetch('/api/update-database', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1229,7 +1229,7 @@
                     showStatus('File uploaded successfully. Starting processing...', 30);
                     
                     // Start processing
-                    return fetch('/update-database', {
+                    return fetch('/api/update-database', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -1272,10 +1272,10 @@
             // Show status
             showStatus('Starting vector rebuild...', 10);
             
-            console.log('Calling /update-database endpoint to rebuild vectors');
+            console.log('Calling /api/update-database endpoint to rebuild vectors');
             
             // Call rebuild API
-            fetch('/update-database', {
+            fetch('/api/update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1319,7 +1319,7 @@
                 }
                 
                 // Call the API to rebuild vectors
-                const response = await fetch('/update-database', {
+                const response = await fetch('/api/update-database', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -1412,7 +1412,7 @@
             resetProgress();
             updateStepStatus('step-sql', 'processing');
             
-            const response = await fetch('/update-database', {
+            const response = await fetch('/api/update-database', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1546,7 +1546,7 @@
             // First reset progress if selected
             try {
                 updateStepStatus('step-sql', 'processing');
-                const resetResponse = await fetch('/update-database', {
+                const resetResponse = await fetch('/api/update-database', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ reset_progress: true }),
@@ -1580,7 +1580,7 @@
         if (rebuildVectorStore) {
             try {
                 updateStepStatus('step-vectors', 'processing');
-                const rebuildResponse = await fetch('/update-database', {
+                const rebuildResponse = await fetch('/api/update-database', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
