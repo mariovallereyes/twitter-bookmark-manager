@@ -13,14 +13,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Gunicorn configuration
-timeout = 600     # Back to 10 minutes since we reduced batch size
-workers = 1       # Single worker to avoid memory competition
+timeout = 1800     # 30 minutes to handle large rebuilds
+workers = 1        # Single worker to avoid memory competition
 worker_class = 'sync'
 keepalive = 120
-max_requests = 25  # Reduced to prevent memory buildup
-max_requests_jitter = 5
+max_requests = 10  # Restart workers more frequently to prevent memory leaks
+max_requests_jitter = 3
 worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
-preload_app = True  # Preload app to share memory
+preload_app = False  # Don't preload to avoid memory issues
+graceful_timeout = 300  # 5 minutes grace period for cleanup
 
 logger.info("==================================================")
 logger.info("Starting Progressive WSGI Application for Railway")

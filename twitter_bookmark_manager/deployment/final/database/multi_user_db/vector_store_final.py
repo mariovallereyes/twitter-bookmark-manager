@@ -287,6 +287,37 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
+    def _add_vector(self, bookmark_id: int, embedding: List[float], user_id: int) -> bool:
+        """Add a vector to the store with its metadata"""
+        try:
+            # Create a deterministic UUID from user_id and bookmark_id
+            bookmark_id_str = str(bookmark_id)
+            namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
+            seed = f"{user_id}_{bookmark_id_str}"
+            point_id = str(uuid.uuid5(namespace, seed))
+            
+            # Create point with metadata
+            point = PointStruct(
+                id=point_id,
+                vector=embedding.tolist(),
+                payload={
+                    "bookmark_id": bookmark_id_str,
+                    "user_id": user_id,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            
+            # Upsert point to collection
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[point]
+            )
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error adding vector for bookmark {bookmark_id}: {str(e)}")
+            return False
+
     def rebuild_user_vectors(self, user_id: int, rebuild_id: str = None) -> bool:
         """
         Rebuild vectors for all bookmarks of a user.
@@ -302,87 +333,109 @@ class VectorStore:
             if not rebuild_id:
                 rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
             
-            logger.info(f"�� [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
+            logger.info(f"🔄 [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
+            
+            # Delete existing vectors for user first
+            self._delete_vectors_for_user(user_id)
             
             # Get a new db connection
             conn = get_db_connection()
             
-            # Get bookmarks for the user
             try:
-                stmt = sql_text("""
-                    SELECT bookmark_id, text, raw_data 
-                    FROM bookmarks
-                    WHERE user_id = :user_id
-                    ORDER BY bookmark_id
-                """).bindparams(bindparam('user_id', type_=Integer))
+                # Get bookmarks in smaller chunks to manage memory
+                CHUNK_SIZE = 100
+                offset = 0
+                total_processed = 0
                 
-                result = conn.execute(stmt, {"user_id": user_id})
-                bookmark_count = 0
-                valid_bookmarks = []
-                
-                # Pre-filter bookmarks
-                for row in result:
-                    bookmark_count += 1
+                while True:
+                    stmt = sql_text("""
+                        SELECT bookmark_id, text, raw_data 
+                        FROM bookmarks
+                        WHERE user_id = :user_id
+                        ORDER BY bookmark_id
+                        LIMIT :limit OFFSET :offset
+                    """).bindparams(
+                        bindparam('user_id', type_=Integer),
+                        bindparam('limit', type_=Integer),
+                        bindparam('offset', type_=Integer)
+                    )
                     
-                    # Get text content, using text field first
-                    text = row.text or ''
+                    result = conn.execute(stmt, {
+                        "user_id": user_id,
+                        "limit": CHUNK_SIZE,
+                        "offset": offset
+                    })
                     
-                    # If text is empty, try to get full_text from raw_data
-                    if not text.strip() and row.raw_data:
-                        try:
-                            # Parse raw_data if it's a string
-                            raw_data_dict = json.loads(row.raw_data) if isinstance(row.raw_data, str) else row.raw_data
-                            text = raw_data_dict.get('full_text', '')
-                        except Exception as e:
-                            logger.error(f"❌ [REBUILD-{rebuild_id}] Error parsing raw_data for {row.bookmark_id}: {str(e)}")
-                    
-                    if not text.strip():
-                        logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} - no text content found")
-                        continue
+                    rows = result.fetchall()
+                    if not rows:
+                        break
                         
-                    # Truncate text to reasonable length
-                    text = text[:10000]  # Increased limit since we have memory
-                    valid_bookmarks.append((row.bookmark_id, text))
-                
-                # Early exit if no valid bookmarks
-                if not valid_bookmarks:
-                    logger.warning(f"⚠️ [REBUILD-{rebuild_id}] No valid bookmarks found for processing")
-                    return True
-                    
-                # Process in moderate batches to balance speed and memory
-                batch_size = 20  # Reduced from 50 to prevent OOM
-                for i in range(0, len(valid_bookmarks), batch_size):
-                    batch = valid_bookmarks[i:i + batch_size]
-                    
-                    try:
-                        # Load model once for the batch
-                        logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model for batch {i//batch_size + 1}")
-                        self._load_model()
+                    valid_bookmarks = []
+                    for row in rows:
+                        # Get text content, using text field first
+                        text = row.text or ''
                         
-                        for bookmark_id, text in batch:
+                        # If text is empty, try to get full_text from raw_data
+                        if not text.strip() and row.raw_data:
                             try:
-                                # Generate embedding
-                                embedding = self.model.encode(text)
-                                
-                                # Add to Qdrant
-                                self._add_vector(bookmark_id, embedding, user_id)
-                                
-                                logger.info(f"✅ [REBUILD-{rebuild_id}] Added vector for bookmark {bookmark_id}")
+                                raw_data_dict = json.loads(row.raw_data) if isinstance(row.raw_data, str) else row.raw_data
+                                text = raw_data_dict.get('full_text', '')
                             except Exception as e:
-                                logger.error(f"❌ [REBUILD-{rebuild_id}] Error processing bookmark {bookmark_id}: {str(e)}")
+                                logger.error(f"❌ [REBUILD-{rebuild_id}] Error parsing raw_data for {row.bookmark_id}: {str(e)}")
                                 continue
-                    finally:
-                        # Unload model after batch
-                        self._unload_model()
                         
-                        # Force garbage collection
-                        gc.collect()
+                        if not text.strip():
+                            logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} - no text content found")
+                            continue
+                            
+                        # Truncate text to reasonable length
+                        text = text[:10000]
+                        valid_bookmarks.append((row.bookmark_id, text))
+                    
+                    # Process valid bookmarks in small batches
+                    batch_size = 10  # Small batch size for stability
+                    for i in range(0, len(valid_bookmarks), batch_size):
+                        batch = valid_bookmarks[i:i + batch_size]
                         
-                        # Small delay between batches just for stability
-                        time.sleep(1.0)  # Increased delay to 1 second to allow memory to stabilize
+                        try:
+                            # Load model once for the batch
+                            self._ensure_model_loaded()
+                            
+                            for bookmark_id, text in batch:
+                                try:
+                                    # Generate embedding
+                                    embedding = self.model.encode(text)
+                                    
+                                    # Add to Qdrant
+                                    success = self._add_vector(bookmark_id, embedding, user_id)
+                                    if success:
+                                        total_processed += 1
+                                        logger.info(f"✅ [REBUILD-{rebuild_id}] Added vector for bookmark {bookmark_id}")
+                                    
+                                    # Clean up embedding
+                                    del embedding
+                                    
+                                except Exception as e:
+                                    logger.error(f"❌ [REBUILD-{rebuild_id}] Error processing bookmark {bookmark_id}: {str(e)}")
+                                    continue
+                        finally:
+                            # Unload model after batch
+                            self._unload_model()
+                            
+                            # Force garbage collection
+                            gc.collect()
+                            
+                            # Small delay between batches
+                            time.sleep(0.5)
+                    
+                    # Move to next chunk
+                    offset += CHUNK_SIZE
+                    
+                    # Log progress
+                    logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} bookmarks so far")
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {len(valid_bookmarks)} bookmarks out of {bookmark_count} total")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Total bookmarks processed: {total_processed}")
                 
                 return True
                 
