@@ -298,121 +298,231 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, batch_size=10):
+    def rebuild_user_vectors(self, user_id, batch_size=2, session_id=None):
         """
-        Rebuild vector store for a specific user's bookmarks, with extreme memory optimization.
+        Rebuild vector embeddings for all of a user's bookmarks
         
         Args:
-            user_id: User ID whose vectors to rebuild
-            batch_size: Number of bookmarks to process in each batch
-            
+            user_id: User ID to rebuild vectors for
+            batch_size: Number of bookmarks to process in a batch before cleanup
+            session_id: Optional session ID for tracking rebuild progress
+        
         Returns:
-            bool: True if successful, False otherwise
+            Boolean indicating success
         """
-        from .db_final import get_bookmarks_for_user
-        
-        session_id = str(uuid.uuid4())[:8]
-        logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store rebuild for user {user_id}")
-        
-        # Force garbage collection before starting
-        gc.collect()
-        logger.info(f"Initial memory usage: {self.get_memory_usage()}")
+        rebuild_id = session_id or ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         
         try:
-            # Get all bookmarks for the user
-            bookmarks = get_bookmarks_for_user(user_id)
-            total = len(bookmarks)
-            logger.info(f"Found {total} bookmarks for user {user_id}")
-            
-            if total == 0:
-                logger.info(f"No bookmarks found for user {user_id}, nothing to rebuild")
-                return True
-            
-            # Clear existing vectors first
-            logger.info(f"Clearing existing vectors for user {user_id}")
-            self._delete_vectors_for_user(user_id)
-            
-            # Pre-filter empty bookmarks to save processing time
-            valid_bookmarks = []
-            for bookmark in bookmarks:
-                if not bookmark.text or not bookmark.text.strip():
-                    logger.info(f"⚠️ [REBUILD-{session_id}] Pre-filtering bookmark {bookmark.id} due to empty text")
-                    continue
-                valid_bookmarks.append(bookmark)
-            
-            logger.info(f"Found {len(valid_bookmarks)} valid bookmarks after filtering empty text")
-            total = len(valid_bookmarks)
-            
-            if total == 0:
-                logger.info(f"No bookmarks with text found for user {user_id}, nothing to rebuild")
-                return True
-            
-            # Process in smaller batches with extreme memory management
-            success_count = 0
-            error_count = 0
-            
-            # Process bookmarks in very small batches
-            for i in range(0, total, batch_size):
-                batch = valid_bookmarks[i:i+batch_size]
-                current_batch = i//batch_size + 1
-                total_batches = (total+batch_size-1)//batch_size
+            if not user_id:
+                logger.error(f"❌ [REBUILD-{rebuild_id}] Invalid user_id: {user_id}")
+                return False
                 
-                logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {current_batch}/{total_batches}: {len(batch)} bookmarks")
+            logger.info(f"🔄 [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
+            
+            # Get a new db connection
+            conn = get_db_connection()
+            
+            # Get bookmarks for the user
+            try:
+                stmt = text("""
+                    SELECT id, bookmark_id, text, tweet_content 
+                    FROM bookmarks
+                    WHERE user_id = :user_id
+                    ORDER BY id
+                """)
                 
-                # Process each bookmark in the batch individually with model load/unload for each
-                for j, bookmark in enumerate(batch):
+                result = conn.execute(stmt, {"user_id": user_id})
+                bookmark_count = 0
+                
+                # First pass: count bookmarks and pre-filter empties
+                valid_bookmarks = []
+                for row in result:
+                    bookmark_count += 1
+                    # Pre-filter empty bookmarks to save memory later
+                    text = row.text or ''
+                    if not text.strip():
+                        logger.info(f"⚠️ [REBUILD-{rebuild_id}] Pre-filtering bookmark {row.bookmark_id} due to empty text")
+                        continue
+                    valid_bookmarks.append((row.id, row.bookmark_id, row.text, row.tweet_content))
+                
+                # Commit and close this connection before processing
+                conn.close()
+                
+                filtered_count = bookmark_count - len(valid_bookmarks)
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Found {bookmark_count} bookmarks, filtered {filtered_count} empty ones")
+                    
+                # Process in very small batches with forced cleanup between each batch
+                # This is extremely aggressive memory management for restricted environments
+                max_bookmarks = 100  # Process at most this many bookmarks (temporary safety measure)
+                total_processed = 0
+                batch_num = 0
+                
+                # Use unique collection name for each rebuild to avoid conflicts
+                collection_name = f"bookmark_embeddings_{self.instance_id}_{rebuild_id}"
+                if self.qdrant_client.collection_exists(collection_name):
+                    self.qdrant_client.delete_collection(collection_name)
+                
+                # Create new collection with the same parameters
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=models.VectorParams(
+                        size=self.embedding_size,
+                        distance=models.Distance.COSINE
+                    )
+                )
+                
+                logger.info(f"✅ [REBUILD-{rebuild_id}] Created new collection: {collection_name}")
+                
+                # Process batches with size limit safeguard 
+                valid_bookmarks = valid_bookmarks[:max_bookmarks]
+                
+                for i in range(0, len(valid_bookmarks), batch_size):
+                    batch = valid_bookmarks[i:i+batch_size]
+                    batch_num += 1
+                    
+                    logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing batch {batch_num} with {len(batch)} bookmarks")
+                    
+                    # Process just one bookmark at a time to minimize memory usage
+                    for bookmark_id, tweet_id, text, tweet_content in batch:
+                        # Initialize the model for just one bookmark
+                        start_time = time.time()
+                        
+                        try:
+                            # Load model for just this one bookmark
+                            if not hasattr(self, 'model') or self.model is None:
+                                logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model...")
+                                # Load in half precision to reduce memory
+                                self.model = SentenceTransformer(self.model_name, device='cpu')
+                                # Force half precision 
+                                self.model.half()
+                            
+                            # Generate embedding
+                            if text:
+                                embedding = self.model.encode(text, show_progress_bar=False)
+                                
+                                # Add to vector store
+                                self.qdrant_client.upsert(
+                                    collection_name=collection_name,
+                                    points=[
+                                        models.PointStruct(
+                                            id=bookmark_id,
+                                            vector=embedding.tolist(),
+                                            payload={
+                                                "text": text,
+                                                "bookmark_id": tweet_id,
+                                                "user_id": user_id
+                                            }
+                                        )
+                                    ]
+                                )
+                                total_processed += 1
+                                
+                        except Exception as e:
+                            logger.error(f"❌ [REBUILD-{rebuild_id}] Error embedding bookmark {bookmark_id}: {str(e)}")
+                            
+                        finally:
+                            # Unload model after each bookmark to save memory
+                            if hasattr(self, 'model') and self.model is not None:
+                                del self.model
+                                self.model = None
+                                
+                            # Clean up memory 
+                            self.clean_memory()
+                            
+                            end_time = time.time()
+                            logger.info(f"⏱️ [REBUILD-{rebuild_id}] Processing bookmark took {end_time - start_time:.2f}s")
+                            
+                    # After each batch, force an aggressive memory cleanup
+                    self.clean_memory()
+                    
+                    # Log progress
+                    logger.info(f"✅ [REBUILD-{rebuild_id}] Processed batch {batch_num}, total {total_processed} of {len(valid_bookmarks)}")
+                    
+                    # Safety delay between batches to allow system to recover
+                    time.sleep(0.5)
+                
+                # After all batches are processed, rename the collection to the standard name
+                if total_processed > 0:
                     try:
-                        # Prepare metadata for the vector store
-                        metadata = {
-                            'author': bookmark.author_username if hasattr(bookmark, 'author_username') else None,
-                            'created_at': str(bookmark.created_at) if hasattr(bookmark, 'created_at') and bookmark.created_at else None
-                        }
-                        
-                        # Process each bookmark independently to minimize memory usage
-                        logger.info(f"Processing bookmark {bookmark.id} ({j+1}/{len(batch)}, {i+j+1}/{total})")
-                        
-                        # Add bookmark with model loaded/unloaded per bookmark
-                        self.add_bookmark(
-                            bookmark_id=bookmark.id,
-                            user_id=user_id,
-                            text=bookmark.text,
-                            metadata=metadata
+                        # Only replace the main collection if we actually processed bookmarks
+                        if self.qdrant_client.collection_exists(self.collection_name):
+                            # Delete old collection if it exists
+                            logger.info(f"🗑️ [REBUILD-{rebuild_id}] Deleting old collection: {self.collection_name}")
+                            self.qdrant_client.delete_collection(self.collection_name)
+                            
+                        # Recreate with same parameters
+                        self.qdrant_client.create_collection(
+                            collection_name=self.collection_name,
+                            vectors_config=models.VectorParams(
+                                size=self.embedding_size,
+                                distance=models.Distance.COSINE
+                            )
                         )
                         
-                        success_count += 1
+                        # Copy points from temporary to main collection
+                        logger.info(f"🔄 [REBUILD-{rebuild_id}] Transferring points to main collection")
                         
-                        # Logging
-                        if success_count % 5 == 0:
-                            logger.info(f"🔍 [REBUILD-{session_id}] Progress: {success_count}/{total} bookmarks added (Memory: {self.get_memory_usage()})")
+                        # Get all points from temp collection
+                        points = self.qdrant_client.scroll(
+                            collection_name=collection_name,
+                            limit=100,  # Process in small batches
+                            with_vectors=True,
+                            with_payload=True
+                        )
                         
-                        # Force cleanup after each bookmark
-                        self.clean_memory()
+                        # Copy points to main collection
+                        point_count = 0
+                        while points[0]:
+                            batch_points = []
+                            for point in points[0]:
+                                batch_points.append(
+                                    models.PointStruct(
+                                        id=point.id,
+                                        vector=point.vector,
+                                        payload=point.payload
+                                    )
+                                )
+                            
+                            if batch_points:
+                                self.qdrant_client.upsert(
+                                    collection_name=self.collection_name,
+                                    points=batch_points
+                                )
+                                point_count += len(batch_points)
+                            
+                            # Get next batch
+                            points = self.qdrant_client.scroll(
+                                collection_name=collection_name,
+                                limit=100,
+                                with_vectors=True,
+                                with_payload=True,
+                                offset=points[1]
+                            )
                         
+                        logger.info(f"✅ [REBUILD-{rebuild_id}] Transferred {point_count} points to main collection")
+                            
+                        # Clean up the temporary collection
+                        self.qdrant_client.delete_collection(collection_name)
                     except Exception as e:
-                        error_count += 1
-                        logger.error(f"❌ [REBUILD-{session_id}] Error adding bookmark {bookmark.id}: {str(e)}")
-                        self._unload_model()  # Ensure model is unloaded even after error
+                        logger.error(f"❌ [REBUILD-{rebuild_id}] Error finalizing collection: {str(e)}")
+                        logger.error(traceback.format_exc())
                 
-                # Extra aggressive cleanup between batches
+                logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} of {bookmark_count} bookmarks")
+                
+                # One final memory cleanup
                 self.clean_memory()
-                logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
                 
-                # Log progress
-                progress = ((i + len(batch)) / total) * 100
-                logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
+                return True
                 
-                # Give the system a moment to free up memory
-                time.sleep(1.0)
-            
-            logger.info(f"🎉 [REBUILD-{session_id}] Vector rebuild completed: {success_count} successes, {error_count} errors")
-            logger.info(f"Final memory usage: {self.get_memory_usage()}")
-            return True
-            
+            except Exception as e:
+                logger.error(f"❌ [REBUILD-{rebuild_id}] Error rebuilding vectors: {str(e)}")
+                logger.error(traceback.format_exc())
+                return False
+                
         except Exception as e:
-            logger.error(f"❌ [REBUILD-{session_id}] Error during vector rebuild for user {user_id}: {str(e)}")
+            logger.error(f"❌ [REBUILD-{rebuild_id}] Unexpected error in rebuild_user_vectors: {str(e)}")
             logger.error(traceback.format_exc())
-            # Try to unload model even after error
-            self._unload_model()
             return False
             
     def _unload_model(self):

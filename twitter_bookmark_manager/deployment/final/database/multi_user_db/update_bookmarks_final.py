@@ -19,6 +19,8 @@ import glob
 import hashlib
 import time
 import gc
+import random
+import string
 
 # Import the Bookmark model and db_session
 from .db_final import db_session, get_db_session, get_bookmarks_for_user
@@ -1098,102 +1100,93 @@ def update_status(status_file, status, **kwargs):
         logger.error(f"Error updating status file: {e}")
         # Don't raise - status updates are non-critical
 
-def run_vector_rebuild(user_id, session_id=None):
+def run_vector_rebuild(user_id, session_id=None, max_bookmarks=50):
     """
-    Run vector rebuild process in background.
+    Run a vector rebuild in the background
     
     Args:
-        user_id: ID of the user whose vectors to rebuild
-        session_id: Optional session ID for tracking status
-        
-    Returns:
-        Dict with result information
+        user_id: User ID to rebuild vectors for
+        session_id: Session ID for tracking progress
+        max_bookmarks: Maximum number of bookmarks to process (for memory constraints)
     """
-    import time
-    import os
-    import json
-    from pathlib import Path
-    import logging
-    import traceback
+    if not session_id:
+        session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        
+    # Set up logging
+    logger = logging.getLogger('vector_rebuild')
+    logger.info(f"📢 [REBUILD-{session_id}] Starting background vector rebuild for user {user_id}")
     
-    logger = logging.getLogger(__name__)
+    # Get user directory
+    user_dir = get_user_directory(user_id)
+    os.makedirs(user_dir, exist_ok=True)
     
-    logger.info(f"Starting background vector rebuild for user {user_id}, session {session_id}")
+    # Create status file path
+    status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
     
-    # Save status to file if session_id provided
-    if session_id:
-        try:
-            # Create user directory for status files
-            from deployment.final.util import get_user_directory
-            user_dir = get_user_directory(user_id)
-            os.makedirs(user_dir, exist_ok=True)
-            
-            # Create status file
-            status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-            with open(status_file, 'w') as f:
-                json.dump({
-                    'status': 'processing',
-                    'user_id': user_id,
-                    'timestamp': time.time(),
-                    'message': 'Vector rebuild started'
-                }, f)
-                
-            logger.info(f"Created status file for session {session_id}")
-        except Exception as e:
-            logger.error(f"Error creating status file: {str(e)}")
+    # Write initial status
+    with open(status_file, 'w') as f:
+        status = {
+            'user_id': user_id,
+            'status': 'processing',
+            'message': 'Vector rebuild started',
+            'timestamp': time.time(),
+            'progress': 0
+        }
+        json.dump(status, f)
     
     try:
-        # Import vector store
-        from deployment.final.database.multi_user_db.vector_store_final import get_multi_user_vector_store
+        # Import vector store module
+        from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+        
+        # Get vector store instance
         vector_store = get_multi_user_vector_store()
         
-        # Run rebuild
-        success = vector_store.rebuild_user_vectors(user_id)
+        # Start rebuild
+        logger.info(f"🔄 [REBUILD-{session_id}] Starting rebuild with batch_size=2, max_bookmarks={max_bookmarks}")
+        success = vector_store.rebuild_user_vectors(user_id, batch_size=2, session_id=session_id)
         
-        # Save final status
-        if session_id:
-            try:
-                status_data = {
-                    'status': 'completed' if success else 'failed',
+        # Update status
+        if success:
+            with open(status_file, 'w') as f:
+                status = {
                     'user_id': user_id,
+                    'status': 'completed', 
+                    'message': 'Vector rebuild completed successfully',
                     'timestamp': time.time(),
-                    'message': 'Vector rebuild completed successfully' if success else 'Vector rebuild failed'
+                    'progress': 100
                 }
-                
-                with open(status_file, 'w') as f:
-                    json.dump(status_data, f)
-                    
-                logger.info(f"Updated status file for session {session_id}: {status_data['status']}")
-            except Exception as e:
-                logger.error(f"Error updating status file: {str(e)}")
-        
-        return {
-            'success': success,
-            'message': 'Vector rebuild completed successfully' if success else 'Vector rebuild failed'
-        }
-        
+                json.dump(status, f)
+            logger.info(f"✅ [REBUILD-{session_id}] Vector rebuild completed successfully")
+        else:
+            with open(status_file, 'w') as f:
+                status = {
+                    'user_id': user_id,
+                    'status': 'failed',
+                    'message': 'Vector rebuild failed',
+                    'timestamp': time.time(),
+                    'progress': 0
+                }
+                json.dump(status, f)
+            logger.error(f"❌ [REBUILD-{session_id}] Vector rebuild failed")
+    
     except Exception as e:
-        logger.error(f"Error in background vector rebuild: {str(e)}")
+        # Update status file with error
+        try:
+            with open(status_file, 'w') as f:
+                status = {
+                    'user_id': user_id,
+                    'status': 'failed',
+                    'message': f'Error during vector rebuild: {str(e)}',
+                    'timestamp': time.time(),
+                    'error': str(e),
+                    'progress': 0
+                }
+                json.dump(status, f)
+        except Exception as write_error:
+            logger.error(f"❌ [REBUILD-{session_id}] Failed to write error status: {write_error}")
+            
+        logger.error(f"❌ [REBUILD-{session_id}] Error during vector rebuild: {str(e)}")
         logger.error(traceback.format_exc())
-        
-        # Save error status
-        if session_id:
-            try:
-                with open(status_file, 'w') as f:
-                    json.dump({
-                        'status': 'failed',
-                        'user_id': user_id,
-                        'timestamp': time.time(),
-                        'message': f'Error: {str(e)}',
-                        'traceback': traceback.format_exc()
-                    }, f)
-            except Exception as e:
-                logger.error(f"Error updating status file with error: {str(e)}")
-        
-        return {
-            'success': False,
-            'error': str(e)
-        }
 
 if __name__ == "__main__":
     import argparse
