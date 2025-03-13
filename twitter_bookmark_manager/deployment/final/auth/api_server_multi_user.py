@@ -1164,7 +1164,7 @@ def process_status():
         logger.error(f"❌ [STATUS-{session_id}] Error: {str(e)}")
         return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
 
-@app.route('/api/update_database', methods=['POST'])
+@app.route('/api/update-database', methods=['POST'])
 def update_database():
     """Update the database with new bookmarks"""
     try:
