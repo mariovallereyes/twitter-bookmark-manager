@@ -4,7 +4,7 @@ Provides user context tracking throughout request lifecycle.
 """
 
 from functools import wraps
-from flask import session, g, redirect, url_for, request, current_app
+from flask import session, g, redirect, url_for, request, current_app, jsonify
 from database.multi_user_db.user_model_final import get_user_by_id
 
 class UserContext:
@@ -41,11 +41,51 @@ class UserContext:
         user = UserContext.get_current_user()
         return user.id if user else None
 
+def with_user_context(f):
+    """Decorator to ensure user context is available and handle API responses"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = UserContext.get_current_user()
+        if user is None:
+            # Check if this is an API request
+            is_api_request = (
+                request.path.startswith('/api/') or 
+                request.headers.get('Accept') == 'application/json' or
+                request.headers.get('Content-Type') == 'application/json'
+            )
+            
+            if is_api_request:
+                return jsonify({
+                    'success': False,
+                    'authenticated': False,
+                    'error': 'User not authenticated'
+                }), 401
+            else:
+                return redirect(url_for('auth.login', next=request.url))
+                
+        # Add user to kwargs for the wrapped function
+        kwargs['user'] = user
+        return f(*args, **kwargs)
+    return decorated_function
+
 def login_required(f):
     """Decorator to require login for a route"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not UserContext.is_authenticated():
+            # Check if this is an API request
+            is_api_request = (
+                request.path.startswith('/api/') or 
+                request.headers.get('Accept') == 'application/json' or
+                request.headers.get('Content-Type') == 'application/json'
+            )
+            
+            if is_api_request:
+                return jsonify({
+                    'success': False,
+                    'authenticated': False,
+                    'error': 'User not authenticated'
+                }), 401
             return redirect(url_for('auth.login', next=request.url))
         return f(*args, **kwargs)
     return decorated_function
