@@ -353,165 +353,103 @@ class VectorStore:
                     
                 # Process in very small batches with forced cleanup between each batch
                 # This is extremely aggressive memory management for restricted environments
-                max_bookmarks = 100  # Process at most this many bookmarks (temporary safety measure)
+                
+                # EXTREME MEMORY LIMITATION: Process only a small subset of bookmarks
+                # Hard cap at 50 bookmarks even if there are more - Railway has severe memory constraints
+                max_bookmarks = 50  # Hard limit for Railway's constraints
+                if len(valid_bookmarks) > max_bookmarks:
+                    logger.warning(f"⚠️ [REBUILD-{rebuild_id}] MEMORY CONSTRAINT: Limiting to {max_bookmarks} bookmarks out of {len(valid_bookmarks)}")
+                    valid_bookmarks = valid_bookmarks[:max_bookmarks]
+                
                 total_processed = 0
                 batch_num = 0
                 
-                # Use unique collection name for each rebuild to avoid conflicts
-                collection_name = f"bookmark_embeddings_{self.instance_id}_{rebuild_id}"
-                if self.qdrant_client.collection_exists(collection_name):
-                    self.qdrant_client.delete_collection(collection_name)
-                
-                # Create new collection with the same parameters
-                self.qdrant_client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=models.VectorParams(
-                        size=self.embedding_size,
-                        distance=models.Distance.COSINE
-                    )
-                )
-                
-                logger.info(f"✅ [REBUILD-{rebuild_id}] Created new collection: {collection_name}")
-                
-                # Process batches with size limit safeguard 
-                valid_bookmarks = valid_bookmarks[:max_bookmarks]
-                
+                # Process batches with extremely small batch size
                 for i in range(0, len(valid_bookmarks), batch_size):
                     batch = valid_bookmarks[i:i+batch_size]
                     batch_num += 1
                     
                     logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing batch {batch_num} with {len(batch)} bookmarks")
                     
-                    # Process just one bookmark at a time to minimize memory usage
+                    # Process each bookmark individually for maximum memory control
                     for bookmark_id, tweet_id, text, tweet_content in batch:
-                        # Initialize the model for just one bookmark
+                        # Initialize the model for just this one bookmark
                         start_time = time.time()
+                        memory_before = self.get_memory_usage()
                         
                         try:
+                            logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing bookmark {bookmark_id}, memory: {memory_before}")
+                            
                             # Load model for just this one bookmark
-                            if not hasattr(self, 'model') or self.model is None:
-                                logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model...")
-                                # Load in half precision to reduce memory
-                                self.model = SentenceTransformer(self.model_name, device='cpu')
-                                # Force half precision 
-                                self.model.half()
+                            self._ensure_model_loaded()
                             
                             # Generate embedding
-                            if text:
-                                embedding = self.model.encode(text, show_progress_bar=False)
+                            if text and text.strip():
+                                # Truncate text to reasonable length
+                                text = text[:5000]  # Limit to 5000 chars
+                                
+                                embedding = self.model.encode(text)
+                                
+                                # Create a deterministic UUID from user_id and bookmark_id
+                                namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
+                                seed = f"{user_id}_{bookmark_id}"
+                                point_id = str(uuid.uuid5(namespace, seed))
+                                
+                                # Create payload
+                                payload = {
+                                    "bookmark_id": str(bookmark_id),
+                                    "text": text[:500],  # Store only beginning in payload
+                                    "user_id": user_id,
+                                    "timestamp": datetime.now().isoformat()
+                                }
                                 
                                 # Add to vector store
-                                self.qdrant_client.upsert(
-                                    collection_name=collection_name,
-                                    points=[
-                                        models.PointStruct(
-                                            id=bookmark_id,
-                                            vector=embedding.tolist(),
-                                            payload={
-                                                "text": text,
-                                                "bookmark_id": tweet_id,
-                                                "user_id": user_id
-                                            }
-                                        )
-                                    ]
+                                point = PointStruct(
+                                    id=point_id,
+                                    vector=embedding.tolist(),
+                                    payload=payload
                                 )
+                                
+                                # Upsert point to collection
+                                self.client.upsert(
+                                    collection_name=self.collection_name,
+                                    points=[point]
+                                )
+                                
                                 total_processed += 1
+                                
+                                # Clean up immediately
+                                del embedding
+                            else:
+                                logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {bookmark_id} due to empty text")
                                 
                         except Exception as e:
                             logger.error(f"❌ [REBUILD-{rebuild_id}] Error embedding bookmark {bookmark_id}: {str(e)}")
                             
                         finally:
-                            # Unload model after each bookmark to save memory
-                            if hasattr(self, 'model') and self.model is not None:
-                                del self.model
-                                self.model = None
-                                
-                            # Clean up memory 
+                            # Unload model after each bookmark
+                            self._unload_model()
+                            
+                            # Aggressive memory cleanup
                             self.clean_memory()
                             
+                            # Memory tracking
+                            memory_after = self.get_memory_usage()
                             end_time = time.time()
-                            logger.info(f"⏱️ [REBUILD-{rebuild_id}] Processing bookmark took {end_time - start_time:.2f}s")
+                            logger.info(f"⏱️ [REBUILD-{rebuild_id}] Bookmark {bookmark_id} processed in {end_time - start_time:.2f}s, memory: {memory_before} → {memory_after}")
                             
-                    # After each batch, force an aggressive memory cleanup
+                    # After each batch, force an extra aggressive memory cleanup
                     self.clean_memory()
                     
                     # Log progress
-                    logger.info(f"✅ [REBUILD-{rebuild_id}] Processed batch {batch_num}, total {total_processed} of {len(valid_bookmarks)}")
+                    progress = (total_processed / len(valid_bookmarks)) * 100
+                    logger.info(f"✅ [REBUILD-{rebuild_id}] Batch {batch_num} complete: {total_processed}/{len(valid_bookmarks)} ({progress:.1f}%)")
                     
-                    # Safety delay between batches to allow system to recover
-                    time.sleep(0.5)
-                
-                # After all batches are processed, rename the collection to the standard name
-                if total_processed > 0:
-                    try:
-                        # Only replace the main collection if we actually processed bookmarks
-                        if self.qdrant_client.collection_exists(self.collection_name):
-                            # Delete old collection if it exists
-                            logger.info(f"🗑️ [REBUILD-{rebuild_id}] Deleting old collection: {self.collection_name}")
-                            self.qdrant_client.delete_collection(self.collection_name)
-                            
-                        # Recreate with same parameters
-                        self.qdrant_client.create_collection(
-                            collection_name=self.collection_name,
-                            vectors_config=models.VectorParams(
-                                size=self.embedding_size,
-                                distance=models.Distance.COSINE
-                            )
-                        )
-                        
-                        # Copy points from temporary to main collection
-                        logger.info(f"🔄 [REBUILD-{rebuild_id}] Transferring points to main collection")
-                        
-                        # Get all points from temp collection
-                        points = self.qdrant_client.scroll(
-                            collection_name=collection_name,
-                            limit=100,  # Process in small batches
-                            with_vectors=True,
-                            with_payload=True
-                        )
-                        
-                        # Copy points to main collection
-                        point_count = 0
-                        while points[0]:
-                            batch_points = []
-                            for point in points[0]:
-                                batch_points.append(
-                                    models.PointStruct(
-                                        id=point.id,
-                                        vector=point.vector,
-                                        payload=point.payload
-                                    )
-                                )
-                            
-                            if batch_points:
-                                self.qdrant_client.upsert(
-                                    collection_name=self.collection_name,
-                                    points=batch_points
-                                )
-                                point_count += len(batch_points)
-                            
-                            # Get next batch
-                            points = self.qdrant_client.scroll(
-                                collection_name=collection_name,
-                                limit=100,
-                                with_vectors=True,
-                                with_payload=True,
-                                offset=points[1]
-                            )
-                        
-                        logger.info(f"✅ [REBUILD-{rebuild_id}] Transferred {point_count} points to main collection")
-                            
-                        # Clean up the temporary collection
-                        self.qdrant_client.delete_collection(collection_name)
-                    except Exception as e:
-                        logger.error(f"❌ [REBUILD-{rebuild_id}] Error finalizing collection: {str(e)}")
-                        logger.error(traceback.format_exc())
+                    # Add a delay between batches to avoid overwhelming the system
+                    time.sleep(1.0)  # Longer delay to let system recover
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} of {bookmark_count} bookmarks")
-                
-                # One final memory cleanup
-                self.clean_memory()
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} bookmarks out of {bookmark_count} total")
                 
                 return True
                 
