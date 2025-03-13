@@ -65,7 +65,7 @@ class VectorStore:
         self.collection_name = f"bookmark_embeddings_{instance_id}"
         logger.info(f"Creating Qdrant in-memory instance with ID: {instance_id}")
         
-        self.vector_size = 384  # Will be updated when model is loaded
+        self.vector_size = 768  # Default for all-mpnet-base-v2
         
         # Set default persist directory for Railway if not specified
         if persist_directory is None:
@@ -81,16 +81,27 @@ class VectorStore:
         # Initialize Qdrant client in memory mode to avoid file locking issues
         try:
             logger.info(f"Initializing Qdrant client in memory mode to avoid file locking issues")
-            self.client = QdrantClient(
-                location=":memory:",  # Always use in-memory mode like PythonAnywhere
-                timeout=10.0,  # Add timeout for operations
-                prefer_grpc=False  # Use HTTP instead of gRPC for better compatibility
-            )
+            self.client = QdrantClient(":memory:")  # Always use in-memory mode
             logger.info(f"Qdrant client initialized successfully in memory mode")
             
-            # Create collection
-            try:
-                # Always create a new collection with our unique name
+            # Initialize model as None - will load on demand
+            self.model = None
+            
+            # Create or get collection
+            collections = self.client.get_collections().collections
+            collection_exists = any(c.name == self.collection_name for c in collections)
+            
+            if collection_exists:
+                # Check if dimensions match
+                collection_info = self.client.get_collection(self.collection_name)
+                current_dims = collection_info.config.params.vectors.size
+                if current_dims != self.vector_size:
+                    logger.warning(f"Collection dimensions mismatch: expected {self.vector_size}, found {current_dims}")
+                    # Delete and recreate with correct dimensions
+                    self.client.delete_collection(self.collection_name)
+                    collection_exists = False
+                    
+            if not collection_exists:
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
@@ -98,11 +109,7 @@ class VectorStore:
                         distance=Distance.COSINE
                     )
                 )
-                logger.info(f"Created collection: {self.collection_name}")
-            except Exception as e:
-                logger.error(f"Failed to create collection {self.collection_name}: {str(e)}")
-                logger.error(traceback.format_exc())
-                raise
+                logger.info(f"Created collection: {self.collection_name} with {self.vector_size} dimensions")
         except Exception as e:
             logger.error(f"Failed to initialize Qdrant client: {str(e)}")
             logger.error(traceback.format_exc())
@@ -131,9 +138,13 @@ class VectorStore:
             self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', 
                                            device='cpu')  # Still use CPU for stability
             
-            # Update vector size based on model
-            self.vector_size = self.model.get_sentence_embedding_dimension()
-            logger.info(f"Vector size updated to {self.vector_size} based on model dimension")
+            # Verify vector size matches what we expect
+            model_vector_size = self.model.get_sentence_embedding_dimension()
+            if model_vector_size != self.vector_size:
+                logger.error(f"Model vector size {model_vector_size} does not match collection size {self.vector_size}")
+                raise ValueError("Model vector size mismatch")
+            
+            logger.info(f"Model loaded successfully with vector size {self.vector_size}")
             
             memory_after = self.get_memory_usage()
             memory_increase = memory_after - memory_before
