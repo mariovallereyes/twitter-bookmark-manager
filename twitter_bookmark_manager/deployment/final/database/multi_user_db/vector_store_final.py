@@ -31,7 +31,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 # Import database utilities
-from sqlalchemy import text
+from sqlalchemy import text as sql_text
 from database.multi_user_db.db_final import get_db_connection
 
 # Configure logging
@@ -328,7 +328,7 @@ class VectorStore:
             
             # Get bookmarks for the user
             try:
-                stmt = text("""
+                stmt = sql_text("""
                     SELECT id, bookmark_id, text, tweet_content 
                     FROM bookmarks
                     WHERE user_id = :user_id
