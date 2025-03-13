@@ -438,10 +438,20 @@ class VectorStore:
             BATCH_SIZE = 100
             for i in range(0, len(ids_as_strings), BATCH_SIZE):
                 batch = ids_as_strings[i:i+BATCH_SIZE]
+                
+                # Create a filter for bookmark_id field in payload instead of using point IDs
+                # This matches how we store vectors in add_bookmark method
                 self.client.delete(
                     collection_name=self.collection_name,
-                    points_selector=rest.PointIdsList(
-                        points=batch
+                    points_selector=rest.Filter(
+                        must=[
+                            rest.FieldCondition(
+                                key="bookmark_id",
+                                match=rest.OneOf(
+                                    one_of=batch
+                                )
+                            )
+                        ]
                     )
                 )
                 logger.info(f"Deleted batch of {len(batch)} bookmarks from vector store")
