@@ -37,6 +37,9 @@ import platform
 from sqlalchemy import text, create_engine
 from flask_cors import CORS
 from multiprocessing import Process
+from threading import Thread
+from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+from auth.user_context import get_current_user, UserContext
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
