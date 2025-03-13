@@ -40,7 +40,7 @@ from multiprocessing import Process
 from threading import Thread
 from database.multi_user_db.vector_store_final import get_multi_user_vector_store
 from auth.user_context import get_current_user, UserContext
-from flask_login import login_required
+from auth.user_context_final import login_required
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.db_final import get_db_connection
 
@@ -401,32 +401,6 @@ def init_app_debug():
 
 # Call the init function right away
 init_app_debug()
-
-# Define login_required decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        user = UserContext.get_current_user()
-        if user is None:
-            # Check if this is an API request based on the URL or Accept header
-            is_api_request = (
-                request.path.startswith('/api/') or 
-                request.headers.get('Accept') == 'application/json' or
-                request.headers.get('Content-Type') == 'application/json'
-            )
-            
-            if is_api_request:
-                # Return a JSON error for API requests
-                return jsonify({
-                    'success': False,
-                    'authenticated': False,
-                    'error': 'User not authenticated'
-                }), 401
-            else:
-                # Redirect to login for browser requests
-                return redirect(url_for('auth.login', next=request.url))
-        return f(*args, **kwargs)
-    return decorated_function
 
 # Home page
 @app.route('/')
