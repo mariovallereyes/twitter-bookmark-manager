@@ -133,12 +133,11 @@ class VectorStore:
             logger.warning(f"Failed to load smaller model, falling back to standard model: {str(e)}")
             self.model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
         
-        # Convert to half precision to reduce memory usage
-        try:
-            self.model.half()  # Convert to fp16 to reduce memory usage
-            logger.info(f"Successfully converted model to half precision")
-        except Exception as e:
-            logger.warning(f"Could not convert model to half precision: {str(e)}")
+        # NOTE: We previously tried to convert to half precision to save memory with:
+        # self.model.half()
+        # But this caused "LayerNormKernelImpl not implemented for 'Half'" errors in Railway
+        # We now use full precision (fp32) for better compatibility with different environments
+        logger.info(f"Using full precision (fp32) model for better compatibility")
         
         logger.info(f"Model initialized successfully")
         logger.info(f"Post-model loading memory usage: {self.get_memory_usage()}")
