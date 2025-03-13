@@ -1592,13 +1592,14 @@
         statusDisplay.className = 'mt-2 text-xs text-blue-400';
         
         try {
-            // First try to use user info endpoint if available
-            const response = await fetch('/api/user-info', {
+            // Use the correct API endpoint path
+            const response = await fetch('/api/user/profile', {
                 method: 'GET',
                 credentials: 'include'
-            }).catch(() => {
-                // If that fails, try a different endpoint
-                return fetch('/user/profile', {
+            }).catch((err) => {
+                console.log('First endpoint failed:', err);
+                // If that fails, try a different endpoint as a fallback
+                return fetch('/api/user/stats', {
                     method: 'GET',
                     credentials: 'include'
                 }).catch(() => null);
