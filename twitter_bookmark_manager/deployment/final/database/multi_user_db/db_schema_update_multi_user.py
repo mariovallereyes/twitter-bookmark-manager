@@ -26,7 +26,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(scr
 sys.path.insert(0, parent_dir)
 
 try:
-    from twitter_bookmark_manager.deployment.final.database.multi_user_db.user_model_final import create_user_table, alter_tables_for_multi_user, create_system_user_if_needed
+    from .user_model_final import create_user_table, alter_tables_for_multi_user, create_system_user_if_needed
 except ImportError:
     # Alternative import path
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(script_dir))))))

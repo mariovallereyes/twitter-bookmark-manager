@@ -275,7 +275,7 @@ class VectorStore:
             
     def rebuild_user_vectors(self, user_id, batch_size=20):
         """Rebuild vector store for a specific user's bookmarks in memory to avoid locking issues"""
-        from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
+        from .db_final import get_bookmarks_for_user
         
         session_id = str(uuid.uuid4())[:8]
         logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store rebuild for user {user_id}")
