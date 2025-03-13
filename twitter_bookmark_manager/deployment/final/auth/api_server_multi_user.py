@@ -1218,7 +1218,10 @@ def update_database():
                 
                 # Run rebuild
                 logger.info(f"🔄 [API] Starting direct vector rebuild for user {user_id}")
-                success = vector_store.rebuild_user_vectors(user_id, session_id=session_id)
+                success = vector_store.rebuild_user_vectors(
+                    user_id=user_id,
+                    rebuild_id=session_id
+                )
                 
                 if success:
                     logger.info(f"✅ [API] Vector rebuild completed successfully")
