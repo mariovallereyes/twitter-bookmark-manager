@@ -310,7 +310,7 @@ def rebuild_vector_store(user_id=None, session_id=None):
         logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
         
         # Get all bookmarks from database - Use the SQL-based function instead of ORM
-        from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
+        from .db_final import get_bookmarks_for_user
         
         # Get bookmarks for user
         bookmarks = []
@@ -354,8 +354,15 @@ def rebuild_vector_store(user_id=None, session_id=None):
         # First, clear existing vectors for this user
         if user_id:
             try:
-                # Get IDs of all bookmarks for this user
-                bookmark_ids = [str(row[0]) for row in query.with_entities(Bookmark.id).all()]
+                # Get IDs of all bookmarks for this user using direct SQL
+                bookmark_ids = []
+                with db_session() as session:
+                    cursor = session.connection().connection.cursor()
+                    cursor.execute("SELECT id FROM bookmarks WHERE user_id = %s", (user_id,))
+                    rows = cursor.fetchall()
+                    bookmark_ids = [str(row[0]) for row in rows]
+                    cursor.close()
+                
                 if bookmark_ids:
                     logger.info(f"🗑️ [REBUILD-{session_id}] Deleting existing vectors for user {user_id}")
                     vector_store.delete_bookmarks(bookmark_ids)
