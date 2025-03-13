@@ -348,10 +348,14 @@ class VectorStore:
                     # Get text content, using text field first
                     text = row.text or ''
                     
-                    # If text is empty, try to get tweet_content from raw_data
+                    # If text is empty, try to get full_text from raw_data
                     if not text.strip() and row.raw_data:
-                        if isinstance(row.raw_data, dict):
-                            text = row.raw_data.get('tweet_content', '')
+                        try:
+                            # Parse raw_data if it's a string
+                            raw_data_dict = json.loads(row.raw_data) if isinstance(row.raw_data, str) else row.raw_data
+                            text = raw_data_dict.get('full_text', '')
+                        except Exception as e:
+                            logger.error(f"❌ [REBUILD-{rebuild_id}] Error parsing raw_data for {row.bookmark_id}: {str(e)}")
                     
                     if not text.strip():
                         logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} - no text content found")
