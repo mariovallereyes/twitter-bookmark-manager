@@ -601,9 +601,9 @@ def get_bookmarks_for_user(user_id):
         # Get connection
         conn = get_db_connection()
         
-        # Build query with parameterized SQL
+        # Build query with parameterized SQL matching actual database schema
         query = """
-            SELECT bookmark_id as id, text, created_at, author as author_name, author_id as author_username, 
+            SELECT bookmark_id, text, created_at, author_name, author_username, 
                    media_files, raw_data, user_id
             FROM bookmarks
             WHERE user_id = :user_id
@@ -630,7 +630,12 @@ def get_bookmarks_for_user(user_id):
         
         # Convert to Bookmark objects
         for row in rows:
-            bookmarks.append(Bookmark.from_row(row))
+            try:
+                bookmarks.append(Bookmark.from_row(row))
+            except Exception as e:
+                logger.error(f"Error converting row to Bookmark: {e}")
+                logger.error(f"Problematic row: {row}")
+                # Continue to next row
             
         return bookmarks
         

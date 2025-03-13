@@ -27,17 +27,29 @@ class Bookmark:
         if not row:
             return None
             
-        # Assume row order: id, text, created_at, author_name, author_username, media_files, raw_data, user_id
-        return cls(
-            id=row[0],
-            text=row[1],
-            created_at=row[2],
-            author_name=row[3],
-            author_username=row[4],
-            media_files=json.loads(row[5]) if row[5] else {},
-            raw_data=json.loads(row[6]) if row[6] else {},
-            user_id=row[7]
-        )
+        # Row order: bookmark_id, text, created_at, author_name, author_username, media_files, raw_data, user_id
+        try:
+            return cls(
+                id=row[0],                # bookmark_id
+                text=row[1],              # text
+                created_at=row[2],        # created_at
+                author_name=row[3],       # author_name
+                author_username=row[4],   # author_username
+                media_files=json.loads(row[5]) if row[5] else {},  # media_files
+                raw_data=json.loads(row[6]) if row[6] else {},     # raw_data
+                user_id=row[7]            # user_id
+            )
+        except Exception as e:
+            import traceback
+            print(f"Error creating Bookmark from row: {e}")
+            print(f"Row: {row}")
+            traceback.print_exc()
+            # Return a minimal bookmark instead of failing
+            return cls(
+                id=row[0] if len(row) > 0 else None,
+                text=row[1] if len(row) > 1 else None,
+                user_id=row[7] if len(row) > 7 else None
+            )
 
     def to_dict(self):
         """Convert bookmark to dictionary"""
