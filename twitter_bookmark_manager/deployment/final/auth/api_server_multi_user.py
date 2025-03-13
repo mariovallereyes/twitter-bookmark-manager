@@ -36,7 +36,6 @@ import hashlib
 import platform
 from sqlalchemy import text, create_engine
 from flask_cors import CORS
-from flask_login import current_user
 from multiprocessing import Process
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
