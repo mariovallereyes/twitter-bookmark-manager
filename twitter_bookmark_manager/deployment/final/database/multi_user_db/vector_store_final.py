@@ -331,25 +331,29 @@ class VectorStore:
             # Get bookmarks for the user
             try:
                 stmt = sql_text("""
-                    SELECT id, bookmark_id, text, tweet_content 
+                    SELECT bookmark_id, text, raw_data 
                     FROM bookmarks
                     WHERE user_id = :user_id
-                    ORDER BY id
+                    ORDER BY bookmark_id
                 """).bindparams(bindparam('user_id', type_=Integer))
                 
                 result = conn.execute(stmt, {"user_id": user_id})
                 bookmark_count = 0
-                
-                # First pass: count bookmarks and pre-filter empties
                 valid_bookmarks = []
+                
+                # Pre-filter bookmarks
                 for row in result:
                     bookmark_count += 1
-                    # Pre-filter empty bookmarks to save memory later
-                    text = row.text or ''
-                    if not text.strip():
+                    if not row.text or len(row.text.strip()) == 0:
                         logger.info(f"⚠️ [REBUILD-{rebuild_id}] Pre-filtering bookmark {row.bookmark_id} due to empty text")
                         continue
-                    valid_bookmarks.append((row.id, row.bookmark_id, row.text, row.tweet_content))
+                    
+                    # Extract tweet_content from raw_data JSON
+                    tweet_content = None
+                    if row.raw_data and isinstance(row.raw_data, dict):
+                        tweet_content = row.raw_data.get('tweet_content', '')
+                    
+                    valid_bookmarks.append((row.bookmark_id, row.text, tweet_content))
                 
                 # Commit and close this connection before processing
                 conn.close()
@@ -378,7 +382,7 @@ class VectorStore:
                     logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing batch {batch_num} with {len(batch)} bookmarks")
                     
                     # Process each bookmark individually for maximum memory control
-                    for bookmark_id, tweet_id, text, tweet_content in batch:
+                    for bookmark_id, tweet_id, text in batch:
                         # Initialize the model for just this one bookmark
                         start_time = time.time()
                         memory_before = self.get_memory_usage()
