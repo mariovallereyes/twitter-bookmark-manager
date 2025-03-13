@@ -192,7 +192,7 @@ def save_session_status(session_id, status_data):
             return False
             
         # Create user directory for status files
-        from deployment.final.util import get_user_directory
+        from database.multi_user_db.update_bookmarks_final import get_user_directory
         user_dir = get_user_directory(user_id)
         os.makedirs(user_dir, exist_ok=True)
         
@@ -1177,7 +1177,8 @@ def update_database():
                 logger.info(f"Direct vector rebuild requested by user {user.id}")
                 
                 try:
-                    from deployment.final.database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                    # Fix import path - use relative imports since we're in the same package
+                    from database.multi_user_db.vector_store_final import get_multi_user_vector_store
                     vector_store = get_multi_user_vector_store()
                     
                     # Check if vector store initialized correctly
@@ -1212,7 +1213,8 @@ def update_database():
                 logger.info(f"Background vector rebuild requested by user {user.id}")
                 
                 try:
-                    from deployment.final.database.multi_user_db.update_bookmarks_final import run_vector_rebuild
+                    # Fix import path - use relative imports
+                    from database.multi_user_db.update_bookmarks_final import run_vector_rebuild
                     
                     # Start background rebuild
                     thread = threading.Thread(target=run_vector_rebuild, args=(user.id, session_id))
