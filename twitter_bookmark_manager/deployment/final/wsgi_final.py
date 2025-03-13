@@ -13,12 +13,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Gunicorn configuration
-timeout = 600  # 10 minutes
-workers = 1    # Single worker to avoid memory competition
+timeout = 1800  # 30 minutes since we can process more bookmarks
+workers = 2     # Can use multiple workers with 32GB
 worker_class = 'sync'
 keepalive = 120
-max_requests = 10    # Restart workers periodically to prevent memory leaks
-max_requests_jitter = 3
+max_requests = 50    # Increased since we have more memory
+max_requests_jitter = 5
 worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
 
 logger.info("==================================================")

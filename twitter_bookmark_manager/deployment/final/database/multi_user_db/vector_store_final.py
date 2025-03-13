@@ -114,33 +114,26 @@ class VectorStore:
             self._load_model()
             
     def _load_model(self):
-        """Load the model with minimal memory footprint"""
+        """Load the model optimized for performance with 32GB memory"""
         try:
             memory_before = self.get_memory_usage()
             logger.info(f"Memory before model loading: {memory_before}MB")
-            
-            logger.info("Initializing SentenceTransformer model with minimal memory footprint")
             
             # Import here to avoid loading torch until needed
             import torch
             from sentence_transformers import SentenceTransformer
             
-            # Force garbage collection before loading model
+            # Force initial garbage collection
             gc.collect()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
-            # Use a smaller model variant
-            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L12-v2', 
-                                           device='cpu',  # Force CPU to avoid CUDA memory issues
-                                           cache_folder='/tmp/sentence_transformers')  # Use temp directory
+            # Use the better model since we have memory
+            self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', 
+                                           device='cpu')  # Still use CPU for stability
             
             # Update vector size based on model
             self.vector_size = self.model.get_sentence_embedding_dimension()
             logger.info(f"Vector size updated to {self.vector_size} based on model dimension")
-            
-            # Force garbage collection after loading
-            gc.collect()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
             memory_after = self.get_memory_usage()
             memory_increase = memory_after - memory_before
@@ -294,20 +287,11 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, batch_size=2, session_id=None):
-        """
-        Rebuild vector embeddings for all of a user's bookmarks
-        
-        Args:
-            user_id: User ID to rebuild vectors for
-            batch_size: Number of bookmarks to process in a batch before cleanup
-            session_id: Optional session ID for tracking rebuild progress
-        
-        Returns:
-            Boolean indicating success
-        """
-        rebuild_id = session_id or ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        
+    def rebuild_user_vectors(self, user_id: int, rebuild_id: str = None) -> bool:
+        """Rebuild vectors for all bookmarks of a user"""
+        if not rebuild_id:
+            rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            
         try:
             if not user_id:
                 logger.error(f"❌ [REBUILD-{rebuild_id}] Invalid user_id: {user_id}")
@@ -352,7 +336,7 @@ class VectorStore:
                         continue
                         
                     # Truncate text to reasonable length
-                    text = text[:5000]  # Limit to 5000 chars
+                    text = text[:10000]  # Increased limit since we have memory
                     valid_bookmarks.append((row.bookmark_id, text))
                 
                 # Early exit if no valid bookmarks
@@ -360,15 +344,15 @@ class VectorStore:
                     logger.warning(f"⚠️ [REBUILD-{rebuild_id}] No valid bookmarks found for processing")
                     return True
                     
-                # Process in small batches to manage memory
-                batch_size = 3  # Small batch size for memory management
+                # Process in larger batches now that we have memory
+                batch_size = 50  # Increased batch size
                 for i in range(0, len(valid_bookmarks), batch_size):
                     batch = valid_bookmarks[i:i + batch_size]
                     
                     try:
                         # Load model once for the batch
                         logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model for batch {i//batch_size + 1}")
-                        self._ensure_model_loaded()
+                        self._load_model()
                         
                         for bookmark_id, text in batch:
                             try:
@@ -389,17 +373,16 @@ class VectorStore:
                         # Force garbage collection
                         gc.collect()
                         
-                        # Sleep between batches
-                        time.sleep(2.0)  # Increased delay between batches
+                        # Small delay between batches just for stability
+                        time.sleep(0.5)
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {bookmark_count} bookmarks out of {bookmark_count} total")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {len(valid_bookmarks)} bookmarks out of {bookmark_count} total")
                 
                 return True
                 
             except Exception as e:
-                logger.error(f"❌ [REBUILD-{rebuild_id}] Error rebuilding vectors: {str(e)}")
-                logger.error(traceback.format_exc())
+                logger.error(f"❌ [REBUILD-{rebuild_id}] Database error: {str(e)}")
                 return False
                 
         except Exception as e:
