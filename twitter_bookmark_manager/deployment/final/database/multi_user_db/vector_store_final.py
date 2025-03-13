@@ -288,16 +288,21 @@ class VectorStore:
             return []
             
     def rebuild_user_vectors(self, user_id: int, rebuild_id: str = None) -> bool:
-        """Rebuild vectors for all bookmarks of a user"""
-        if not rebuild_id:
-            rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        """
+        Rebuild vectors for all bookmarks of a user.
+        
+        Args:
+            user_id: User ID whose vectors to rebuild
+            rebuild_id: Optional ID to track rebuild progress
             
+        Returns:
+            True if successful, False otherwise
+        """
         try:
-            if not user_id:
-                logger.error(f"❌ [REBUILD-{rebuild_id}] Invalid user_id: {user_id}")
-                return False
-                
-            logger.info(f"🔄 [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
+            if not rebuild_id:
+                rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            
+            logger.info(f"�� [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
             
             # Get a new db connection
             conn = get_db_connection()
@@ -344,8 +349,8 @@ class VectorStore:
                     logger.warning(f"⚠️ [REBUILD-{rebuild_id}] No valid bookmarks found for processing")
                     return True
                     
-                # Process in larger batches now that we have memory
-                batch_size = 50  # Increased batch size
+                # Process in moderate batches to balance speed and memory
+                batch_size = 20  # Reduced from 50 to prevent OOM
                 for i in range(0, len(valid_bookmarks), batch_size):
                     batch = valid_bookmarks[i:i + batch_size]
                     
@@ -374,7 +379,7 @@ class VectorStore:
                         gc.collect()
                         
                         # Small delay between batches just for stability
-                        time.sleep(0.5)
+                        time.sleep(1.0)  # Increased delay to 1 second to allow memory to stabilize
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
                 logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {len(valid_bookmarks)} bookmarks out of {bookmark_count} total")
