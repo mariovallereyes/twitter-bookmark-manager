@@ -353,12 +353,26 @@ class VectorStore:
             conn = get_db_connection()
             
             try:
-                # Get bookmarks in smaller chunks to manage memory
-                CHUNK_SIZE = 100
+                # First, count total bookmarks
+                count_stmt = sql_text("""
+                    SELECT COUNT(*) as total 
+                    FROM bookmarks 
+                    WHERE user_id = :user_id
+                """).bindparams(bindparam('user_id', type_=Integer))
+                
+                result = conn.execute(count_stmt, {"user_id": user_id})
+                total_bookmarks = result.scalar()
+                
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Found {total_bookmarks} total bookmarks to process")
+                
+                # Process in smaller chunks to manage memory
+                CHUNK_SIZE = 50  # Fetch 50 at a time
+                BATCH_SIZE = 5   # Process 5 at a time
                 offset = 0
                 total_processed = 0
+                errors = 0
                 
-                while True:
+                while offset < total_bookmarks:
                     stmt = sql_text("""
                         SELECT bookmark_id, text, raw_data 
                         FROM bookmarks
@@ -371,6 +385,7 @@ class VectorStore:
                         bindparam('offset', type_=Integer)
                     )
                     
+                    chunk_start_time = time.time()
                     result = conn.execute(stmt, {
                         "user_id": user_id,
                         "limit": CHUNK_SIZE,
@@ -393,6 +408,7 @@ class VectorStore:
                                 text = raw_data_dict.get('full_text', '')
                             except Exception as e:
                                 logger.error(f"❌ [REBUILD-{rebuild_id}] Error parsing raw_data for {row.bookmark_id}: {str(e)}")
+                                errors += 1
                                 continue
                         
                         if not text.strip():
@@ -404,9 +420,9 @@ class VectorStore:
                         valid_bookmarks.append((row.bookmark_id, text))
                     
                     # Process valid bookmarks in small batches
-                    batch_size = 10  # Small batch size for stability
-                    for i in range(0, len(valid_bookmarks), batch_size):
-                        batch = valid_bookmarks[i:i + batch_size]
+                    for i in range(0, len(valid_bookmarks), BATCH_SIZE):
+                        batch = valid_bookmarks[i:i + BATCH_SIZE]
+                        batch_start_time = time.time()
                         
                         try:
                             # Load model once for the batch
@@ -422,11 +438,15 @@ class VectorStore:
                                     if success:
                                         total_processed += 1
                                         logger.info(f"✅ [REBUILD-{rebuild_id}] Added vector for bookmark {bookmark_id}")
+                                    else:
+                                        errors += 1
+                                        logger.error(f"❌ [REBUILD-{rebuild_id}] Failed to add vector for bookmark {bookmark_id}")
                                     
                                     # Clean up embedding
                                     del embedding
                                     
                                 except Exception as e:
+                                    errors += 1
                                     logger.error(f"❌ [REBUILD-{rebuild_id}] Error processing bookmark {bookmark_id}: {str(e)}")
                                     continue
                         finally:
@@ -436,17 +456,26 @@ class VectorStore:
                             # Force garbage collection
                             gc.collect()
                             
+                            # Log batch timing
+                            batch_time = time.time() - batch_start_time
+                            logger.info(f"⏱️ [REBUILD-{rebuild_id}] Batch processed in {batch_time:.2f}s")
+                            
                             # Small delay between batches
                             time.sleep(0.5)
                     
                     # Move to next chunk
                     offset += CHUNK_SIZE
                     
-                    # Log progress
-                    logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} bookmarks so far")
+                    # Log chunk timing and progress
+                    chunk_time = time.time() - chunk_start_time
+                    progress = (offset / total_bookmarks) * 100
+                    logger.info(f"📊 [REBUILD-{rebuild_id}] Progress: {progress:.1f}% ({total_processed}/{total_bookmarks})")
+                    logger.info(f"⏱️ [REBUILD-{rebuild_id}] Chunk processed in {chunk_time:.2f}s")
                 
+                # Log final statistics
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Total bookmarks processed: {total_processed}")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Total processed: {total_processed}")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Errors: {errors}")
                 
                 return True
                 
