@@ -260,7 +260,7 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, batch_size=20):
+    def rebuild_user_vectors(self, user_id, batch_size=10):
         """Rebuild vector store for a specific user's bookmarks in memory to avoid locking issues"""
         from .db_final import get_bookmarks_for_user
         
@@ -295,15 +295,31 @@ class VectorStore:
             success_count = 0
             error_count = 0
             
+            # Pre-filter empty bookmarks to save processing time
+            valid_bookmarks = []
+            for bookmark in bookmarks:
+                if not bookmark.text or not bookmark.text.strip():
+                    logger.info(f"⚠️ [REBUILD-{session_id}] Pre-filtering bookmark {bookmark.id} due to empty text")
+                    continue
+                valid_bookmarks.append(bookmark)
+            
+            logger.info(f"📊 [REBUILD-{session_id}] Found {len(valid_bookmarks)} bookmarks to process after filtering")
+            
+            # Use the filtered bookmarks list
+            total = len(valid_bookmarks)
+            if total == 0:
+                logger.info(f"No valid bookmarks found for user {user_id} after filtering, nothing to rebuild")
+                return True
+            
             for i in range(0, total, batch_size):
-                batch = bookmarks[i:i+batch_size]
+                batch = valid_bookmarks[i:i+batch_size]
                 current_batch = i//batch_size + 1
                 total_batches = (total+batch_size-1)//batch_size
                 
                 logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} bookmarks)")
                 
                 # Process each bookmark in the batch with individual error handling
-                for bookmark in batch:
+                for j, bookmark in enumerate(batch):
                     try:
                         self.add_bookmark(
                             bookmark_id=bookmark.id,
@@ -315,17 +331,28 @@ class VectorStore:
                             }
                         )
                         success_count += 1
+                        
+                        # Clean memory every few bookmarks even within a batch
+                        if j % 3 == 0:  # Every 3 bookmarks
+                            self.clean_memory()
                     except Exception as e:
                         error_count += 1
                         logger.error(f"Error adding bookmark {bookmark.id} to vector store: {str(e)}")
                 
-                # Force garbage collection after each batch
+                # Free up resources - force Python to garbage collect after each batch
+                del batch
                 gc.collect()
+                
+                # More aggressive memory cleanup between batches
+                self.clean_memory()
                 logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
                 
                 # Log progress
                 progress = ((i + len(batch)) / total) * 100
                 logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
+                
+                # Give the system a moment to free up memory
+                time.sleep(0.5)
             
             # Unload model to free memory when done
             self._unload_model()
@@ -530,8 +557,9 @@ class VectorStore:
         Perform aggressive memory cleanup to avoid out-of-memory errors.
         Call this after processing each batch of bookmarks.
         """
-        # Force garbage collection
+        # Force garbage collection multiple times
         gc.collect()
+        gc.collect(2)  # Generation 2 garbage collection
         
         # Try to clean PyTorch cache if it's available
         try:
