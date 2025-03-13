@@ -515,8 +515,52 @@ def index():
             conn = get_db_connection()
             try:
                 searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                categories = searcher.get_categories()
-                logger.info(f"Successfully loaded {len(categories)} categories via SQLAlchemy for user {user.id}")
+                latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                
+                # FALLBACK: If no bookmarks found for this user, try getting system bookmarks
+                if len(latest_tweets) == 0 and user and user.id != 1:
+                    logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
+                    
+                    # Try with user_id = 1 (system user)
+                    searcher = BookmarkSearchMultiUser(conn, 1)
+                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                    logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
+                    
+                    # If still no results, try with a direct query for ANY bookmarks
+                    if len(latest_tweets) == 0:
+                        logger.warning("No system bookmarks found, trying direct query for any bookmarks")
+                        
+                        # Direct query for any bookmarks
+                        query = """
+                        SELECT id, bookmark_id, text, author, created_at, author_id
+                        FROM bookmarks
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                        """
+                        
+                        if isinstance(conn, sqlalchemy.engine.Connection):
+                            result = conn.execute(text(query))
+                            rows = result.fetchall()
+                        else:
+                            cursor = conn.cursor()
+                            cursor.execute(query)
+                            rows = cursor.fetchall()
+                            
+                        # Format the direct query results
+                        for row in rows:
+                            bookmark = {
+                                'id': row[0],
+                                'bookmark_id': row[1],
+                                'text': row[2],
+                                'author': row[3],
+                                'author_username': row[3].replace('@', '') if row[3] else '',
+                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                'author_id': row[5]
+                            }
+                            latest_tweets.append(bookmark)
+                            
+                        logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
             finally:
                 conn.close()
         except Exception as e:
@@ -626,69 +670,6 @@ def index():
             error_message="Database connection issues. Some features may be unavailable."
         )
     
-    # Get latest bookmarks
-    latest_tweets = []
-    try:
-        if not all_methods_tried:
-            # Connect to database
-            conn = get_db_connection()
-            try:
-                # Create a searcher instance
-                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                
-                # Get 5 most recent bookmarks
-                latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
-                
-                # FALLBACK: If no bookmarks found for this user, try getting system bookmarks
-                if len(latest_tweets) == 0 and user and user.id != 1:
-                    logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
-                    
-                    # Try with user_id = 1 (system user)
-                    searcher = BookmarkSearchMultiUser(conn, 1)
-                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                    logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
-                    
-                    # If still no results, try with a direct query for ANY bookmarks
-                    if len(latest_tweets) == 0:
-                        logger.warning("No system bookmarks found, trying direct query for any bookmarks")
-                        
-                        # Direct query for any bookmarks
-                        query = """
-                        SELECT id, bookmark_id, text, author, created_at, author_id
-                        FROM bookmarks
-                        ORDER BY created_at DESC
-                        LIMIT 5
-                        """
-                        
-                        if isinstance(conn, sqlalchemy.engine.Connection):
-                            result = conn.execute(text(query))
-                            rows = result.fetchall()
-                        else:
-                            cursor = conn.cursor()
-                            cursor.execute(query)
-                            rows = cursor.fetchall()
-                            
-                        # Format the direct query results
-                        for row in rows:
-                            bookmark = {
-                                'id': row[0],
-                                'bookmark_id': row[1],
-                                'text': row[2],
-                                'author': row[3],
-                                'author_username': row[3].replace('@', '') if row[3] else '',
-                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                                'author_id': row[5]
-                            }
-                            latest_tweets.append(bookmark)
-                            
-                        logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
-            finally:
-                conn.close()
-    except Exception as e:
-        logger.warning(f"Failed to retrieve latest bookmarks: {e}")
-        logger.error(traceback.format_exc())
-    
     # Return normal template if we have successfully connected, even if no categories
     return render_template(
         template, 
@@ -702,6 +683,7 @@ def index():
     )
 
 @app.route('/upload-bookmarks', methods=['POST'])
+@login_required
 def upload_bookmarks():
     """
     Handle file upload for bookmarks JSON file
@@ -730,8 +712,9 @@ def upload_bookmarks():
             
         logger.info(f"File received: {file.filename} for user {user_id}")
         
-        # Ensure upload directory exists
-        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+        # Ensure upload directory exists - use Railway volume mount path if available
+        base_upload_dir = os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', '/app/uploads')
+        upload_folder = os.path.join(base_upload_dir, 'uploads')
         user_dir = os.path.join(upload_folder, f"user_{user_id}")
         os.makedirs(user_dir, exist_ok=True)
         logger.info(f"User directory confirmed: {user_dir}")
@@ -763,7 +746,8 @@ def upload_bookmarks():
                 'success': True, 
                 'message': 'File uploaded successfully',
                 'file': filename,
-                'session_id': session_id
+                'session_id': session_id,
+                'bookmark_count': bookmark_count
             })
             
         except Exception as save_error:
