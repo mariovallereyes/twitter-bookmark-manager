@@ -8,6 +8,7 @@ from flask_cors import CORS
 from database.multi_user_db.db_final import init_database
 from auth.auth_routes_final import auth_bp
 from auth.user_api_final import user_api_bp
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -308,11 +309,38 @@ logger.info("="*50)
 # Add startup message
 logger.info("Starting with worker timeout of 2 hours for large rebuilds")
 
+# Configure CORS
+CORS(application, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
+
 # Register blueprints with unique names
 application.register_blueprint(auth_bp, name='auth_routes')
 application.register_blueprint(user_api_bp, name='user_api')
 
 # Initialize database
 init_database()
+
+# Add health check endpoint for Railway
+@application.route('/-/health')
+def health_check():
+    """Health check endpoint for Railway"""
+    try:
+        # Basic health check - just verify we can handle requests
+        return jsonify({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 logger.info("✅ Successfully imported and configured main application") 
