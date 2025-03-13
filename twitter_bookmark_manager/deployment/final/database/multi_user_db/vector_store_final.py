@@ -30,6 +30,10 @@ from qdrant_client.http import models as rest
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
+# Import database utilities
+from sqlalchemy import text
+from database.multi_user_db.db_final import get_db_connection
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
