@@ -426,6 +426,7 @@ def index():
     # Track if we've tried all database connection methods
     all_methods_tried = False
     categories = []
+    latest_tweets = []  # Initialize latest_tweets
     error_message = None
     
     # Method 1: Direct psycopg2 connection
@@ -491,6 +492,36 @@ def index():
                     'name': row[1],
                     'description': row[2]
                 })
+            
+            # Get recent bookmarks
+            try:
+                cursor.execute("""
+                    SELECT 
+                        bookmark_id,
+                        text,
+                        author_name,
+                        author_username,
+                        created_at
+                    FROM bookmarks 
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC 
+                    LIMIT 5
+                """, (user.id,))
+                
+                for row in cursor.fetchall():
+                    tweet = {
+                        'id': row[0],  # Using bookmark_id as id
+                        'text': row[1],
+                        'author': row[2],
+                        'author_username': row[3],
+                        'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                        'categories': []  # Initialize empty categories
+                    }
+                    latest_tweets.append(tweet)
+                
+                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+            except Exception as e:
+                logger.warning(f"Error getting recent bookmarks: {e}")
             
             cursor.close()
             direct_conn.close()
