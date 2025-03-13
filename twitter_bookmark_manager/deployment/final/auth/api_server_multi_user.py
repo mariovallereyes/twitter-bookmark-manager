@@ -1181,9 +1181,9 @@ def update_database():
         user_id = user.id
         logger.info(f"Processing database update for user {user_id}")
         
-        # Get rebuild flag
+        # Get rebuild flag - default to FALSE to avoid memory issues
         data = request.get_json(silent=True) or {}
-        rebuild = data.get('rebuild', True)
+        rebuild = data.get('rebuild', False)  # Change default to False
         direct_call = data.get('direct_call', False)
         
         if not rebuild:

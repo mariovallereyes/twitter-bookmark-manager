@@ -779,7 +779,13 @@
         try {
             const response = await fetch('/update-database', {
                 method: 'POST',
-                credentials: 'include'
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    rebuild: false  // Don't rebuild vectors by default
+                })
             });
             
             const result = await response.json();
@@ -788,7 +794,7 @@
                 this.progressSteps = [
                     { status: 'done', message: 'File validated' },
                     { status: 'done', message: 'SQL database updated' },
-                    { status: 'done', message: 'Vector store rebuilt' },
+                    { status: 'done', message: 'Vector store unchanged' },
                     { status: 'done', message: 'Update completed successfully!' }
                 ];
                 
@@ -1017,7 +1023,7 @@
             },
             credentials: 'include',
             body: JSON.stringify({
-                rebuild_vector: true
+                rebuild: true  // Explicitly set rebuild flag to true
             })
         })
         .then(response => response.json())
@@ -1202,7 +1208,7 @@
                         },
                         credentials: 'include',
                         body: JSON.stringify({
-                            rebuild_vector: rebuildVectors
+                            rebuild: rebuildVectors  // Only rebuild if explicitly requested
                         })
                     });
                 } else {
@@ -1248,7 +1254,8 @@
                 },
                 credentials: 'include',
                 body: JSON.stringify({
-                    rebuild_vector: true
+                    rebuild: true,
+                    direct_call: false
                 })
             })
             .then(response => response.json())
@@ -1290,7 +1297,7 @@
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        rebuild_vector: true,
+                        rebuild: true,
                         direct_call: true
                     }),
                     credentials: 'include'
@@ -1549,7 +1556,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
-                        rebuild_vector: true,
+                        rebuild: true,
                         direct_call: true
                     }),
                     credentials: 'include'
