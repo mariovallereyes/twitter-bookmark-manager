@@ -10,7 +10,7 @@ from urllib.parse import urlparse, urljoin
 
 # Import custom modules
 from auth.oauth_final import OAuthManager
-from auth.user_context_final import UserContext
+from auth.user_context import UserContext
 from database.multi_user_db.user_model_final import (
     get_user_by_provider_id, 
     create_user, 

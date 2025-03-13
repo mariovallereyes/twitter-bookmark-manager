@@ -4,6 +4,10 @@ import logging
 import traceback
 from pathlib import Path
 from flask import Flask, jsonify, request, redirect, url_for, render_template_string
+from flask_cors import CORS
+from database.multi_user_db.db_final import init_database, test_connection
+from auth.auth_routes_final import auth_bp
+from auth.user_api_final import user_api_bp
 
 # Configure logging
 logging.basicConfig(
@@ -304,16 +308,11 @@ logger.info("="*50)
 # Add startup message
 logger.info("Starting with worker timeout of 2 hours for large rebuilds")
 
-# Import and register blueprints
-from auth.auth_routes_final import auth_bp
-from auth.user_api_final import user_api_bp
-
-# Register blueprints
-application.register_blueprint(auth_bp)
-application.register_blueprint(user_api_bp)
+# Register blueprints with unique names
+application.register_blueprint(auth_bp, name='auth_routes')
+application.register_blueprint(user_api_bp, name='user_api')
 
 # Initialize database
-from database.multi_user_db.db_final import init_database
 init_database()
 
 logger.info("✅ Successfully imported and configured main application") 
