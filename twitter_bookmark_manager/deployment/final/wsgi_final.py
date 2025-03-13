@@ -6,8 +6,6 @@ from pathlib import Path
 from flask import Flask, jsonify, request, redirect, url_for, render_template_string
 from flask_cors import CORS
 from database.multi_user_db.db_final import init_database
-from auth.auth_routes_final import auth_bp
-from auth.user_api_final import user_api_bp
 from datetime import datetime
 
 # Configure logging
@@ -317,10 +315,6 @@ CORS(application, resources={
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
-
-# Register blueprints with unique names
-application.register_blueprint(auth_bp, name='auth_routes')
-application.register_blueprint(user_api_bp, name='user_api')
 
 # Initialize database
 init_database()
