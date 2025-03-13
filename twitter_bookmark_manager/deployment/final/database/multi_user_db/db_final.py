@@ -610,20 +610,26 @@ def get_bookmarks_for_user(user_id):
             ORDER BY created_at DESC
         """
         
-        # Execute query
-        cursor = conn.cursor()
-        cursor.execute(query, (user_id,))
-        
-        # Process results
-        rows = cursor.fetchall()
+        # Check connection type and execute query appropriately
+        if hasattr(conn, 'execute'):
+            # This is a SQLAlchemy connection
+            logger.info("Using SQLAlchemy connection")
+            result = conn.execute(text(query), {"user_id": user_id})
+            rows = result.fetchall()
+        else:
+            # This is a psycopg2 connection
+            logger.info("Using psycopg2 connection")
+            cursor = conn.cursor()
+            cursor.execute(query, (user_id,))
+            rows = cursor.fetchall()
+            cursor.close()
+            
         logger.info(f"Found {len(rows)} bookmarks for user {user_id}")
         
         # Convert to Bookmark objects
         for row in rows:
             bookmarks.append(Bookmark.from_row(row))
             
-        cursor.close()
-        
         return bookmarks
         
     except Exception as e:
