@@ -905,7 +905,7 @@
     
     function pollProcessStatus(sessionId) {
         // Poll the status endpoint to check progress
-        fetch(`/process-status?session_id=${sessionId}`)
+        fetch(`/api/process-status?session_id=${sessionId}`)
         .then(response => response.json())
         .then(data => {
             if (data.success) {
@@ -1751,16 +1751,26 @@
               
               var errorMsg = '';
               try {
-                var response = JSON.parse(xhr.responseText);
-                errorMsg = response.error || 'Server error';
+                if (xhr.responseText.trim().startsWith('<!doctype') || xhr.responseText.trim().startsWith('<html')) {
+                  // HTML error page returned instead of JSON
+                  errorMsg = 'Server returned HTML error page instead of JSON response. Check server logs.';
+                  console.error("HTML response detected - server likely returned an error page");
+                  
+                  // Debug - log the first 100 characters of the response
+                  console.log("Response preview:", xhr.responseText.substring(0, 100));
+                } else {
+                  var response = JSON.parse(xhr.responseText);
+                  errorMsg = response.error || 'Server error';
+                }
               } catch(e) {
-                errorMsg = 'Server returned HTML instead of JSON. Check server logs.';
+                errorMsg = 'Error parsing server response: ' + e.message;
+                console.error("Response parsing error:", e);
               }
               
               $('#rebuildStatus')
                 .removeClass('alert-info alert-success')
                 .addClass('alert-danger')
-                .html('<strong>Error:</strong> ' + errorMsg);
+                .html('<strong>Error rebuilding vector store:</strong> ' + errorMsg);
               $('#startRebuildBtn').prop('disabled', false).text('Try Again');
             }
           });

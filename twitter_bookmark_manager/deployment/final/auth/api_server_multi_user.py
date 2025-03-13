@@ -130,7 +130,9 @@ app.config.update(
     PREFERRED_URL_SCHEME='https',
     MAX_CONTENT_LENGTH=32 * 1024 * 1024,  # 32MB max file size
     UPLOAD_FOLDER=UPLOADS_DIR,
-    DATABASE_DIR=DATABASE_DIR  # Add DATABASE_DIR to the configuration
+    DATABASE_DIR=DATABASE_DIR,  # Add DATABASE_DIR to the configuration
+    DB_ERROR=False,  # Default to no database errors
+    ALLOW_API_RETRY=True  # Allow API routes to retry database connections
 )
 
 # Global session status tracking
@@ -1103,6 +1105,13 @@ def process_bookmarks():
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/update-status', methods=['GET'])
+def update_status_redirect():
+    """Redirect old /update-status endpoint to /api/process-status for backwards compatibility"""
+    session_id = request.args.get('session_id')
+    logger.info(f"🔄 Redirecting /update-status to /api/process-status for session {session_id}")
+    return redirect(url_for('process_status', session_id=session_id))
+
 @app.route('/api/process-status', methods=['GET'])
 def process_status():
     """Check status of background processing"""
@@ -1167,6 +1176,18 @@ def update_database():
     try:
         # Get user ID
         user_id = current_user.user_id
+        
+        # Check database connection and try to reconnect if needed
+        if app.config.get('DB_ERROR', False) and app.config.get('ALLOW_API_RETRY', False):
+            logger.warning(f"⚠️ [API] Database issues detected, attempting reconnection for vector rebuild")
+            try:
+                # Force database reconnection
+                from database.multi_user_db.db_final import setup_database
+                setup_database(force_reconnect=True)
+                logger.info(f"✅ [API] Database reconnection successful")
+            except Exception as db_error:
+                logger.error(f"❌ [API] Database reconnection failed: {str(db_error)}")
+                # Continue anyway - the operation might still work with existing connection
         
         if direct_call:
             # Run vector rebuild directly (not recommended for production)
@@ -1253,6 +1274,30 @@ def update_database():
 
 def check_tweet_content_column():
     """Check if the tweet_content column exists in bookmarks table and add it if missing"""
+
+# Add a catch-all error handler for API routes to ensure they return JSON, not HTML
+@app.errorhandler(Exception)
+def handle_api_exception(e):
+    """
+    Handle exceptions on API routes to ensure they return JSON instead of HTML error pages
+    """
+    # Get the path to check if this is an API route
+    path = request.path if request else ""
+    
+    # Only apply JSON handling to API routes
+    if path.startswith('/api/'):
+        logger.error(f"API error on {path}: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Always return JSON for API routes
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'path': path
+        }), 500
+    
+    # For non-API routes, let the default Flask error handler manage it
+    return e
 
 # Run the app if this file is executed directly
 if __name__ == '__main__':

@@ -124,9 +124,12 @@ try:
         # Inject DB status into application config for templates
         application.config['DB_ERROR'] = True
         application.config['DB_ERROR_MESSAGE'] = db_status.get('message', 'Database connection issues')
+        # IMPORTANT: Do not redirect API calls to fallback mode, let them try to reconnect
+        application.config['ALLOW_API_RETRY'] = True
     else:
         logger.info("Full application is active with healthy database")
         application.config['DB_ERROR'] = False
+        application.config['ALLOW_API_RETRY'] = True
 except Exception as e:
     error_details = traceback.format_exc()
     application_error = str(e)
