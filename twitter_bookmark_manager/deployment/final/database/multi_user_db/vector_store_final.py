@@ -164,8 +164,11 @@ class VectorStore:
             # Generate embedding - simple approach like PythonAnywhere
             embedding = self.model.encode(text)
             
-            # Create a stable hash for the ID that combines the user ID and bookmark ID
-            point_id = f"{user_id}_{bookmark_id_str}"
+            # Create a deterministic UUID from user_id and bookmark_id
+            # Use uuid5 with a namespace to create a deterministic UUID
+            namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
+            seed = f"{user_id}_{bookmark_id_str}"
+            point_id = str(uuid.uuid5(namespace, seed))
             
             # Create payload with metadata
             payload = {
@@ -382,12 +385,13 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return False
             
-    def delete_bookmark(self, bookmark_id: int) -> bool:
+    def delete_bookmark(self, bookmark_id: int, user_id: int = None) -> bool:
         """
         Delete a specific bookmark from the vector store.
         
         Args:
             bookmark_id: ID of the bookmark to delete
+            user_id: Optional user ID for the bookmark owner
             
         Returns:
             True if successful, False otherwise
@@ -397,13 +401,34 @@ class VectorStore:
             return False
             
         try:
-            # Delete point by ID
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=rest.PointIdsList(
-                    points=[bookmark_id]
+            bookmark_id_str = str(bookmark_id)
+            
+            if user_id is not None:
+                # If user_id is provided, we can use the same ID generation as add_bookmark
+                namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
+                seed = f"{user_id}_{bookmark_id_str}"
+                point_id = str(uuid.uuid5(namespace, seed))
+                
+                # Delete point by ID
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=rest.PointIdsList(
+                        points=[point_id]
+                    )
                 )
-            )
+            else:
+                # If no user_id, we need to use payload filtering
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=rest.Filter(
+                        must=[
+                            rest.FieldCondition(
+                                key="bookmark_id", 
+                                match=rest.MatchValue(value=bookmark_id_str)
+                            )
+                        ]
+                    )
+                )
             
             logger.info(f"Deleted bookmark {bookmark_id} from vector store")
             return True
@@ -439,8 +464,7 @@ class VectorStore:
             for i in range(0, len(ids_as_strings), BATCH_SIZE):
                 batch = ids_as_strings[i:i+BATCH_SIZE]
                 
-                # Create a filter for bookmark_id field in payload instead of using point IDs
-                # This matches how we store vectors in add_bookmark method
+                # Delete using payload filtering by bookmark_id
                 self.client.delete(
                     collection_name=self.collection_name,
                     points_selector=rest.Filter(
