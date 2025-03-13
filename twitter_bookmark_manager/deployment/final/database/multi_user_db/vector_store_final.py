@@ -111,55 +111,45 @@ class VectorStore:
     def _ensure_model_loaded(self):
         """Ensure the model is loaded before using it"""
         if self.model is None:
-            self._initialize_model()
+            self._load_model()
             
-    def _initialize_model(self):
-        """Initialize the model with the most memory-efficient settings possible"""
-        # Log memory before loading
-        memory_before = self.get_memory_usage()
-        logger.info(f"Memory before model loading: {memory_before}")
-        
-        # Basic environment settings to reduce memory usage
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging
-        os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizers parallelism
-        
-        # Initialize model - use tiny model to minimize memory
+    def _load_model(self):
+        """Load the model with minimal memory footprint"""
         try:
-            logger.info(f"Initializing SentenceTransformer model with minimal memory footprint")
-            # Use smallest viable model
-            # Use all-MiniLM-L6-v2 which is the same model PythonAnywhere uses but with fp16
-            from torch import dtype as torch_dtype
-            try:
-                # Try to use half precision
-                self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
-                                               device='cpu', 
-                                               torch_dtype=torch_dtype.float16)  # Use fp16 to save memory
-                logger.info(f"Model initialized with half-precision (fp16)")
-            except Exception as e:
-                logger.warning(f"Half-precision failed: {str(e)}. Falling back to full precision.")
-                self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
-                                               device='cpu')
+            memory_before = self.get_memory_usage()
+            logger.info(f"Memory before model loading: {memory_before}MB")
             
-            logger.info(f"Model initialized successfully")
+            logger.info("Initializing SentenceTransformer model with minimal memory footprint")
             
-            # Update vector size based on the actual model
+            # Import here to avoid loading torch until needed
+            import torch
+            from sentence_transformers import SentenceTransformer
+            
+            # Force garbage collection before loading model
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+            # Use a smaller model variant
+            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L12-v2', 
+                                           device='cpu',  # Force CPU to avoid CUDA memory issues
+                                           cache_folder='/tmp/sentence_transformers')  # Use temp directory
+            
+            # Update vector size based on model
             self.vector_size = self.model.get_sentence_embedding_dimension()
             logger.info(f"Vector size updated to {self.vector_size} based on model dimension")
             
-            # Set model to evaluation mode to reduce memory usage
-            self.model.eval()
-        except Exception as e:
-            logger.error(f"Failed to initialize model: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+            # Force garbage collection after loading
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
-        # Log memory after loading
-        memory_after = self.get_memory_usage()
-        logger.info(f"Memory after model loading: {memory_after}")
-        logger.info(f"Memory increase: {float(memory_after.rstrip('MB')) - float(memory_before.rstrip('MB')):.2f}MB")
-        
-        # Force garbage collection
-        gc.collect()
+            memory_after = self.get_memory_usage()
+            memory_increase = memory_after - memory_before
+            logger.info(f"Memory after model loading: {memory_after}MB")
+            logger.info(f"Memory increase: {memory_increase}MB")
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            raise
             
     def add_bookmark(self, bookmark_id: int, text: str, user_id: int, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -418,13 +408,24 @@ class VectorStore:
             return False
             
     def _unload_model(self):
-        """Unload the model to free memory"""
-        if self.model is not None:
-            logger.info(f"Unloading model to free memory")
-            self.model = None
-            # Force garbage collection
-            gc.collect()
-            logger.info(f"Model unloaded, memory usage: {self.get_memory_usage()}")
+        """Unload model to free memory"""
+        try:
+            logger.info("Unloading model to free memory")
+            if hasattr(self, 'model'):
+                import torch
+                
+                # Delete model and clear CUDA cache
+                del self.model
+                self.model = None
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                
+                # Force garbage collection
+                gc.collect()
+                
+                memory_after = self.get_memory_usage()
+                logger.info(f"Model unloaded, memory usage: {memory_after}MB")
+        except Exception as e:
+            logger.error(f"Error unloading model: {e}")
         
     def _delete_vectors_for_user(self, user_id: int) -> bool:
         """

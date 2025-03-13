@@ -13,10 +13,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Gunicorn configuration
-timeout = 300  # 5 minutes
-workers = 2
+timeout = 600  # 10 minutes
+workers = 1    # Single worker to avoid memory competition
 worker_class = 'sync'
 keepalive = 120
+max_requests = 10    # Restart workers periodically to prevent memory leaks
+max_requests_jitter = 3
+worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
 
 logger.info("==================================================")
 logger.info("Starting Progressive WSGI Application for Railway")
