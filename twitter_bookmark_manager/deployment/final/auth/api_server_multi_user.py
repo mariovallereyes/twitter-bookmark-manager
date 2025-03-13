@@ -1159,9 +1159,9 @@ def update_database():
     Returns:
         JSON response with the result of the update
     """
-    # Check if user is authenticated
+    # Check if user is authenticated - only check if user exists
     current_user = UserContext.get_current_user()
-    if not current_user or not current_user.is_authenticated:
+    if not current_user:
         return jsonify({'error': 'Not authenticated', 'status': 'error'}), 401
         
     # Get parameters from request
@@ -1175,7 +1175,7 @@ def update_database():
     
     try:
         # Get user ID
-        user_id = current_user.user_id
+        user_id = current_user.id
         
         # Check database connection and try to reconnect if needed
         if app.config.get('DB_ERROR', False) and app.config.get('ALLOW_API_RETRY', False):
