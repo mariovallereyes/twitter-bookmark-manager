@@ -40,6 +40,9 @@ from multiprocessing import Process
 from threading import Thread
 from database.multi_user_db.vector_store_final import get_multi_user_vector_store
 from auth.user_context import get_current_user, UserContext
+from flask_login import login_required
+from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+from database.multi_user_db.db_final import get_db_connection
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -1232,6 +1235,57 @@ def update_database():
         logger.error(f"Error in update_database: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/categories/all', methods=['GET'])
+@login_required
+def get_all_categories():
+    """API endpoint to get all categories for the current user, including those with zero bookmarks"""
+    try:
+        # Get current user's ID from UserContext
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user context found for request")
+            return jsonify({
+                'status': 'error',
+                'message': 'User not authenticated'
+            }), 401
+
+        # Get database connection
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Failed to get database connection")
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection error'
+            }), 500
+        
+        try:
+            # Create search instance with user context
+            searcher = BookmarkSearchMultiUser(conn, user.id)
+            
+            # Get categories with counts
+            categories = searcher.get_categories(user_id=user.id)
+            
+            # Sort alphabetically by name
+            categories.sort(key=lambda x: x['name'])
+            
+            return jsonify({
+                'status': 'success',
+                'categories': categories
+            })
+        
+        finally:
+            # Ensure connection is properly handled
+            if hasattr(conn, 'close') and not isinstance(conn, sqlalchemy.engine.base.Engine):
+                conn.close()
+    
+    except Exception as e:
+        logger.error(f"Error getting all categories: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 def check_tweet_content_column():
     """Check if the tweet_content column exists in bookmarks table and add it if missing"""
