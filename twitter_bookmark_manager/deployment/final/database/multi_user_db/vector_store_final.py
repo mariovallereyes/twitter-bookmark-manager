@@ -108,7 +108,7 @@ class VectorStore:
             self._initialize_model()
             
     def _initialize_model(self):
-        """Initialize the model with a simple, reliable approach like PythonAnywhere"""
+        """Initialize the model with the most memory-efficient settings possible"""
         # Log memory before loading
         memory_before = self.get_memory_usage()
         logger.info(f"Memory before model loading: {memory_before}")
@@ -117,11 +117,23 @@ class VectorStore:
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging
         os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizers parallelism
         
-        # Initialize model - use same smaller model as PythonAnywhere
+        # Initialize model - use tiny model to minimize memory
         try:
-            logger.info(f"Initializing SentenceTransformer model")
-            # Use all-MiniLM-L6-v2 which is the same model PythonAnywhere uses
-            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')
+            logger.info(f"Initializing SentenceTransformer model with minimal memory footprint")
+            # Use smallest viable model
+            # Use all-MiniLM-L6-v2 which is the same model PythonAnywhere uses but with fp16
+            from torch import dtype as torch_dtype
+            try:
+                # Try to use half precision
+                self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
+                                               device='cpu', 
+                                               torch_dtype=torch_dtype.float16)  # Use fp16 to save memory
+                logger.info(f"Model initialized with half-precision (fp16)")
+            except Exception as e:
+                logger.warning(f"Half-precision failed: {str(e)}. Falling back to full precision.")
+                self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
+                                               device='cpu')
+            
             logger.info(f"Model initialized successfully")
             
             # Update vector size based on the actual model
@@ -138,6 +150,7 @@ class VectorStore:
         # Log memory after loading
         memory_after = self.get_memory_usage()
         logger.info(f"Memory after model loading: {memory_after}")
+        logger.info(f"Memory increase: {float(memory_after.rstrip('MB')) - float(memory_before.rstrip('MB')):.2f}MB")
         
         # Force garbage collection
         gc.collect()
@@ -160,9 +173,6 @@ class VectorStore:
             return False
             
         try:
-            # Ensure model is loaded
-            self._ensure_model_loaded()
-            
             # Ensure consistent ID format - convert to string
             bookmark_id_str = str(bookmark_id)
             
@@ -174,8 +184,21 @@ class VectorStore:
             # Limit text size to avoid processing extremely large texts
             text = text[:10000] if len(text) > 10000 else text
             
+            # Load model, generate embedding, then unload immediately
+            memory_before = self.get_memory_usage()
+            logger.info(f"Memory before embedding (bookmark {bookmark_id}): {memory_before}")
+            
+            # Ensure model is loaded
+            self._ensure_model_loaded()
+            
             # Generate embedding - simple approach like PythonAnywhere
             embedding = self.model.encode(text)
+            
+            # Immediately unload model to save memory
+            self._unload_model()
+            
+            memory_after = self.get_memory_usage()
+            logger.info(f"Memory after unloading model: {memory_after}")
             
             # Create a deterministic UUID from user_id and bookmark_id
             # Use uuid5 with a namespace to create a deterministic UUID
@@ -210,12 +233,14 @@ class VectorStore:
             
             # Clean up to reduce memory usage
             del embedding
+            self.clean_memory()
             
             return True
             
         except Exception as e:
             logger.error(f"Error adding bookmark {bookmark_id} to vector store: {str(e)}")
             logger.error(traceback.format_exc())
+            self._unload_model()  # Make sure to unload model even on error
             return False
             
     def find_similar(self, query: str, user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
@@ -273,9 +298,9 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, batch_size=50):
+    def rebuild_user_vectors(self, user_id, batch_size=10):
         """
-        Rebuild vector store for a specific user's bookmarks, following PythonAnywhere's approach.
+        Rebuild vector store for a specific user's bookmarks, with extreme memory optimization.
         
         Args:
             user_id: User ID whose vectors to rebuild
@@ -307,37 +332,46 @@ class VectorStore:
             logger.info(f"Clearing existing vectors for user {user_id}")
             self._delete_vectors_for_user(user_id)
             
-            # We don't need to prefilter because we'll handle empty text in the processing
-            # Process in batches to avoid memory issues
+            # Pre-filter empty bookmarks to save processing time
+            valid_bookmarks = []
+            for bookmark in bookmarks:
+                if not bookmark.text or not bookmark.text.strip():
+                    logger.info(f"⚠️ [REBUILD-{session_id}] Pre-filtering bookmark {bookmark.id} due to empty text")
+                    continue
+                valid_bookmarks.append(bookmark)
+            
+            logger.info(f"Found {len(valid_bookmarks)} valid bookmarks after filtering empty text")
+            total = len(valid_bookmarks)
+            
+            if total == 0:
+                logger.info(f"No bookmarks with text found for user {user_id}, nothing to rebuild")
+                return True
+            
+            # Process in smaller batches with extreme memory management
             success_count = 0
             error_count = 0
             
-            # Process bookmarks in batches
+            # Process bookmarks in very small batches
             for i in range(0, total, batch_size):
-                batch = bookmarks[i:i+batch_size]
+                batch = valid_bookmarks[i:i+batch_size]
                 current_batch = i//batch_size + 1
                 total_batches = (total+batch_size-1)//batch_size
                 
                 logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {current_batch}/{total_batches}: {len(batch)} bookmarks")
                 
-                # Ensure model is loaded for this batch
-                self._ensure_model_loaded()
-                
-                # Process each bookmark in the batch with individual error handling
+                # Process each bookmark in the batch individually with model load/unload for each
                 for j, bookmark in enumerate(batch):
                     try:
-                        # Skip if text is empty
-                        if not bookmark.text or not bookmark.text.strip():
-                            logger.info(f"⚠️ [REBUILD-{session_id}] Skipping bookmark {bookmark.id} due to empty text")
-                            continue
-                            
                         # Prepare metadata for the vector store
                         metadata = {
                             'author': bookmark.author_username if hasattr(bookmark, 'author_username') else None,
                             'created_at': str(bookmark.created_at) if hasattr(bookmark, 'created_at') and bookmark.created_at else None
                         }
                         
-                        # Add bookmark to vector store using the add_bookmark method
+                        # Process each bookmark independently to minimize memory usage
+                        logger.info(f"Processing bookmark {bookmark.id} ({j+1}/{len(batch)}, {i+j+1}/{total})")
+                        
+                        # Add bookmark with model loaded/unloaded per bookmark
                         self.add_bookmark(
                             bookmark_id=bookmark.id,
                             user_id=user_id,
@@ -347,22 +381,19 @@ class VectorStore:
                         
                         success_count += 1
                         
-                        # Detailed logging every 10 bookmarks
-                        if success_count % 10 == 0:
-                            logger.info(f"🔍 [REBUILD-{session_id}] Progress: {success_count}/{total} bookmarks added to vector store (Memory: {self.get_memory_usage()})")
-                            
-                        # Clean memory every 5 bookmarks to avoid OOM
-                        if j % 5 == 0:
-                            self.clean_memory()
-                            
+                        # Logging
+                        if success_count % 5 == 0:
+                            logger.info(f"🔍 [REBUILD-{session_id}] Progress: {success_count}/{total} bookmarks added (Memory: {self.get_memory_usage()})")
+                        
+                        # Force cleanup after each bookmark
+                        self.clean_memory()
+                        
                     except Exception as e:
                         error_count += 1
-                        logger.error(f"❌ [REBUILD-{session_id}] Error adding bookmark {bookmark.id} to vector store: {str(e)}")
+                        logger.error(f"❌ [REBUILD-{session_id}] Error adding bookmark {bookmark.id}: {str(e)}")
+                        self._unload_model()  # Ensure model is unloaded even after error
                 
-                # Unload model after each batch to save memory
-                self._unload_model()
-                
-                # More aggressive memory cleanup between batches
+                # Extra aggressive cleanup between batches
                 self.clean_memory()
                 logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
                 
@@ -564,10 +595,14 @@ class VectorStore:
 
     def get_memory_usage(self):
         """Get the current memory usage of the process"""
-        process = psutil.Process(os.getpid())
-        memory_info = process.memory_info()
-        memory_mb = memory_info.rss / 1024 / 1024
-        return f"{memory_mb:.2f}MB"
+        try:
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+            return f"{memory_mb:.2f}MB"
+        except Exception as e:
+            logger.error(f"Error getting memory usage: {str(e)}")
+            return "unknown"
 
     def clean_memory(self):
         """

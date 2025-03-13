@@ -23,6 +23,7 @@ from functools import wraps
 from typing import Dict, Any, Optional, List, Tuple
 import sqlite3
 import psutil
+import string
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -40,7 +41,8 @@ if parent_dir not in sys.path:
 print(f"Current directory: {os.getcwd()}")
 print(f"Python path: {sys.path}")
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g, flash
+from flask_login import current_user, login_required
 from flask.sessions import SecureCookieSessionInterface
 import uuid
 import traceback
@@ -78,7 +80,8 @@ from database.multi_user_db.update_bookmarks_final import (
     final_update_bookmarks,
     rebuild_vector_store,
     find_file_in_possible_paths,
-    get_user_directory
+    get_user_directory,
+    run_vector_rebuild
 )
 from database.multi_user_db.vector_store_final import VectorStore
 
@@ -169,67 +172,39 @@ init_status_db()
 
 # Function to save session status to the database
 def save_session_status(session_id, status_data):
-    """Save session status to the SQLite database"""
+    """
+    Save session status data to a JSON file.
+    
+    Args:
+        session_id: Unique identifier for the session
+        status_data: Dictionary with status data to save
+    """
     try:
-        # Convert Python dict to JSON string
-        data_json = json.dumps(status_data.get('data', {}))
+        # Get user ID from status data or current user
+        user_id = status_data.get('user_id')
+        if not user_id and current_user and current_user.is_authenticated:
+            user_id = current_user.id
+            status_data['user_id'] = user_id
+            
+        if not user_id:
+            logger.warning(f"No user ID found for session {session_id}")
+            return False
+            
+        # Create user directory for status files
+        from deployment.final.util import get_user_directory
+        user_dir = get_user_directory(user_id)
+        os.makedirs(user_dir, exist_ok=True)
         
-        conn = sqlite3.connect(STATUS_DB_PATH)
-        cursor = conn.cursor()
-        
-        # Check if session exists
-        cursor.execute("SELECT 1 FROM session_status WHERE session_id = ?", (session_id,))
-        exists = cursor.fetchone() is not None
-        
-        now = datetime.now().isoformat()
-        
-        if exists:
-            # Update existing record
-            cursor.execute('''
-            UPDATE session_status SET
-                status = ?,
-                message = ?,
-                timestamp = ?,
-                is_complete = ?,
-                success = ?,
-                data = ?,
-                updated_at = ?
-            WHERE session_id = ?
-            ''', (
-                status_data.get('status', 'unknown'),
-                status_data.get('message', ''),
-                status_data.get('timestamp', now),
-                1 if status_data.get('is_complete', False) else 0,
-                1 if status_data.get('success', False) else 0,
-                data_json,
-                now,
-                session_id
-            ))
-        else:
-            # Insert new record
-            cursor.execute('''
-            INSERT INTO session_status
-            (session_id, user_id, status, message, timestamp, is_complete, success, data, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                session_id,
-                status_data.get('user_id', ''),
-                status_data.get('status', 'unknown'),
-                status_data.get('message', ''),
-                status_data.get('timestamp', now),
-                1 if status_data.get('is_complete', False) else 0,
-                1 if status_data.get('success', False) else 0,
-                data_json,
-                now,
-                now
-            ))
-        
-        conn.commit()
-        conn.close()
+        # Create status file
+        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+        with open(status_file, 'w') as f:
+            json.dump(status_data, f)
+            
+        logger.debug(f"Saved status for session {session_id}: {status_data.get('status', 'unknown')}")
         return True
+        
     except Exception as e:
         logger.error(f"Error saving session status: {str(e)}")
-        logger.error(traceback.format_exc())
         return False
 
 # Function to get session status from the database
@@ -1169,873 +1144,99 @@ def process_status():
 @app.route('/update-database', methods=['POST'])
 def update_database():
     """
-    Update the database with bookmarks, with option to rebuild vector store
+    Update the database with bookmarks.
+    
+    JSON Parameters:
+        rebuild (bool): If True, rebuild the vector store. Default is False.
+        direct_call (bool): If True, execute rebuild directly. Default is False.
+    
+    Returns:
+        JSON response
     """
-    try:
-        # Get user info using UserContext
-        user = UserContext.get_current_user()
-        if not user:
-            logger.error("No user found for database update - UserContext check failed")
-            return jsonify({'success': False, 'error': 'User not authenticated'}), 401
-            
-        user_id = user.id
-        logger.info(f"Processing database update for user {user_id}")
-        
-        # Get rebuild flag - default to FALSE to avoid memory issues
-        data = request.get_json(silent=True) or {}
-        rebuild = data.get('rebuild', False)  # Change default to False
-        direct_call = data.get('direct_call', False)
-        
-        if not rebuild:
-            logger.info(f"Rebuild flag set to false, skipping for user {user_id}")
-            return jsonify({
-                'success': True,
-                'message': 'No changes made to vector database (rebuild=false)'
-            })
-            
-        # Create session ID for this rebuild
-        session_id = str(uuid.uuid4())
-        logger.info(f"Vector rebuild session {session_id} started for user {user_id}")
-        
-        # Call vector rebuild function
+    if not current_user.is_authenticated:
+        flash('You need to be logged in to update the database.', 'error')
+        return jsonify({'error': 'Not authenticated', 'success': False}), 401
+    
+    # Default rebuild to False to avoid memory issues
+    rebuild = request.json.get('rebuild', False) if request.is_json else False
+    direct_call = request.json.get('direct_call', False) if request.is_json else False
+    
+    # Use the user's session token as the session ID for tracking
+    session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    save_session_status(session_id, {'status': 'started', 'timestamp': time.time()})
+    
+    logger.info(f"Update database requested by user {current_user.id}, rebuild={rebuild}, direct_call={direct_call}")
+    
+    # If vector rebuilding is requested
+    if rebuild:
         try:
             if direct_call:
-                # Use the direct approach from update_bookmarks_final
-                logger.info(f"Using direct rebuild call for user {user_id}")
+                # Direct approach (may be memory intensive)
+                logger.info(f"Direct vector rebuild requested by user {current_user.id}")
                 
-                # Import the rebuild function
-                from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
-                
-                # Execute the rebuild function
-                result = rebuild_vector_store(user_id=user_id, session_id=session_id)
-                
-                if result.get('success', False):
-                    logger.info(f"Direct vector rebuild successful for user {user_id}")
-                    return jsonify({
-                        'success': True,
-                        'message': result.get('message', 'Vector database rebuilt successfully'),
-                        'details': result
-                    })
-                else:
-                    logger.error(f"Direct vector rebuild failed for user {user_id}: {result.get('error', 'Unknown error')}")
-                    return jsonify({
-                        'success': False,
-                        'error': result.get('error', 'Failed to rebuild vector database'),
-                        'details': result
-                    }), 500
-            else:
-                # Use the vector store class directly
-                logger.info(f"Using vector store class for rebuild (user {user_id})")
-                
-                # Import and get the vector store instance
                 try:
-                    from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                    from deployment.final.database.multi_user_db.vector_store_final import get_multi_user_vector_store
                     vector_store = get_multi_user_vector_store()
-                except ImportError:
-                    # Fall back to regular get_vector_store if the multi-user version isn't available
-                    try:
-                        from database.multi_user_db.vector_store_final import get_vector_store
-                        vector_store = get_vector_store()
-                    except Exception as import_error:
-                        logger.error(f"Failed to import vector store: {str(import_error)}")
-                        return jsonify({'success': False, 'error': f'Vector store import failed: {str(import_error)}'}), 500
-                
-                if not vector_store:
-                    logger.error(f"Failed to get vector store for user {user_id}")
-                    return jsonify({'success': False, 'error': 'Vector store initialization failed'}), 500
                     
-                # Check for tweet_content column
-                try:
-                    check_tweet_content_column()
-                except Exception as column_error:
-                    logger.warning(f"Issue with tweet_content column check: {str(column_error)}")
-                    # Continue as this is non-critical
-                
-                # Initiate rebuild with timeout protection
-                try:
-                    # Set a timeout for the operation (5 minutes)
-                    max_time = 300  # seconds
-                    start_time = time.time()
-                    
-                    # Initiate rebuild
-                    result = vector_store.rebuild_user_vectors(user_id=user_id)
-                    
-                    # Check how long it took
-                    elapsed_time = time.time() - start_time
-                    logger.info(f"Vector rebuild took {elapsed_time:.2f} seconds for user {user_id}")
-                    
-                    if result.get('success'):
-                        logger.info(f"Vector rebuild successful for user {user_id}: {result.get('message', '')}")
-                        return jsonify({
-                            'success': True,
-                            'message': result.get('message', 'Vector database rebuilt successfully'),
-                            'details': result,
-                            'elapsed_time': elapsed_time
-                        })
+                    # Check if vector store initialized correctly
+                    if hasattr(vector_store, 'rebuild_user_vectors'):
+                        logger.info(f"Starting vector rebuild for user {current_user.id}")
+                        success = vector_store.rebuild_user_vectors(current_user.id)
+                        
+                        if success:
+                            logger.info(f"Vector rebuild completed for user {current_user.id}")
+                            save_session_status(session_id, {'status': 'completed', 'timestamp': time.time()})
+                            return jsonify({'success': True, 'message': 'Vector store rebuilt successfully'})
+                        else:
+                            logger.error(f"Vector rebuild failed for user {current_user.id}")
+                            save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': 'Vector rebuild failed'})
+                            return jsonify({'success': False, 'error': 'Vector rebuild failed'})
                     else:
-                        logger.error(f"Vector rebuild failed for user {user_id}: {result.get('error', '')}")
-                        return jsonify({
-                            'success': False,
-                            'error': result.get('error', 'Failed to rebuild vector database'),
-                            'details': result,
-                            'elapsed_time': elapsed_time
-                        }), 500
-                except Exception as rebuild_inner_error:
-                    logger.error(f"Exception during vector rebuild for user {user_id}: {str(rebuild_inner_error)}")
-                    logger.error(traceback.format_exc())
-                    return jsonify({
-                        'success': False,
-                        'error': f'Vector rebuild inner error: {str(rebuild_inner_error)}',
-                        'details': {
-                            'traceback': traceback.format_exc()
-                        }
-                    }), 500
+                        logger.error(f"Vector store does not have rebuild_user_vectors method")
+                        save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': 'Vector store initialization failed'})
+                        return jsonify({'success': False, 'error': 'Vector store initialization failed'})
+                        
+                except ImportError as e:
+                    logger.error(f"Import error: {str(e)}")
+                    save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': f'Import error: {str(e)}'})
+                    return jsonify({'success': False, 'error': f'Import error: {str(e)}'})
+                    
+                except Exception as e:
+                    logger.error(f"Error during vector rebuild: {str(e)}")
+                    save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': f'Error: {str(e)}'})
+                    return jsonify({'success': False, 'error': f'Error: {str(e)}'})
+            else:
+                # Background approach using a separate process
+                logger.info(f"Background vector rebuild requested by user {current_user.id}")
                 
-        except Exception as rebuild_error:
-            logger.error(f"Vector rebuild error for user {user_id}: {str(rebuild_error)}")
-            logger.error(traceback.format_exc())
-            return jsonify({
-                'success': False,
-                'error': f'Vector rebuild error: {str(rebuild_error)}'
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Error in update_database: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)}), 500
+                try:
+                    from deployment.final.database.multi_user_db.update_bookmarks_final import run_vector_rebuild
+                    
+                    # Start background rebuild
+                    thread = threading.Thread(target=run_vector_rebuild, args=(current_user.id, session_id))
+                    thread.daemon = True
+                    thread.start()
+                    
+                    logger.info(f"Background vector rebuild started for user {current_user.id}")
+                    save_session_status(session_id, {'status': 'processing', 'timestamp': time.time()})
+                    return jsonify({'success': True, 'session_id': session_id, 'message': 'Vector rebuild started in background'})
+                    
+                except Exception as e:
+                    logger.error(f"Error starting background rebuild: {str(e)}")
+                    save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': f'Error: {str(e)}'})
+                    return jsonify({'success': False, 'error': f'Error starting background process: {str(e)}'})
+        except Exception as e:
+            logger.error(f"Unexpected error in vector rebuild: {str(e)}")
+            save_session_status(session_id, {'status': 'failed', 'timestamp': time.time(), 'error': f'Unexpected error: {str(e)}'})
+            return jsonify({'success': False, 'error': f'Unexpected error: {str(e)}'})
+    else:
+        # Skip vector rebuilding entirely, just return success
+        logger.info(f"Vector rebuild skipped (rebuild=False) for user {current_user.id}")
+        save_session_status(session_id, {'status': 'completed', 'timestamp': time.time(), 'message': 'Vector rebuild skipped'})
+        return jsonify({'success': True, 'message': 'Vector rebuild skipped per request', 'session_id': session_id})
 
 def check_tweet_content_column():
     """Check if the tweet_content column exists in bookmarks table and add it if missing"""
-    try:
-        conn = get_db_connection()
-        
-        # Check if we got a SQLAlchemy connection or a psycopg2 connection
-        is_sqlalchemy_conn = hasattr(conn, 'execute') and not hasattr(conn, 'cursor')
-        
-        if is_sqlalchemy_conn:
-            # Using SQLAlchemy connection
-            # Check if column exists
-            result = conn.execute(text("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='bookmarks' AND column_name='tweet_content'
-            """))
-            
-            if result.fetchone() is None:
-                # Add tweet_content column if it doesn't exist
-                logger.info("Adding tweet_content column to bookmarks table")
-                conn.execute(text("""
-                    ALTER TABLE bookmarks ADD COLUMN IF NOT EXISTS tweet_content TEXT
-                """))
-                conn.commit()
-                logger.info("tweet_content column added successfully")
-        else:
-            # Using raw psycopg2 connection
-            cursor = conn.cursor()
-            
-            # Check if column exists
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='bookmarks' AND column_name='tweet_content'
-            """)
-            
-            if cursor.fetchone() is None:
-                # Add tweet_content column if it doesn't exist
-                logger.info("Adding tweet_content column to bookmarks table")
-                cursor.execute("""
-                    ALTER TABLE bookmarks ADD COLUMN IF NOT EXISTS tweet_content TEXT
-                """)
-                conn.commit()
-                logger.info("tweet_content column added successfully")
-        
-    except Exception as e:
-        logger.error(f"Error checking tweet_content column: {e}")
-        logger.error(traceback.format_exc())
-
-@app.route('/search')
-def search():
-    """Search bookmarks by query or category"""
-    logger.info("Search route accessed")
-    user = UserContext.get_current_user()
-    
-    # DEBUG: Log user information
-    if user:
-        logger.info(f"USER DEBUG - Search route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
-    else:
-        logger.info("USER DEBUG - Search route - No authenticated user")
-    
-    if not user:
-        logger.info("User not authenticated, redirecting to login")
-        return redirect(url_for('auth.login'))
-    
-    # Get search parameters
-    query = request.args.get('q', '')
-    user_query = request.args.get('user', '')
-    category_filter = request.args.getlist('categories[]')
-    
-    logger.info(f"Search params: query='{query}', user='{user_query}', categories={category_filter}")
-    
-    # Get categories for the sidebar
-    categories = []
-    results = []
-    total_results = 0
-    error_message = None
-    
-    try:
-        # Connect to database
-        conn = get_db_connection()
-        try:
-            # Create a searcher instance
-            searcher = BookmarkSearchMultiUser(conn, user.id)
-            
-            # Get categories for sidebar
-            categories = searcher.get_categories()
-            
-            # Convert category names to IDs if needed
-            category_ids = []
-            if category_filter:
-                # Find category IDs by name
-                for cat_name in category_filter:
-                    for cat in categories:
-                        if cat['name'] == cat_name:
-                            category_ids.append(cat['id'])
-                            break
-            
-            # Perform search
-            logger.info(f"Executing search with query: '{query}', categories: {category_ids}")
-            results = searcher.search(
-                query=query, 
-                user=user_query, 
-                category_ids=category_ids, 
-                limit=100
-            )
-            logger.info(f"Search returned {len(results)} results")
-            
-            # FALLBACK: If no bookmarks found for this user, try with system user
-            if len(results) == 0 and user.id != 1:
-                logger.warning(f"No search results found for user {user.id}, falling back to system bookmarks")
-                
-                # Try with user_id = 1 (system user)
-                system_searcher = BookmarkSearchMultiUser(conn, 1)
-                results = system_searcher.search(
-                    query=query, 
-                    user=user_query, 
-                    category_ids=category_ids, 
-                    limit=100
-                )
-                logger.info(f"System user search returned {len(results)} results")
-                
-                # If still no results, try with a direct query for ANY matching bookmarks
-                if len(results) == 0:
-                    logger.warning("No system bookmarks found in search, trying direct query")
-                    
-                    # Build a direct query
-                    direct_query = """
-                    SELECT id, bookmark_id, text, author, created_at, author_id
-                    FROM bookmarks
-                    WHERE 1=1
-                    """
-                    
-                    params = []
-                    
-                    if query:
-                        direct_query += " AND text ILIKE %s"
-                        params.append(f"%{query}%")
-                    
-                    if user_query:
-                        direct_query += " AND author ILIKE %s"
-                        params.append(f"%{user_query}%")
-                        
-                    direct_query += " ORDER BY created_at DESC LIMIT 100"
-                    
-                    if isinstance(conn, sqlalchemy.engine.Connection):
-                        stmt = text(direct_query)
-                        result_proxy = conn.execute(stmt, params)
-                        rows = result_proxy.fetchall()
-                    else:
-                        cursor = conn.cursor()
-                        cursor.execute(direct_query, params)
-                        rows = cursor.fetchall()
-                        
-                    # Format the direct query results
-                    for row in rows:
-                        bookmark = {
-                            'id': row[0],
-                            'bookmark_id': row[1],
-                            'text': row[2],
-                            'author': row[3],
-                            'author_username': row[3].replace('@', '') if row[3] else '',
-                            'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                            'author_id': row[5]
-                        }
-                        results.append(bookmark)
-                        
-                    logger.info(f"Direct search query found {len(results)} bookmarks")
-            
-            total_results = len(results)
-            
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        logger.error(traceback.format_exc())
-        error_message = str(e)
-    
-    # Check if user is admin
-    is_admin = getattr(user, 'is_admin', False)
-    
-    # Render template with results
-    return render_template(
-        'index_final.html',
-        categories=categories,
-        results=results,
-        query=query,
-        user_query=user_query,
-        category_filter=category_filter,
-        showing_results=len(results),
-        total_results=total_results,
-        is_recent=False,
-        user=user,
-        is_admin=is_admin,
-        db_error=bool(error_message),
-        error_message=error_message
-    )
-
-@app.route('/recent')
-def recent():
-    """Show recent bookmarks"""
-    logger.info("Recent bookmarks route accessed")
-    user = UserContext.get_current_user()
-    
-    # DEBUG: Log user information
-    if user:
-        logger.info(f"USER DEBUG - Recent route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
-    else:
-        logger.info("USER DEBUG - Recent route - No authenticated user")
-    
-    if not user:
-        logger.info("User not authenticated, redirecting to login")
-        return redirect(url_for('auth.login'))
-    
-    # Get categories for the sidebar
-    categories = []
-    results = []
-    error_message = None
-    
-    try:
-        # Connect to database
-        conn = get_db_connection()
-        try:
-            # Create a searcher instance
-            searcher = BookmarkSearchMultiUser(conn, user.id)
-            
-            # Get categories for sidebar
-            categories = searcher.get_categories()
-            
-            # Get recent bookmarks
-            results = searcher.get_recent_bookmarks(limit=100)
-            logger.info(f"Recent bookmarks query returned {len(results)} results")
-            
-            # FALLBACK: If no bookmarks found for this user, try with system user
-            if len(results) == 0 and user.id != 1:
-                logger.warning(f"No recent bookmarks found for user {user.id}, falling back to system bookmarks")
-                
-                # Try with user_id = 1 (system user)
-                system_searcher = BookmarkSearchMultiUser(conn, 1)
-                results = system_searcher.get_recent_bookmarks(limit=100)
-                logger.info(f"System user recent bookmarks returned {len(results)} results")
-                
-                # If still no results, try with a direct query for ANY bookmarks
-                if len(results) == 0:
-                    logger.warning("No system bookmarks found, trying direct query for any bookmarks")
-                    
-                    # Direct query for any bookmarks
-                    direct_query = """
-                    SELECT id, bookmark_id, text, author, created_at, author_id
-                    FROM bookmarks
-                    ORDER BY created_at DESC
-                    LIMIT 100
-                    """
-                    
-                    if isinstance(conn, sqlalchemy.engine.Connection):
-                        result_proxy = conn.execute(text(direct_query))
-                        rows = result_proxy.fetchall()
-                    else:
-                        cursor = conn.cursor()
-                        cursor.execute(direct_query)
-                        rows = cursor.fetchall()
-                        
-                    # Format the direct query results
-                    for row in rows:
-                        bookmark = {
-                            'id': row[0],
-                            'bookmark_id': row[1],
-                            'text': row[2],
-                            'author': row[3],
-                            'author_username': row[3].replace('@', '') if row[3] else '',
-                            'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                            'author_id': row[5]
-                        }
-                        results.append(bookmark)
-                        
-                    logger.info(f"Direct query found {len(results)} bookmarks")
-            
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error(f"Recent bookmarks error: {e}")
-        logger.error(traceback.format_exc())
-        error_message = str(e)
-    
-    # Check if user is admin
-    is_admin = getattr(user, 'is_admin', False)
-    
-    # Render template with results
-    return render_template(
-        'index_final.html',
-        categories=categories,
-        results=results,
-        query='',
-        user_query='',
-        category_filter=[],
-        showing_results=len(results),
-        total_results=len(results),
-        is_recent=True,
-        user=user,
-        is_admin=is_admin,
-        db_error=bool(error_message),
-        error_message=error_message
-    )
-
-@app.route('/category/<category_name>')
-def category(category_name):
-    """Show bookmarks for a specific category"""
-    logger.info(f"Category route accessed for: {category_name}")
-    user = UserContext.get_current_user()
-    
-    # DEBUG: Log user information
-    if user:
-        logger.info(f"USER DEBUG - Category route - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
-    else:
-        logger.info("USER DEBUG - Category route - No authenticated user")
-    
-    if not user:
-        logger.info("User not authenticated, redirecting to login")
-        return redirect(url_for('auth.login'))
-    
-    # Get categories for the sidebar
-    categories = []
-    results = []
-    error_message = None
-    category_id = None
-    
-    try:
-        # Connect to database
-        conn = get_db_connection()
-        try:
-            # Create a searcher instance
-            searcher = BookmarkSearchMultiUser(conn, user.id)
-            
-            # Get categories for sidebar
-            categories = searcher.get_categories()
-            
-            # Find category ID by name
-            for cat in categories:
-                if cat['name'] == category_name:
-                    category_id = cat['id']
-                    break
-            
-            if category_id:
-                # Perform search by category
-                logger.info(f"Searching bookmarks for category: {category_name} (ID: {category_id}")
-                results = searcher.search(
-                    query='', 
-                    user='', 
-                    category_ids=[category_id], 
-                    limit=100
-                )
-                logger.info(f"Found {len(results)} bookmarks for category: {category_name}")
-                
-                # FALLBACK: If no bookmarks found for this user, try with system user
-                if len(results) == 0 and user.id != 1:
-                    logger.warning(f"No category results found for user {user.id}, falling back to system bookmarks")
-                    
-                    # Try with system user (user_id = 1)
-                    system_searcher = BookmarkSearchMultiUser(conn, 1)
-                    
-                    # Try to find the category again using system user's categories
-                    system_categories = system_searcher.get_categories()
-                    system_category_id = None
-                    
-                    for cat in system_categories:
-                        if cat['name'] == category_name:
-                            system_category_id = cat['id']
-                            break
-                    
-                    if system_category_id:
-                        results = system_searcher.search(
-                            query='', 
-                            user='', 
-                            category_ids=[system_category_id], 
-                            limit=100
-                        )
-                        logger.info(f"System user category search returned {len(results)} results")
-                    
-                    # If still no results or category not found, try a direct query
-                    if len(results) == 0:
-                        logger.warning("No system category results, trying direct query by category name")
-                        
-                        # Direct query by category name
-                        direct_query = """
-                        SELECT b.id, b.bookmark_id, b.text, b.author, b.created_at, b.author_id
-                        FROM bookmarks b
-                        JOIN bookmark_categories bc ON b.id = bc.bookmark_id
-                        JOIN categories c ON bc.category_id = c.id
-                        WHERE c.name = %s
-                        ORDER BY b.created_at DESC
-                        LIMIT 100
-                        """
-                        
-                        if isinstance(conn, sqlalchemy.engine.Connection):
-                            stmt = text(direct_query)
-                            result_proxy = conn.execute(stmt, [category_name])
-                            rows = result_proxy.fetchall()
-                        else:
-                            cursor = conn.cursor()
-                            cursor.execute(direct_query, (category_name,))
-                            rows = cursor.fetchall()
-                            
-                        # Format the direct query results
-                        for row in rows:
-                            bookmark = {
-                                'id': row[0],
-                                'bookmark_id': row[1],
-                                'text': row[2],
-                                'author': row[3],
-                                'author_username': row[3].replace('@', '') if row[3] else '',
-                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                                'author_id': row[5]
-                            }
-                            results.append(bookmark)
-                            
-                        logger.info(f"Direct category query found {len(results)} bookmarks")
-            else:
-                logger.warning(f"Category not found: {category_name}")
-                
-                # Try to find any bookmarks with this category name across all users
-                logger.info(f"Trying to find category '{category_name}' for any user")
-                
-                direct_query = """
-                SELECT c.id, c.user_id
-                FROM categories c
-                WHERE c.name = %s
-                LIMIT 1
-                """
-                
-                if isinstance(conn, sqlalchemy.engine.Connection):
-                    stmt = text(direct_query)
-                    result = conn.execute(stmt, [category_name])
-                    row = result.fetchone()
-                else:
-                    cursor = conn.cursor()
-                    cursor.execute(direct_query, (category_name,))
-                    row = cursor.fetchone()
-                
-                if row:
-                    any_category_id = row[0]
-                    category_user_id = row[1]
-                    logger.info(f"Found category '{category_name}' (ID: {any_category_id}) for user {category_user_id}")
-                    
-                    # Create a searcher for this user
-                    alternate_searcher = BookmarkSearchMultiUser(conn, category_user_id)
-                    results = alternate_searcher.search(
-                        query='', 
-                        user='', 
-                        category_ids=[any_category_id], 
-                        limit=100
-                    )
-                    logger.info(f"Found {len(results)} bookmarks for category '{category_name}' from user {category_user_id}")
-                
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error(f"Category view error: {e}")
-        logger.error(traceback.format_exc())
-        error_message = str(e)
-    
-    # Check if user is admin
-    is_admin = getattr(user, 'is_admin', False)
-    
-    # Render template with results
-    return render_template(
-        'index_final.html',
-        categories=categories,
-        results=results,
-        query='',
-        user_query='',
-        category_filter=[category_name],
-        showing_results=len(results),
-        total_results=len(results),
-        is_recent=False,
-        user=user,
-        is_admin=is_admin,
-        db_error=bool(error_message),
-        error_message=error_message
-    )
-
-# Add a debug route for direct database inspection
-@app.route('/debug/database')
-def debug_database():
-    """Debug route to directly check database contents"""
-    user = UserContext.get_current_user()
-    
-    # Only allow this for authenticated users
-    if not user:
-        return jsonify({"error": "Authentication required"}), 401
-        
-    # Build debug information
-    debug_info = {
-        "user": {
-            "id": user.id if user else None,
-            "username": getattr(user, 'username', 'unknown') if user else None
-        },
-        "database": {}
-    }
-    
-    try:
-        # Connect to database
-        conn = get_db_connection()
-        try:
-            # Get table counts
-            tables = ['users', 'bookmarks', 'categories', 'bookmark_categories']
-            for table in tables:
-                cursor = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
-                debug_info['database'][f'{table}_count'] = cursor.scalar()
-                
-            # Check bookmarks for this user
-            cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id = :user_id"), {"user_id": user.id})
-            debug_info['database']['user_bookmarks_count'] = cursor.scalar()
-            
-            # Get a few sample bookmarks
-            cursor = conn.execute(text("SELECT id, bookmark_id, text, author, created_at FROM bookmarks LIMIT 5"))
-            samples = []
-            for row in cursor:
-                samples.append({
-                    "id": row[0],
-                    "bookmark_id": row[1],
-                    "text": row[2][:50] + "..." if row[2] and len(row[2]) > 50 else row[2],
-                    "author": row[3],
-                    "created_at": str(row[4])
-                })
-            debug_info['database']['sample_bookmarks'] = samples
-            
-            # Get user's bookmarks sample
-            cursor = conn.execute(
-                text("SELECT id, bookmark_id, text, author, created_at FROM bookmarks WHERE user_id = :user_id LIMIT 5"), 
-                {"user_id": user.id}
-            )
-            user_samples = []
-            for row in cursor:
-                user_samples.append({
-                    "id": row[0],
-                    "bookmark_id": row[1],
-                    "text": row[2][:50] + "..." if row[2] and len(row[2]) > 50 else row[2],
-                    "author": row[3],
-                    "created_at": str(row[4])
-                })
-            debug_info['database']['user_sample_bookmarks'] = user_samples
-            
-        finally:
-            conn.close()
-            
-        return jsonify(debug_info)
-    except Exception as e:
-        logger.error(f"Debug route error: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
-
-@app.route('/update-status', methods=['GET'])
-def update_status():
-    """
-    Get the status of a background update job
-    """
-    try:
-        # Get session ID from query parameters
-        session_id = request.args.get('session_id')
-        if not session_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing session_id parameter'
-            }), 400
-            
-        # Get status from database
-        status_data = get_session_status(session_id)
-        if not status_data:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid session_id or job expired'
-            }), 404
-            
-        # Get user context - with fallback methods
-        user_id = None
-        
-        # Try different ways to get user_id
-        if hasattr(g, 'user_context') and g.user_context and g.user_context.user_id:
-            user_id = g.user_context.user_id
-        elif 'user_id' in session:
-            user_id = session['user_id']
-        elif hasattr(g, 'user') and g.user and hasattr(g.user, 'id'):
-            user_id = g.user.id
-        elif 'user' in session and isinstance(session['user'], dict) and 'id' in session['user']:
-            user_id = session['user']['id']
-            
-        if not user_id:
-            logger.error("No user_id found in context, session, or user object")
-            return jsonify({
-                'success': False,
-                'error': 'User not authenticated or user ID not found'
-            }), 401
-            
-        # Security check - only allow access to your own jobs or skip for admin users
-        job_user_id = str(status_data.get('user_id', ''))
-        if str(user_id) != job_user_id and not is_admin_user(user_id):
-            logger.warning(f"Unauthorized access attempt: User {user_id} tried to access job for user {job_user_id}")
-            return jsonify({
-                'success': False,
-                'error': 'Unauthorized access to job status'
-            }), 403
-            
-        # Return status data
-        return jsonify({
-            'success': True,
-            'session_id': session_id,
-            'status': status_data
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in update_status: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# Helper function to check if user is admin        
-def is_admin_user(user_id):
-    """Check if the given user_id belongs to an admin user"""
-    try:
-        # Implement your admin check logic here
-        # For example, check against a list of admin user IDs or a database field
-        admin_users = [1, 2, 3]  # Replace with your admin user IDs
-        return int(user_id) in admin_users
-    except Exception as e:
-        logger.error(f"Error checking admin status: {str(e)}")
-        return False
-
-# Add error handlers to capture all exceptions
-@app.errorhandler(Exception)
-def handle_exception(e):
-    """Handle all unhandled exceptions"""
-    # Log the error and stacktrace
-    logger.error(f"Unhandled exception: {e}")
-    logger.exception(e)
-    
-    # Return a generic server error response
-    return jsonify({
-        'error': 'Internal Server Error',
-        'message': str(e)
-    }), 500
-
-@app.route('/api/user-info', methods=['GET'])
-@login_required
-def api_user_info():
-    """API endpoint to get current user information.
-    This is used by the frontend to check if the user is authenticated.
-    """
-    try:
-        # Get the current user from session
-        user_id = session.get('user_id')
-        if not user_id:
-            return jsonify({
-                'error': 'Not authenticated',
-                'authenticated': False
-            }), 401
-
-        # Get user details from database
-        user = get_user_by_id(get_db_connection(), user_id)
-        if not user:
-            return jsonify({
-                'error': 'User not found',
-                'authenticated': False
-            }), 404
-
-        # Return user info (excluding sensitive data)
-        return jsonify({
-            'authenticated': True,
-            'user_id': user_id,
-            'username': user.username,
-            'is_admin': is_admin_user(user_id),
-            'profile_picture': user.profile_picture if hasattr(user, 'profile_picture') else None
-        })
-    except Exception as e:
-        logger.error(f"Error in user info API: {str(e)}")
-        return jsonify({
-            'error': 'Internal server error',
-            'message': str(e),
-            'authenticated': False
-        }), 500
-
-# Add API endpoint for categories
-@app.route('/api/categories', methods=['GET'])
-@login_required
-def api_categories():
-    """API endpoint to get categories for the current user."""
-    try:
-        # Get the current user from session
-        user_id = session.get('user_id')
-        if not user_id:
-            return jsonify({
-                'error': 'Not authenticated'
-            }), 401
-
-        # Get categories from database
-        categories = get_categories_for_user(user_id)
-        
-        # Return categories as JSON
-        return jsonify({
-            'success': True,
-            'categories': [
-                {
-                    'name': category.name,
-                    'count': category.bookmark_count if hasattr(category, 'bookmark_count') else 0
-                }
-                for category in categories
-            ]
-        })
-    except Exception as e:
-        logger.error(f"Error in categories API: {str(e)}")
-        return jsonify({
-            'error': 'Internal server error',
-            'message': str(e)
-        }), 500
-
-# Add authentication check endpoint
-@app.route('/check-auth', methods=['GET'])
-def check_auth():
-    """Simple endpoint to check if user is authenticated."""
-    if 'user_id' in session:
-        return jsonify({
-            'authenticated': True,
-            'user_id': session['user_id']
-        })
-    else:
-        return jsonify({
-            'authenticated': False
-        }), 401
 
 # Run the app if this file is executed directly
 if __name__ == '__main__':
