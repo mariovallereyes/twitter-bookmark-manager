@@ -117,7 +117,7 @@ class VectorStore:
         """Load the model optimized for performance with 32GB memory"""
         try:
             memory_before = self.get_memory_usage()
-            logger.info(f"Memory before model loading: {memory_before}MB")
+            logger.info(f"Memory before model loading: {memory_before:.2f}MB")
             
             # Import here to avoid loading torch until needed
             import torch
@@ -137,8 +137,8 @@ class VectorStore:
             
             memory_after = self.get_memory_usage()
             memory_increase = memory_after - memory_before
-            logger.info(f"Memory after model loading: {memory_after}MB")
-            logger.info(f"Memory increase: {memory_increase}MB")
+            logger.info(f"Memory after model loading: {memory_after:.2f}MB")
+            logger.info(f"Memory increase: {memory_increase:.2f}MB")
             
         except Exception as e:
             logger.error(f"Error loading model: {e}")
@@ -406,7 +406,7 @@ class VectorStore:
                 gc.collect()
                 
                 memory_after = self.get_memory_usage()
-                logger.info(f"Model unloaded, memory usage: {memory_after}MB")
+                logger.info(f"Model unloaded, memory usage: {memory_after:.2f}MB")
         except Exception as e:
             logger.error(f"Error unloading model: {e}")
         
@@ -580,15 +580,15 @@ class VectorStore:
             return {"error": str(e)}
 
     def get_memory_usage(self):
-        """Get the current memory usage of the process"""
+        """Get the current memory usage of the process in MB as a float"""
         try:
             process = psutil.Process(os.getpid())
             memory_info = process.memory_info()
             memory_mb = memory_info.rss / 1024 / 1024
-            return f"{memory_mb:.2f}MB"
+            return memory_mb
         except Exception as e:
             logger.error(f"Error getting memory usage: {str(e)}")
-            return "unknown"
+            return 0.0
 
     def clean_memory(self):
         """
@@ -622,7 +622,7 @@ class VectorStore:
         
         # Log memory usage after cleanup
         memory_after = self.get_memory_usage()
-        logger.debug(f"Memory cleanup: {memory_before} → {memory_after}")
+        logger.debug(f"Memory cleanup: {memory_before:.2f}MB → {memory_after:.2f}MB")
 
 # Create a singleton instance
 _vector_store_instance = None
@@ -667,8 +667,8 @@ def get_multi_user_vector_store(persist_directory=None):
     return get_vector_store(None)  # Force in-memory mode
 
 def get_memory_usage():
-    """Get current memory usage as a formatted string"""
+    """Get current memory usage in MB as a float"""
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     memory_mb = memory_info.rss / (1024 * 1024)  # Convert to MB
-    return f"{memory_mb:.1f}MB" 
+    return memory_mb 
