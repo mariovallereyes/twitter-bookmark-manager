@@ -1169,6 +1169,8 @@ def process_status():
 def update_database():
     """Update the vector database for the current user"""
     try:
+        # Get current user from our context
+        current_user = UserContext.get_current_user()
         if not current_user:
             return jsonify({"error": "Not authenticated"}), 401
             
