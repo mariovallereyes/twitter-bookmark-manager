@@ -20,7 +20,7 @@ import hashlib
 import time
 
 # Import the Bookmark model and db_session
-from .db_final import db_session, get_db_session
+from .db_final import db_session, get_db_session, get_bookmarks_for_user
 from .models_final import Bookmark
 from .vector_store_final import VectorStore  # Add import for the vector store
 
@@ -309,120 +309,135 @@ def rebuild_vector_store(user_id=None, session_id=None):
         vector_store = VectorStore()
         logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
         
-        # Get all bookmarks from database
-        with db_session() as session:
-            # Build query based on user_id
-            query = session.query(Bookmark)
-            if user_id:
-                query = query.filter(Bookmark.user_id == user_id)
-            
-            # Count total bookmarks first
-            total_count = query.count()
-            logger.info(f"📊 [REBUILD-{session_id}] Found {total_count} bookmarks to process")
-            
-            if total_count == 0:
-                logger.warning(f"⚠️ [REBUILD-{session_id}] No bookmarks found, nothing to rebuild")
-                return {
-                    "success": True,
-                    "message": "No bookmarks found in database",
-                    "count": 0,
-                    "user_id": user_id,
-                    "duration_seconds": (datetime.now() - start_time).total_seconds()
-                }
-            
-            # Process bookmarks in batches
-            BATCH_SIZE = 50
-            processed_count = 0
-            success_count = 0
-            error_count = 0
-            
-            # First, clear existing vectors for this user
-            if user_id:
-                try:
-                    # Get IDs of all bookmarks for this user
-                    bookmark_ids = [str(row[0]) for row in query.with_entities(Bookmark.id).all()]
-                    if bookmark_ids:
-                        logger.info(f"🗑️ [REBUILD-{session_id}] Deleting existing vectors for user {user_id}")
-                        vector_store.delete_bookmarks(bookmark_ids)
-                        logger.info(f"✅ [REBUILD-{session_id}] Deleted existing vectors for {len(bookmark_ids)} bookmarks")
-                except Exception as e:
-                    logger.error(f"❌ [REBUILD-{session_id}] Error clearing existing vectors: {e}")
-            
-            # Process batches
-            for i in range(0, total_count, BATCH_SIZE):
-                batch = query.limit(BATCH_SIZE).offset(i).all()
-                batch_size = len(batch)
+        # Get all bookmarks from database - Use the SQL-based function instead of ORM
+        from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
+        
+        # Get bookmarks for user
+        bookmarks = []
+        if user_id:
+            bookmarks = get_bookmarks_for_user(user_id)
+        else:
+            # Since we don't have get_all_bookmarks function, we use SQL directly
+            with db_session() as session:
+                cursor = session.connection().connection.cursor()
+                cursor.execute("""
+                    SELECT id, text, created_at, author_name, author_username, 
+                        media_files, raw_data, user_id
+                    FROM bookmarks
+                    ORDER BY created_at DESC
+                """)
+                rows = cursor.fetchall()
+                for row in rows:
+                    bookmarks.append(Bookmark.from_row(row))
+                cursor.close()
                 
-                logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i//BATCH_SIZE + 1}: {batch_size} bookmarks")
-                
-                # Process each bookmark in batch
-                for bookmark in batch:
-                    try:
-                        # Extract tweet URL for logging
-                        tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
-                        
-                        # Prepare metadata for vector store
-                        metadata = {
-                            'tweet_url': tweet_url,
-                            'screen_name': bookmark.author_username or '',
-                            'author_name': bookmark.author_name or '',
-                            'user_id': str(bookmark.user_id) if bookmark.user_id else '1'
-                        }
-                        
-                        # Add bookmark to vector store
-                        vector_store.add_bookmark(
-                            bookmark_id=str(bookmark.id),
-                            text=bookmark.text or '',
-                            metadata=metadata
-                        )
-                        
-                        success_count += 1
-                        
-                        # Log progress periodically
-                        if success_count % 10 == 0:
-                            memory_usage = get_memory_usage()
-                            logger.debug(f"🔍 [REBUILD-{session_id}] Added bookmark {success_count}/{total_count} - Memory: {memory_usage}")
-                            
-                    except Exception as e:
-                        error_msg = f"Error adding bookmark {bookmark.id} to vector store: {str(e)}"
-                        logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
-                        error_count += 1
-                
-                processed_count += batch_size
-                
-                # Log batch completion with progress
-                progress = (processed_count / total_count) * 100
-                memory_usage = get_memory_usage()
-                logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i//BATCH_SIZE + 1}: {processed_count}/{total_count} ({progress:.1f}%) - Memory: {memory_usage}")
-                
-                # Force garbage collection
-                import gc
-                gc.collect()
-            
-            # Final verification
-            collection_info = vector_store.get_collection_info()
-            vector_count = collection_info.get('vectors_count', 0)
-            
-            # Log summary
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed in {duration:.2f} seconds")
-            logger.info(f"📊 [REBUILD-{session_id}] Summary:")
-            logger.info(f"  - Database bookmark count: {total_count}")
-            logger.info(f"  - Vector store count: {vector_count}")
-            logger.info(f"  - Successful additions: {success_count}")
-            logger.info(f"  - Errors: {error_count}")
-            
+        # Count total bookmarks
+        total_count = len(bookmarks)
+        logger.info(f"📊 [REBUILD-{session_id}] Found {total_count} bookmarks to process")
+        
+        if total_count == 0:
+            logger.warning(f"⚠️ [REBUILD-{session_id}] No bookmarks found, nothing to rebuild")
             return {
                 "success": True,
-                "bookmark_count": total_count,
-                "vector_count": vector_count,
-                "successful_additions": success_count,
-                "errors": error_count,
-                "duration_seconds": duration,
+                "message": "No bookmarks found in database",
+                "count": 0,
                 "user_id": user_id,
-                "is_in_sync": total_count == vector_count
+                "duration_seconds": (datetime.now() - start_time).total_seconds()
             }
+        
+        # Process bookmarks in batches
+        BATCH_SIZE = 50
+        processed_count = 0
+        success_count = 0
+        error_count = 0
+        
+        # First, clear existing vectors for this user
+        if user_id:
+            try:
+                # Get IDs of all bookmarks for this user
+                bookmark_ids = [str(row[0]) for row in query.with_entities(Bookmark.id).all()]
+                if bookmark_ids:
+                    logger.info(f"🗑️ [REBUILD-{session_id}] Deleting existing vectors for user {user_id}")
+                    vector_store.delete_bookmarks(bookmark_ids)
+                    logger.info(f"✅ [REBUILD-{session_id}] Deleted existing vectors for {len(bookmark_ids)} bookmarks")
+            except Exception as e:
+                logger.error(f"❌ [REBUILD-{session_id}] Error clearing existing vectors: {e}")
+        
+        # Process batches
+        for i in range(0, total_count, BATCH_SIZE):
+            batch = bookmarks[i:i+BATCH_SIZE]
+            batch_size = len(batch)
             
+            logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {i//BATCH_SIZE + 1}: {batch_size} bookmarks")
+            
+            # Process each bookmark in batch
+            for bookmark in batch:
+                try:
+                    # Extract tweet URL for logging
+                    tweet_url = bookmark.raw_data.get('tweet_url', 'unknown') if bookmark.raw_data else 'unknown'
+                    
+                    # Prepare metadata for vector store
+                    metadata = {
+                        'tweet_url': tweet_url,
+                        'screen_name': bookmark.author_username or '',
+                        'author_name': bookmark.author_name or '',
+                        'user_id': str(bookmark.user_id) if bookmark.user_id else '1'
+                    }
+                    
+                    # Add bookmark to vector store
+                    vector_store.add_bookmark(
+                        bookmark_id=str(bookmark.id),
+                        text=bookmark.text or '',
+                        metadata=metadata
+                    )
+                    
+                    success_count += 1
+                    
+                    # Log progress periodically
+                    if success_count % 10 == 0:
+                        memory_usage = get_memory_usage()
+                        logger.debug(f"🔍 [REBUILD-{session_id}] Added bookmark {success_count}/{total_count} - Memory: {memory_usage}")
+                        
+                except Exception as e:
+                    error_msg = f"Error adding bookmark {bookmark.id} to vector store: {str(e)}"
+                    logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
+                    error_count += 1
+            
+            processed_count += batch_size
+            
+            # Log batch completion with progress
+            progress = (processed_count / total_count) * 100
+            memory_usage = get_memory_usage()
+            logger.info(f"✅ [REBUILD-{session_id}] Completed batch {i//BATCH_SIZE + 1}: {processed_count}/{total_count} ({progress:.1f}%) - Memory: {memory_usage}")
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+        
+        # Final verification
+        collection_info = vector_store.get_collection_info()
+        vector_count = collection_info.get('vectors_count', 0)
+        
+        # Log summary
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"🏁 [REBUILD-{session_id}] Vector store rebuild completed in {duration:.2f} seconds")
+        logger.info(f"📊 [REBUILD-{session_id}] Summary:")
+        logger.info(f"  - Database bookmark count: {total_count}")
+        logger.info(f"  - Vector store count: {vector_count}")
+        logger.info(f"  - Successful additions: {success_count}")
+        logger.info(f"  - Errors: {error_count}")
+        
+        return {
+            "success": True,
+            "bookmark_count": total_count,
+            "vector_count": vector_count,
+            "successful_additions": success_count,
+            "errors": error_count,
+            "duration_seconds": duration,
+            "user_id": user_id,
+            "is_in_sync": total_count == vector_count
+        }
+        
     except Exception as e:
         error_msg = f"Error during vector store rebuild: {str(e)}"
         logger.error(f"❌ [REBUILD-{session_id}] {error_msg}")
