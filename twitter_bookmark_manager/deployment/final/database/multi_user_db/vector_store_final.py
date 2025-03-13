@@ -18,6 +18,8 @@ import uuid
 import gc  # Add import for garbage collection
 import tempfile
 import shutil
+import random
+import string
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
@@ -51,8 +53,13 @@ class VectorStore:
         """
         self.model = None  # Will be loaded lazily when needed
         self.client = None
-        self.collection_name = "bookmark_embeddings"
-        self.vector_size = 384  # BERT embedding size
+        
+        # Generate a unique instance ID to prevent collisions, like PythonAnywhere
+        instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        self.collection_name = f"bookmark_embeddings_{instance_id}"
+        logger.info(f"Creating Qdrant in-memory instance with ID: {instance_id}")
+        
+        self.vector_size = 384  # Will be updated when model is loaded
         
         # Set default persist directory for Railway if not specified
         if persist_directory is None:
@@ -70,16 +77,14 @@ class VectorStore:
             logger.info(f"Initializing Qdrant client in memory mode to avoid file locking issues")
             self.client = QdrantClient(
                 location=":memory:",  # Always use in-memory mode like PythonAnywhere
-                timeout=10.0  # Add timeout for operations
+                timeout=10.0,  # Add timeout for operations
+                prefer_grpc=False  # Use HTTP instead of gRPC for better compatibility
             )
             logger.info(f"Qdrant client initialized successfully in memory mode")
             
             # Create collection
             try:
-                collection_info = self.client.get_collection(self.collection_name)
-                logger.info(f"Found existing collection: {self.collection_name}")
-            except Exception as e:
-                logger.info(f"Collection {self.collection_name} does not exist, creating...")
+                # Always create a new collection with our unique name
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
@@ -88,6 +93,10 @@ class VectorStore:
                     )
                 )
                 logger.info(f"Created collection: {self.collection_name}")
+            except Exception as e:
+                logger.error(f"Failed to create collection {self.collection_name}: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise
         except Exception as e:
             logger.error(f"Failed to initialize Qdrant client: {str(e)}")
             logger.error(traceback.format_exc())
@@ -108,12 +117,16 @@ class VectorStore:
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging
         os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizers parallelism
         
-        # Initialize model - use a smaller model consistently like PA does
+        # Initialize model - use same smaller model as PythonAnywhere
         try:
             logger.info(f"Initializing SentenceTransformer model")
-            # Use paraphrase-MiniLM-L3-v2 which is smaller but effective
-            self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
+            # Use all-MiniLM-L6-v2 which is the same model PythonAnywhere uses
+            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')
             logger.info(f"Model initialized successfully")
+            
+            # Update vector size based on the actual model
+            self.vector_size = self.model.get_sentence_embedding_dimension()
+            logger.info(f"Vector size updated to {self.vector_size} based on model dimension")
             
             # Set model to evaluation mode to reduce memory usage
             self.model.eval()
@@ -260,8 +273,17 @@ class VectorStore:
             logger.error(traceback.format_exc())
             return []
             
-    def rebuild_user_vectors(self, user_id, batch_size=5):
-        """Rebuild vector store for a specific user's bookmarks in memory to avoid locking issues"""
+    def rebuild_user_vectors(self, user_id, batch_size=50):
+        """
+        Rebuild vector store for a specific user's bookmarks, following PythonAnywhere's approach.
+        
+        Args:
+            user_id: User ID whose vectors to rebuild
+            batch_size: Number of bookmarks to process in each batch
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
         from .db_final import get_bookmarks_for_user
         
         session_id = str(uuid.uuid4())[:8]
@@ -276,69 +298,66 @@ class VectorStore:
             bookmarks = get_bookmarks_for_user(user_id)
             total = len(bookmarks)
             logger.info(f"Found {total} bookmarks for user {user_id}")
-            logger.info(f"Memory after fetching bookmarks: {self.get_memory_usage()}")
             
             if total == 0:
                 logger.info(f"No bookmarks found for user {user_id}, nothing to rebuild")
                 return True
             
             # Clear existing vectors first
-            logger.info(f"Memory before deleting old vectors: {self.get_memory_usage()}")
+            logger.info(f"Clearing existing vectors for user {user_id}")
             self._delete_vectors_for_user(user_id)
-            logger.info(f"Memory after deleting old vectors: {self.get_memory_usage()}")
             
-            # Pre-filter empty bookmarks to save processing time
-            valid_bookmarks = []
-            for bookmark in bookmarks:
-                if not bookmark.text or not bookmark.text.strip():
-                    logger.info(f"⚠️ [REBUILD-{session_id}] Pre-filtering bookmark {bookmark.id} due to empty text")
-                    continue
-                valid_bookmarks.append(bookmark)
-            
-            logger.info(f"📊 [REBUILD-{session_id}] Found {len(valid_bookmarks)} bookmarks to process after filtering")
-            
-            # Use the filtered bookmarks list
-            total = len(valid_bookmarks)
-            if total == 0:
-                logger.info(f"No valid bookmarks found for user {user_id} after filtering, nothing to rebuild")
-                return True
-            
-            # Process in smaller batches
+            # We don't need to prefilter because we'll handle empty text in the processing
+            # Process in batches to avoid memory issues
             success_count = 0
             error_count = 0
             
+            # Process bookmarks in batches
             for i in range(0, total, batch_size):
-                batch = valid_bookmarks[i:i+batch_size]
+                batch = bookmarks[i:i+batch_size]
                 current_batch = i//batch_size + 1
                 total_batches = (total+batch_size-1)//batch_size
                 
-                logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} bookmarks)")
+                logger.info(f"🔄 [REBUILD-{session_id}] Processing batch {current_batch}/{total_batches}: {len(batch)} bookmarks")
                 
-                # Load model just for this batch
+                # Ensure model is loaded for this batch
                 self._ensure_model_loaded()
                 
                 # Process each bookmark in the batch with individual error handling
                 for j, bookmark in enumerate(batch):
                     try:
+                        # Skip if text is empty
+                        if not bookmark.text or not bookmark.text.strip():
+                            logger.info(f"⚠️ [REBUILD-{session_id}] Skipping bookmark {bookmark.id} due to empty text")
+                            continue
+                            
+                        # Prepare metadata for the vector store
+                        metadata = {
+                            'author': bookmark.author_username if hasattr(bookmark, 'author_username') else None,
+                            'created_at': str(bookmark.created_at) if hasattr(bookmark, 'created_at') and bookmark.created_at else None
+                        }
+                        
+                        # Add bookmark to vector store using the add_bookmark method
                         self.add_bookmark(
                             bookmark_id=bookmark.id,
                             user_id=user_id,
-                            text=bookmark.text or "",
-                            metadata={
-                                'author': bookmark.author_username if hasattr(bookmark, 'author_username') else None,
-                                'created_at': str(bookmark.created_at) if hasattr(bookmark, 'created_at') and bookmark.created_at else None
-                            }
+                            text=bookmark.text,
+                            metadata=metadata
                         )
+                        
                         success_count += 1
                         
-                        # Clean memory after each bookmark to avoid OOM
-                        self.clean_memory()
+                        # Detailed logging every 10 bookmarks
+                        if success_count % 10 == 0:
+                            logger.info(f"🔍 [REBUILD-{session_id}] Progress: {success_count}/{total} bookmarks added to vector store (Memory: {self.get_memory_usage()})")
+                            
+                        # Clean memory every 5 bookmarks to avoid OOM
+                        if j % 5 == 0:
+                            self.clean_memory()
+                            
                     except Exception as e:
                         error_count += 1
-                        logger.error(f"Error adding bookmark {bookmark.id} to vector store: {str(e)}")
-                
-                # Free up resources - force Python to garbage collect
-                del batch
+                        logger.error(f"❌ [REBUILD-{session_id}] Error adding bookmark {bookmark.id} to vector store: {str(e)}")
                 
                 # Unload model after each batch to save memory
                 self._unload_model()
@@ -352,14 +371,14 @@ class VectorStore:
                 logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
                 
                 # Give the system a moment to free up memory
-                time.sleep(1.0)  # Increased sleep time to 1 second
+                time.sleep(1.0)
             
+            logger.info(f"🎉 [REBUILD-{session_id}] Vector rebuild completed: {success_count} successes, {error_count} errors")
             logger.info(f"Final memory usage: {self.get_memory_usage()}")
-            logger.info(f"Vector rebuild completed: {success_count} successes, {error_count} errors")
             return True
             
         except Exception as e:
-            logger.error(f"Error during vector rebuild for user {user_id}: {str(e)}")
+            logger.error(f"❌ [REBUILD-{session_id}] Error during vector rebuild for user {user_id}: {str(e)}")
             logger.error(traceback.format_exc())
             # Try to unload model even after error
             self._unload_model()
@@ -552,25 +571,37 @@ class VectorStore:
 
     def clean_memory(self):
         """
-        Perform aggressive memory cleanup to avoid out-of-memory errors.
-        Call this after processing each batch of bookmarks.
+        Perform memory cleanup to avoid out-of-memory errors.
+        Call this after processing bookmarks.
         """
-        # Force garbage collection multiple times
+        # Force garbage collection
         gc.collect()
-        gc.collect(2)  # Generation 2 garbage collection
         
         # Try to clean PyTorch cache if it's available
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                logger.info("Cleared PyTorch CUDA cache")
+                logger.debug("Cleared PyTorch CUDA cache")
         except:
             pass
         
-        # Log current memory usage
-        memory_usage = self.get_memory_usage()
-        logger.info(f"After cleanup, memory usage: {memory_usage}")
+        # Track memory usage before and after
+        memory_before = self.get_memory_usage()
+        
+        # Call Python's built-in memory management
+        import sys
+        if hasattr(sys, 'intern'):
+            sys.intern('')
+        
+        # Additional garbage collection for all generations
+        gc.collect(0)  # Generation 0
+        gc.collect(1)  # Generation 1
+        gc.collect(2)  # Generation 2
+        
+        # Log memory usage after cleanup
+        memory_after = self.get_memory_usage()
+        logger.debug(f"Memory cleanup: {memory_before} → {memory_after}")
 
 # Create a singleton instance
 _vector_store_instance = None
