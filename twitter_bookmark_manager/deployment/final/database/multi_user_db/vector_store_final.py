@@ -33,6 +33,8 @@ from qdrant_client.http.models import Distance, VectorParams, PointStruct
 # Import database utilities
 from sqlalchemy import text as sql_text
 from database.multi_user_db.db_final import get_db_connection
+from sqlalchemy.sql import bindparam
+from sqlalchemy import Integer
 
 # Configure logging
 logging.basicConfig(
@@ -333,7 +335,7 @@ class VectorStore:
                     FROM bookmarks
                     WHERE user_id = :user_id
                     ORDER BY id
-                """)
+                """).bindparams(bindparam('user_id', type_=Integer))
                 
                 result = conn.execute(stmt, {"user_id": user_id})
                 bookmark_count = 0
