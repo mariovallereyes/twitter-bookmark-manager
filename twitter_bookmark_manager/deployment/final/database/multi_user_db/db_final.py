@@ -590,7 +590,7 @@ def get_bookmarks_for_user(user_id):
     Returns:
         List of Bookmark objects
     """
-    from twitter_bookmark_manager.deployment.final.database.multi_user_db.models_final import Bookmark
+    from .models_final import Bookmark
     
     logger.info(f"Fetching bookmarks for user {user_id} using direct SQL")
     
