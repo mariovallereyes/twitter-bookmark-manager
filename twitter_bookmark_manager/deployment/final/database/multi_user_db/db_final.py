@@ -606,7 +606,7 @@ def get_bookmarks_for_user(user_id):
             SELECT id, text, created_at, author_name, author_username, 
                    media_files, raw_data, user_id
             FROM bookmarks
-            WHERE user_id = %s
+            WHERE user_id = :user_id
             ORDER BY created_at DESC
         """
         
@@ -620,7 +620,9 @@ def get_bookmarks_for_user(user_id):
             # This is a psycopg2 connection
             logger.info("Using psycopg2 connection")
             cursor = conn.cursor()
-            cursor.execute(query, (user_id,))
+            # For psycopg2, convert back to %s style and use tuple parameters
+            psycopg2_query = query.replace(':user_id', '%s')
+            cursor.execute(psycopg2_query, (user_id,))
             rows = cursor.fetchall()
             cursor.close()
             
