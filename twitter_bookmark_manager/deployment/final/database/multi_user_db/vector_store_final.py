@@ -345,27 +345,37 @@ class VectorStore:
                 for row in result:
                     bookmark_count += 1
                     
-                    # Get text content, falling back to tweet_content from raw_data
+                    # Get text content, using text field first
                     text = row.text or ''
-                    if not text.strip() and row.raw_data and isinstance(row.raw_data, dict):
-                        text = row.raw_data.get('tweet_content', '')
+                    
+                    # If text is empty, try to get tweet_content from raw_data
+                    if not text.strip() and row.raw_data:
+                        if isinstance(row.raw_data, dict):
+                            text = row.raw_data.get('tweet_content', '')
                     
                     if not text.strip():
                         logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} - no text content found")
                         continue
                         
+                    # Truncate text to reasonable length
+                    text = text[:5000]  # Limit to 5000 chars
                     valid_bookmarks.append((row.bookmark_id, text))
                 
-                # Process bookmarks in larger batches to reduce model loading/unloading
-                batch_size = 5  # Process 5 bookmarks per model load
+                # Early exit if no valid bookmarks
+                if not valid_bookmarks:
+                    logger.warning(f"⚠️ [REBUILD-{rebuild_id}] No valid bookmarks found for processing")
+                    return True
+                    
+                # Process in small batches to manage memory
+                batch_size = 3  # Small batch size for memory management
                 for i in range(0, len(valid_bookmarks), batch_size):
                     batch = valid_bookmarks[i:i + batch_size]
                     
-                    # Load model once for the batch
-                    logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model for batch {i//batch_size + 1}")
-                    self._ensure_model_loaded()
-                    
                     try:
+                        # Load model once for the batch
+                        logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model for batch {i//batch_size + 1}")
+                        self._ensure_model_loaded()
+                        
                         for bookmark_id, text in batch:
                             try:
                                 # Generate embedding
@@ -382,11 +392,11 @@ class VectorStore:
                         # Unload model after batch
                         self._unload_model()
                         
-                    # Force garbage collection
-                    gc.collect()
-                    
-                    # Sleep between batches
-                    time.sleep(1.0)
+                        # Force garbage collection
+                        gc.collect()
+                        
+                        # Sleep between batches
+                        time.sleep(2.0)  # Increased delay between batches
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
                 logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {bookmark_count} bookmarks out of {bookmark_count} total")
