@@ -1153,123 +1153,80 @@ def process_status():
 
 @app.route('/api/update-database', methods=['POST'])
 def update_database():
-    """
-    Update the database with the bookmarks from a JSON file.
-    
-    Returns:
-        JSON response with the result of the update
-    """
-    # Check if user is authenticated - only check if user exists
-    current_user = UserContext.get_current_user()
-    if not current_user:
-        return jsonify({'error': 'Not authenticated', 'status': 'error'}), 401
-        
-    # Get parameters from request
-    data = request.get_json(silent=True) or {}
-    rebuild = data.get('rebuild', False) 
-    direct_call = data.get('direct_call', False)
-    max_bookmarks = data.get('max_bookmarks', 30)  # Extreme memory limit for Railway
-    
-    # Generate a session ID for this update to track background processing
-    session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    
+    """Update the vector database for the current user"""
     try:
-        # Get user ID
-        user_id = current_user.id
+        if not current_user:
+            return jsonify({"error": "Not authenticated"}), 401
+            
+        # Get parameters
+        rebuild = request.json.get('rebuild', False)
+        direct_call = request.json.get('direct_call', False)
         
-        # Check database connection and try to reconnect if needed
-        if app.config.get('DB_ERROR', False) and app.config.get('ALLOW_API_RETRY', False):
-            logger.warning(f"⚠️ [API] Database issues detected, attempting reconnection for vector rebuild")
-            try:
-                # Force database reconnection
-                from database.multi_user_db.db_final import setup_database
-                setup_database(force_reconnect=True)
-                logger.info(f"✅ [API] Database reconnection successful")
-            except Exception as db_error:
-                logger.error(f"❌ [API] Database reconnection failed: {str(db_error)}")
-                # Continue anyway - the operation might still work with existing connection
+        if not rebuild:
+            return jsonify({"error": "Missing rebuild parameter"}), 400
+            
+        # Generate a session ID for tracking
+        session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         
         if direct_call:
-            # Run vector rebuild directly (not recommended for production)
-            logger.warning(f"⚠️ [API] Direct vector rebuild requested by user {user_id}")
-            
-            # Import vector store
+            logger.warning(f"⚠️ [API] Direct vector rebuild requested by user {current_user.id}")
             try:
-                from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                # Initialize vector store
+                vector_store = VectorStore()
                 
-                # Get vector store instance
-                vector_store = get_multi_user_vector_store()
-                
-                # Force garbage collection before starting
-                import gc
-                gc.collect()
-                
-                # Run rebuild with max_bookmarks limit
-                logger.info(f"🔄 [API] Starting direct vector rebuild for user {user_id} with max_bookmarks={max_bookmarks}")
-                success = vector_store.rebuild_user_vectors(user_id, batch_size=1, session_id=session_id)
+                # Rebuild vectors directly
+                success = vector_store.rebuild_user_vectors(
+                    user_id=current_user.id,
+                    rebuild_id=session_id
+                )
                 
                 if success:
-                    logger.info(f"✅ [API] Vector rebuild completed successfully")
                     return jsonify({
-                        'message': 'Vector rebuild completed successfully',
-                        'rebuild': True,
-                        'success': True
+                        "success": True,
+                        "message": "Vector store rebuilt successfully"
                     })
                 else:
-                    logger.error(f"❌ [API] Vector rebuild failed")
                     return jsonify({
-                        'error': 'Vector rebuild failed',
-                        'rebuild': False,
-                        'success': False
+                        "success": False,
+                        "error": "Error rebuilding vector store"
                     }), 500
+                    
             except Exception as e:
                 error_msg = f"Error rebuilding vector store: {str(e)}"
                 logger.error(f"❌ [API] {error_msg}")
                 return jsonify({
-                    'error': error_msg,
-                    'rebuild': False,
-                    'success': False
+                    "success": False,
+                    "error": error_msg
                 }), 500
         else:
-            # Run in background (recommended approach)
+            # Background processing
             try:
-                # Import the run_vector_rebuild function
-                from database.multi_user_db.update_bookmarks_final import run_vector_rebuild
-                
-                # Start a thread to run the function in background
-                import threading
-                thread = threading.Thread(
-                    target=run_vector_rebuild,
-                    args=(user_id, session_id, max_bookmarks),  # Pass the max_bookmarks parameter
-                    daemon=True
+                process = Process(
+                    target=rebuild_vectors_background,
+                    args=(current_user.id, session_id)
                 )
-                thread.start()
+                process.start()
                 
-                logger.info(f"✅ [API] Started background vector rebuild for user {user_id} with session_id {session_id}")
-                
-                # Return success response with session ID for client to track
                 return jsonify({
-                    'message': 'Vector rebuild started in background',
-                    'session_id': session_id,
-                    'rebuild': True,
-                    'success': True
+                    "success": True,
+                    "message": "Vector rebuild started in background",
+                    "session_id": session_id
                 })
+                
             except Exception as e:
-                error_msg = f"Error starting background vector rebuild: {str(e)}"
+                error_msg = f"Error starting background rebuild: {str(e)}"
                 logger.error(f"❌ [API] {error_msg}")
                 return jsonify({
-                    'error': error_msg,
-                    'rebuild': False,
-                    'success': False
+                    "success": False,
+                    "error": error_msg
                 }), 500
                 
     except Exception as e:
-        error_msg = f"Unexpected error in update_database: {str(e)}"
+        error_msg = f"Error rebuilding vector store: {str(e)}"
         logger.error(f"❌ [API] {error_msg}")
-        logger.error(traceback.format_exc())
         return jsonify({
-            'error': error_msg,
-            'success': False
+            "success": False,
+            "error": error_msg
         }), 500
 
 def check_tweet_content_column():
