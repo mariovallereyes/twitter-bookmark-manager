@@ -600,10 +600,10 @@ def get_bookmarks_for_user(user_id):
         # Get connection using session for consistency
         with db_session() as session:
             # Use SQLAlchemy session.execute with text query for better control
-            # Use the actual columns defined in the table creation script
+            # Use the exact column names from the production database
             query = """
                 SELECT bookmark_id, text, created_at, 
-                       author, author_id, 
+                       author_name, author_username, 
                        media_files, raw_data, user_id
                 FROM bookmarks
                 WHERE user_id = :user_id
@@ -617,19 +617,7 @@ def get_bookmarks_for_user(user_id):
             # Convert to Bookmark objects with error handling for each row
             for row in rows:
                 try:
-                    # Create dictionary to match expected keys in from_row method
-                    mapped_row = (
-                        row[0],                 # bookmark_id 
-                        row[1],                 # text
-                        row[2],                 # created_at
-                        row[3],                 # author -> author_name
-                        row[4],                 # author_id -> author_username
-                        row[5],                 # media_files
-                        row[6],                 # raw_data
-                        row[7],                 # user_id
-                    )
-                    
-                    bookmarks.append(Bookmark.from_row(mapped_row))
+                    bookmarks.append(Bookmark.from_row(row))
                 except Exception as e:
                     logger.error(f"Error converting row to Bookmark: {e}")
                     logger.error(f"Problematic row: {row}")
