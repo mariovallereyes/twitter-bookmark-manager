@@ -1103,7 +1103,7 @@ def process_bookmarks():
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/process-status', methods=['GET'])
+@app.route('/api/process-status', methods=['GET'])
 def process_status():
     """Check status of background processing"""
     user = UserContext.get_current_user()

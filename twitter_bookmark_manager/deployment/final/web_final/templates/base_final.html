@@ -1671,7 +1671,7 @@
         setTimeout(function() {
           // Call API to rebuild vectors with extreme memory limitations for Railway
           $.ajax({
-            url: '/api/update-database',
+            url: '/api/update-database',  // Make sure this matches the route in api_server_multi_user.py
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({
@@ -1680,6 +1680,7 @@
               max_bookmarks: 30  // Extreme memory constraint for Railway
             }),
             success: function(response) {
+              console.log("API response:", response);  // Add debugging
               if (response.success) {
                 // Get session ID for polling status
                 var sessionId = response.session_id;
@@ -1690,6 +1691,7 @@
                     url: '/api/process-status?session_id=' + sessionId,
                     type: 'GET',
                     success: function(statusResponse) {
+                      console.log("Status response:", statusResponse);  // Add debugging
                       if (statusResponse.status === 'completed') {
                         // Update UI for completion
                         clearInterval(statusInterval);
@@ -1722,12 +1724,13 @@
                         $('#rebuildStatus').text(statusResponse.message || 'Processing...');
                       }
                     },
-                    error: function() {
-                      // Handle polling error
+                    error: function(xhr, status, error) {
+                      // Enhanced error handling with debugging
+                      console.error("Status check error:", error, xhr.responseText);
                       $('#rebuildStatus')
                         .removeClass('alert-info alert-success')
                         .addClass('alert-danger')
-                        .text('Error checking status');
+                        .html('<strong>Error checking status:</strong> ' + error);
                     }
                   });
                 }, 2000); // Poll every 2 seconds
@@ -1741,14 +1744,17 @@
                 $('#startRebuildBtn').prop('disabled', false).text('Try Again');
               }
             },
-            error: function(xhr) {
-              // Handle AJAX error
+            error: function(xhr, status, error) {
+              // Enhanced error handling with detailed error information
+              console.error("API error:", error);
+              console.error("Response text:", xhr.responseText);
+              
               var errorMsg = '';
               try {
                 var response = JSON.parse(xhr.responseText);
                 errorMsg = response.error || 'Server error';
               } catch(e) {
-                errorMsg = 'Server error: ' + xhr.status;
+                errorMsg = 'Server returned HTML instead of JSON. Check server logs.';
               }
               
               $('#rebuildStatus')
