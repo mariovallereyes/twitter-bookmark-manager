@@ -16,6 +16,8 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 import psutil  # Add psutil for memory tracking
 import uuid
 import gc  # Add import for garbage collection
+import tempfile
+import shutil
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
@@ -263,7 +265,7 @@ class VectorStore:
             return []
             
     def rebuild_user_vectors(self, user_id, batch_size=20):
-        """Rebuild vector store for a specific user's bookmarks with enhanced memory management"""
+        """Rebuild vector store for a specific user's bookmarks using a temporary directory to avoid locking issues"""
         from twitter_bookmark_manager.deployment.final.database.multi_user_db.db_final import get_bookmarks_for_user
         
         session_id = str(uuid.uuid4())[:8]
@@ -272,6 +274,13 @@ class VectorStore:
         # Force garbage collection before starting
         gc.collect()
         logger.info(f"Initial memory usage: {self.get_memory_usage()}")
+        
+        # Create a temporary directory for rebuilding the vector store
+        temp_dir = tempfile.mkdtemp(prefix=f"vector_store_rebuild_{user_id}_")
+        logger.info(f"Created temporary directory for rebuild: {temp_dir}")
+        
+        # Save the original persist directory
+        original_persist_dir = self.persist_directory
         
         try:
             # Get all bookmarks for the user
@@ -282,20 +291,21 @@ class VectorStore:
             
             if total == 0:
                 logger.info(f"No bookmarks found for user {user_id}, nothing to rebuild")
+                # Clean up temp directory
+                shutil.rmtree(temp_dir, ignore_errors=True)
                 return True
             
-            # Clear existing vectors first
-            logger.info(f"Memory before deleting old vectors: {self.get_memory_usage()}")
-            self._delete_vectors_for_user(user_id)
-            logger.info(f"Memory after deleting old vectors: {self.get_memory_usage()}")
-            
-            # Ensure model is loaded (lazy loading)
-            self._ensure_model_loaded()
-            logger.info(f"Memory after loading model: {self.get_memory_usage()}")
+            # Create a temporary vector store in the temp directory
+            temp_vector_store = VectorStore(persist_directory=temp_dir)
+            logger.info(f"Temporary vector store created at {temp_dir}")
             
             # Process in smaller batches
             success_count = 0
             error_count = 0
+            
+            # Ensure model is loaded for the temporary store
+            temp_vector_store._ensure_model_loaded()
+            logger.info(f"Memory after loading model: {self.get_memory_usage()}")
             
             for i in range(0, total, batch_size):
                 batch = bookmarks[i:i+batch_size]
@@ -307,7 +317,7 @@ class VectorStore:
                 # Process each bookmark in the batch with individual error handling
                 for bookmark in batch:
                     try:
-                        self.add_bookmark(
+                        temp_vector_store.add_bookmark(
                             bookmark_id=bookmark.id,
                             user_id=user_id,
                             text=bookmark.text or "",
@@ -323,23 +333,97 @@ class VectorStore:
                 
                 # Force garbage collection after each batch
                 gc.collect()
-                logger.info(f"Memory after batch {current_batch}/{total_batches}: {self.get_memory_usage()}")
+                logger.info(f"Memory after batch {current_batch}/{total_batches}: {temp_vector_store.get_memory_usage()}")
                 
                 # Log progress
                 progress = ((i + len(batch)) / total) * 100
                 logger.info(f"Progress: {progress:.1f}% ({i + len(batch)}/{total})")
             
-            # Unload model to free memory when done
-            self._unload_model()
+            # Unload model to free memory before swapping directories
+            temp_vector_store._unload_model()
+            logger.info(f"Temporary vector store build complete with {success_count} successes and {error_count} errors")
+            
+            # Filter old vectors for this user from the primary vector store
+            logger.info(f"Deleting old vectors for user {user_id} from main vector store")
+            self._delete_vectors_for_user(user_id)
+            
+            # Get a list of all the vectors we built in the temp store
+            # We'll directly copy the vectors from temp to main store
+            logger.info(f"Copying vectors from temporary store to main store")
+            
+            # Search all points for this user in temp vector store
+            search_filter = rest.Filter(
+                must=[
+                    rest.FieldCondition(
+                        key="user_id",
+                        match=rest.MatchValue(value=user_id)
+                    )
+                ]
+            )
+            
+            # Use scroll to get all points
+            offset = 0
+            limit = 100
+            total_copied = 0
+            
+            while True:
+                points = temp_vector_store.client.scroll(
+                    collection_name=temp_vector_store.collection_name,
+                    scroll_filter=search_filter,
+                    limit=limit,
+                    offset=offset
+                )[0]
+                
+                if not points:
+                    break
+                    
+                # Copy these points to the main vector store
+                point_structs = []
+                for point in points:
+                    point_structs.append(
+                        PointStruct(
+                            id=point.id,
+                            vector=point.vector,
+                            payload=point.payload
+                        )
+                    )
+                
+                if point_structs:
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=point_structs
+                    )
+                    total_copied += len(point_structs)
+                    
+                offset += len(points)
+                logger.info(f"Copied {total_copied} vectors so far")
+                
+                if len(points) < limit:
+                    break
+            
+            logger.info(f"Successfully copied {total_copied} vectors for user {user_id}")
+            logger.info(f"Vector rebuild completed through temporary directory approach")
+            
+            # Force garbage collection and check final memory usage
+            gc.collect()
             logger.info(f"Final memory usage: {self.get_memory_usage()}")
-            logger.info(f"Vector rebuild completed: {success_count} successes, {error_count} errors")
+            
             return True
             
         except Exception as e:
             logger.error(f"Error during vector rebuild for user {user_id}: {str(e)}")
+            logger.error(traceback.format_exc())
             # Try to unload model even after error
             self._unload_model()
             return False
+            
+        finally:
+            # Always clean up the temporary directory
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up temporary directory: {str(cleanup_error)}")
             
     def _unload_model(self):
         """Unload the model to free memory"""
