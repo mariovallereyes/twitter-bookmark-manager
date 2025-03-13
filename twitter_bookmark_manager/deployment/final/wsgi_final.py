@@ -12,22 +12,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Gunicorn configuration
-timeout = 3600      # 1 hour timeout for very large rebuilds
-workers = 1         # Single worker to avoid memory competition
-worker_class = 'sync'
+# Gunicorn configuration for long-running tasks
+timeout = 7200          # 2 hours - much longer timeout for large rebuilds
+workers = 1             # Single worker to avoid memory competition
+worker_class = 'sync'   # Synchronous worker for stability
 keepalive = 120
-max_requests = 1    # Disable worker recycling during vector rebuilds
+max_requests = 1        # Disable worker recycling during rebuilds
 max_requests_jitter = 0
 worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
-preload_app = False # Don't preload to avoid memory issues
-graceful_timeout = 300  # 5 minutes grace period for cleanup
+preload_app = False     # Don't preload to avoid memory issues
+graceful_timeout = 600  # 10 minutes grace period for cleanup
+worker_connections = 10 # Limit concurrent connections
 
-# Log configuration
-accesslog = '-'     # Log to stdout
-errorlog = '-'      # Log to stderr
-loglevel = 'info'   # Detailed logging
-capture_output = True  # Capture stdout/stderr from workers
+# Logging configuration
+accesslog = '-'         # Log to stdout
+errorlog = '-'         # Log to stderr
+loglevel = 'info'      # Detailed logging
+capture_output = True   # Capture stdout/stderr from workers
 enable_stdio_inheritance = True  # Inherit stdio settings
 
 logger.info("==================================================")
@@ -298,4 +299,7 @@ else:
 
 # Log completion of initialization
 logger.info("WSGI application initialization complete")
-logger.info("="*50) 
+logger.info("="*50)
+
+# Add startup message
+logger.info("Starting with worker timeout of 2 hours for large rebuilds") 

@@ -345,6 +345,7 @@ class VectorStore:
                 rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
             
             logger.info(f"🔄 [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
+            start_time = time.time()
             
             # Delete existing vectors for user first
             self._delete_vectors_for_user(user_id)
@@ -366,13 +367,34 @@ class VectorStore:
                 logger.info(f"📊 [REBUILD-{rebuild_id}] Found {total_bookmarks} total bookmarks to process")
                 
                 # Process in smaller chunks to manage memory
-                CHUNK_SIZE = 50  # Fetch 50 at a time
-                BATCH_SIZE = 5   # Process 5 at a time
+                CHUNK_SIZE = 20   # Smaller chunks for more frequent progress updates
+                BATCH_SIZE = 5    # Small batches for stability
                 offset = 0
                 total_processed = 0
                 errors = 0
+                last_progress_time = time.time()
                 
                 while offset < total_bookmarks:
+                    chunk_start = time.time()
+                    
+                    # Log progress every 60 seconds
+                    current_time = time.time()
+                    if current_time - last_progress_time >= 60:
+                        elapsed = current_time - start_time
+                        progress = (offset / total_bookmarks) * 100
+                        rate = total_processed / (elapsed / 60) if elapsed > 0 else 0
+                        eta_minutes = ((total_bookmarks - total_processed) / rate) if rate > 0 else 0
+                        
+                        logger.info(f"""
+🔄 [REBUILD-{rebuild_id}] Progress Update:
+- Processed: {total_processed}/{total_bookmarks} ({progress:.1f}%)
+- Errors: {errors}
+- Rate: {rate:.1f} bookmarks/minute
+- Running for: {elapsed/60:.1f} minutes
+- ETA: {eta_minutes:.1f} minutes
+""")
+                        last_progress_time = current_time
+                    
                     stmt = sql_text("""
                         SELECT bookmark_id, text, raw_data 
                         FROM bookmarks
@@ -385,7 +407,6 @@ class VectorStore:
                         bindparam('offset', type_=Integer)
                     )
                     
-                    chunk_start_time = time.time()
                     result = conn.execute(stmt, {
                         "user_id": user_id,
                         "limit": CHUNK_SIZE,
@@ -422,7 +443,7 @@ class VectorStore:
                     # Process valid bookmarks in small batches
                     for i in range(0, len(valid_bookmarks), BATCH_SIZE):
                         batch = valid_bookmarks[i:i + BATCH_SIZE]
-                        batch_start_time = time.time()
+                        batch_start = time.time()
                         
                         try:
                             # Load model once for the batch
@@ -457,25 +478,26 @@ class VectorStore:
                             gc.collect()
                             
                             # Log batch timing
-                            batch_time = time.time() - batch_start_time
+                            batch_time = time.time() - batch_start
                             logger.info(f"⏱️ [REBUILD-{rebuild_id}] Batch processed in {batch_time:.2f}s")
-                            
-                            # Small delay between batches
-                            time.sleep(0.5)
                     
                     # Move to next chunk
                     offset += CHUNK_SIZE
                     
-                    # Log chunk timing and progress
-                    chunk_time = time.time() - chunk_start_time
-                    progress = (offset / total_bookmarks) * 100
-                    logger.info(f"📊 [REBUILD-{rebuild_id}] Progress: {progress:.1f}% ({total_processed}/{total_bookmarks})")
+                    # Log chunk timing
+                    chunk_time = time.time() - chunk_start
                     logger.info(f"⏱️ [REBUILD-{rebuild_id}] Chunk processed in {chunk_time:.2f}s")
                 
                 # Log final statistics
-                logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Total processed: {total_processed}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Errors: {errors}")
+                total_time = time.time() - start_time
+                logger.info(f"""
+✅ [REBUILD-{rebuild_id}] Vector rebuild completed:
+- Total processed: {total_processed}/{total_bookmarks}
+- Success rate: {(total_processed/total_bookmarks*100):.1f}%
+- Errors: {errors}
+- Total time: {total_time/60:.1f} minutes
+- Average speed: {total_processed/(total_time/60):.1f} bookmarks/minute
+""")
                 
                 return True
                 
