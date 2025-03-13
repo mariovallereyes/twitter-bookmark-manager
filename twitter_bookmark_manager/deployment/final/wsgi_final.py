@@ -5,12 +5,20 @@ import traceback
 from pathlib import Path
 from flask import Flask, jsonify, request, redirect, url_for, render_template_string
 
-# Set up detailed logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-logger.info("="*50)
+# Gunicorn configuration
+timeout = 300  # 5 minutes
+workers = 2
+worker_class = 'sync'
+keepalive = 120
+
+logger.info("==================================================")
 logger.info("Starting Progressive WSGI Application for Railway")
 
 # Add paths to system path to ensure modules can be found

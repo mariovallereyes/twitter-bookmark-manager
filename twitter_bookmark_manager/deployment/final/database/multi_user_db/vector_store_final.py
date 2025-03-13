@@ -344,122 +344,52 @@ class VectorStore:
                 # Pre-filter bookmarks
                 for row in result:
                     bookmark_count += 1
-                    if not row.text or len(row.text.strip()) == 0:
-                        logger.info(f"⚠️ [REBUILD-{rebuild_id}] Pre-filtering bookmark {row.bookmark_id} due to empty text")
+                    
+                    # Get text content, falling back to tweet_content from raw_data
+                    text = row.text or ''
+                    if not text.strip() and row.raw_data and isinstance(row.raw_data, dict):
+                        text = row.raw_data.get('tweet_content', '')
+                    
+                    if not text.strip():
+                        logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} - no text content found")
                         continue
-                    
-                    # Extract tweet_content from raw_data JSON
-                    tweet_content = None
-                    if row.raw_data and isinstance(row.raw_data, dict):
-                        tweet_content = row.raw_data.get('tweet_content', '')
-                    
-                    valid_bookmarks.append((row.bookmark_id, row.text, tweet_content))
-                
-                # Commit and close this connection before processing
-                conn.close()
-                
-                filtered_count = bookmark_count - len(valid_bookmarks)
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Found {bookmark_count} bookmarks, filtered {filtered_count} empty ones")
-                    
-                # Process in very small batches with forced cleanup between each batch
-                # This is extremely aggressive memory management for restricted environments
-                
-                # EXTREME MEMORY LIMITATION: Process only a small subset of bookmarks
-                # Hard cap at 50 bookmarks even if there are more - Railway has severe memory constraints
-                max_bookmarks = 50  # Hard limit for Railway's constraints
-                if len(valid_bookmarks) > max_bookmarks:
-                    logger.warning(f"⚠️ [REBUILD-{rebuild_id}] MEMORY CONSTRAINT: Limiting to {max_bookmarks} bookmarks out of {len(valid_bookmarks)}")
-                    valid_bookmarks = valid_bookmarks[:max_bookmarks]
-                
-                total_processed = 0
-                batch_num = 0
-                
-                # Process batches with extremely small batch size
-                for i in range(0, len(valid_bookmarks), batch_size):
-                    batch = valid_bookmarks[i:i+batch_size]
-                    batch_num += 1
-                    
-                    logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing batch {batch_num} with {len(batch)} bookmarks")
-                    
-                    # Process each bookmark individually for maximum memory control
-                    for bookmark_id, tweet_id, text in batch:
-                        # Initialize the model for just this one bookmark
-                        start_time = time.time()
-                        memory_before = self.get_memory_usage()
                         
-                        try:
-                            logger.info(f"🔄 [REBUILD-{rebuild_id}] Processing bookmark {bookmark_id}, memory: {memory_before}")
-                            
-                            # Load model for just this one bookmark
-                            self._ensure_model_loaded()
-                            
-                            # Generate embedding
-                            if text and text.strip():
-                                # Truncate text to reasonable length
-                                text = text[:5000]  # Limit to 5000 chars
-                                
+                    valid_bookmarks.append((row.bookmark_id, text))
+                
+                # Process bookmarks in larger batches to reduce model loading/unloading
+                batch_size = 5  # Process 5 bookmarks per model load
+                for i in range(0, len(valid_bookmarks), batch_size):
+                    batch = valid_bookmarks[i:i + batch_size]
+                    
+                    # Load model once for the batch
+                    logger.info(f"🔄 [REBUILD-{rebuild_id}] Loading model for batch {i//batch_size + 1}")
+                    self._ensure_model_loaded()
+                    
+                    try:
+                        for bookmark_id, text in batch:
+                            try:
+                                # Generate embedding
                                 embedding = self.model.encode(text)
                                 
-                                # Create a deterministic UUID from user_id and bookmark_id
-                                namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
-                                seed = f"{user_id}_{bookmark_id}"
-                                point_id = str(uuid.uuid5(namespace, seed))
+                                # Add to Qdrant
+                                self._add_vector(bookmark_id, embedding, user_id)
                                 
-                                # Create payload
-                                payload = {
-                                    "bookmark_id": str(bookmark_id),
-                                    "text": text[:500],  # Store only beginning in payload
-                                    "user_id": user_id,
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                                
-                                # Add to vector store
-                                point = PointStruct(
-                                    id=point_id,
-                                    vector=embedding.tolist(),
-                                    payload=payload
-                                )
-                                
-                                # Upsert point to collection
-                                self.client.upsert(
-                                    collection_name=self.collection_name,
-                                    points=[point]
-                                )
-                                
-                                total_processed += 1
-                                
-                                # Clean up immediately
-                                del embedding
-                            else:
-                                logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {bookmark_id} due to empty text")
-                                
-                        except Exception as e:
-                            logger.error(f"❌ [REBUILD-{rebuild_id}] Error embedding bookmark {bookmark_id}: {str(e)}")
-                            
-                        finally:
-                            # Unload model after each bookmark
-                            self._unload_model()
-                            
-                            # Aggressive memory cleanup
-                            self.clean_memory()
-                            
-                            # Memory tracking
-                            memory_after = self.get_memory_usage()
-                            end_time = time.time()
-                            logger.info(f"⏱️ [REBUILD-{rebuild_id}] Bookmark {bookmark_id} processed in {end_time - start_time:.2f}s, memory: {memory_before} → {memory_after}")
-                            
-                    # After each batch, force an extra aggressive memory cleanup
-                    self.clean_memory()
+                                logger.info(f"✅ [REBUILD-{rebuild_id}] Added vector for bookmark {bookmark_id}")
+                            except Exception as e:
+                                logger.error(f"❌ [REBUILD-{rebuild_id}] Error processing bookmark {bookmark_id}: {str(e)}")
+                                continue
+                    finally:
+                        # Unload model after batch
+                        self._unload_model()
+                        
+                    # Force garbage collection
+                    gc.collect()
                     
-                    # Log progress
-                    progress = (total_processed / len(valid_bookmarks)) * 100
-                    logger.info(f"✅ [REBUILD-{rebuild_id}] Batch {batch_num} complete: {total_processed}/{len(valid_bookmarks)} ({progress:.1f}%)")
-                    
-                    # Add a delay between batches to avoid overwhelming the system
-                    time.sleep(1.0)  # Longer delay to let system recover
+                    # Sleep between batches
+                    time.sleep(1.0)
                 
                 logger.info(f"✅ [REBUILD-{rebuild_id}] Completed vector rebuild for user {user_id}")
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {total_processed} bookmarks out of {bookmark_count} total")
+                logger.info(f"📊 [REBUILD-{rebuild_id}] Processed {bookmark_count} bookmarks out of {bookmark_count} total")
                 
                 return True
                 
