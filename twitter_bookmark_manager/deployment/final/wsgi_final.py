@@ -20,10 +20,10 @@ timeout = 7200          # 2 hours - much longer timeout for large rebuilds
 workers = 1             # Single worker to avoid memory competition
 worker_class = 'sync'   # Synchronous worker for stability
 keepalive = 120
-max_requests = 1        # Disable worker recycling during rebuilds
+max_requests = 0        # Disable worker recycling to maintain context
 max_requests_jitter = 0
 worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
-preload_app = False     # Don't preload to avoid memory issues
+preload_app = True      # Preload app to maintain context
 graceful_timeout = 600  # 10 minutes grace period for cleanup
 worker_connections = 10 # Limit concurrent connections
 
@@ -300,11 +300,20 @@ if 'application' not in locals():
 else:
     logger.info("✅ Full application loaded successfully")
 
-# Log completion of initialization
-logger.info("WSGI application initialization complete")
-logger.info("="*50)
+# Register teardown function to properly handle cleanup
+@application.teardown_appcontext
+def cleanup_context(exception=None):
+    """Clean up resources when the application context ends"""
+    if exception:
+        logger.error(f"Error during context teardown: {str(exception)}")
+    logger.info("Application context tearing down, cleaning up resources")
+    
+    # Import cleanup functions here to avoid circular imports
+    from database.multi_user_db.db_final import cleanup_db_connections
+    cleanup_db_connections()
 
-# Add startup message
+logger.info("WSGI application initialization complete")
+logger.info("==================================================")
 logger.info("Starting with worker timeout of 2 hours for large rebuilds")
 
 # Configure CORS

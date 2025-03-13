@@ -938,25 +938,34 @@ def init_database():
     create_tables()
 
 def cleanup_db_connections():
-    """Clean up all database connections"""
+    """Clean up database connections without disposing of the engine"""
     global _engine, _session_factory, _active_sessions
     
-    logger.info("Cleaning up database connections")
-    
-    # Close all tracked sessions
-    close_all_sessions()
-    
-    # Dispose of engine
-    if _engine:
-        _engine.dispose()
-        logger.info("Engine disposed")
+    try:
+        logger.info("Cleaning up database connections")
         
-    # Reset globals
-    _engine = None
-    _session_factory = None
-    _active_sessions = set()
-    
-    logger.info("Database connections cleaned up")
+        # Close all tracked sessions
+        with _sessions_lock:
+            for session in _active_sessions:
+                try:
+                    if session:
+                        session.close()
+                except Exception as e:
+                    logger.warning(f"Error closing session: {e}")
+            _active_sessions.clear()
+            logger.info("Closed all tracked sessions")
+            
+        # Don't dispose of the engine, just close connections
+        if _engine:
+            with _engine_lock:
+                _engine.pool.dispose()
+                logger.info("Connection pool cleaned up")
+                
+    except Exception as e:
+        logger.error(f"Error during database cleanup: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info("Database connections cleaned up")
 
 # Initialize vector store if available
 try:
