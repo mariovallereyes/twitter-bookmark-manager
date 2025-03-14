@@ -750,6 +750,11 @@ def upload_bookmarks():
         if file.filename == '':
             logger.error(f"No file selected for user {user_id}")
             return jsonify({'success': False, 'error': 'No file selected'}), 400
+        
+        # Check if the file has a .json extension
+        if not file.filename.lower().endswith('.json'):
+            logger.error(f"Invalid file type: {file.filename} - must be a .json file")
+            return jsonify({'success': False, 'error': 'Only JSON files are allowed'}), 400
             
         logger.info(f"File received: {file.filename} for user {user_id}")
         
@@ -775,7 +780,7 @@ def upload_bookmarks():
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     json_data = json.load(f)
-                    bookmark_count = len(json_data)
+                    bookmark_count = len(json_data) if isinstance(json_data, list) else len(json_data.get('bookmarks', [])) if isinstance(json_data, dict) and 'bookmarks' in json_data else 0
                     logger.info(f"JSON validated - Contains {bookmark_count} entries")
             except json.JSONDecodeError as je:
                 logger.error(f"Invalid JSON format: {str(je)}")
@@ -820,6 +825,27 @@ def process_bookmarks():
             if file.filename == '':
                 return jsonify({'success': False, 'error': 'No file selected'}), 400
                 
+            # Validate that the file is a valid JSON file
+            try:
+                if file.filename.endswith('.json'):
+                    # Read file content for validation
+                    file_content = file.read()
+                    # Reset file pointer after reading
+                    file.seek(0)
+                    
+                    # Try to parse as JSON to validate
+                    try:
+                        json.loads(file_content.decode('utf-8'))
+                    except json.JSONDecodeError as je:
+                        logger.error(f"Invalid JSON format: {str(je)}")
+                        return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+                else:
+                    logger.error(f"File is not a JSON file: {file.filename}")
+                    return jsonify({'success': False, 'error': 'File must be a .json file'}), 400
+            except Exception as e:
+                logger.error(f"Error validating file: {str(e)}")
+                return jsonify({'success': False, 'error': f'Error validating file: {str(e)}'}), 500
+                
             # Save the file temporarily
             uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
             os.makedirs(uploads_dir, exist_ok=True)
@@ -828,44 +854,65 @@ def process_bookmarks():
             filename = f"bookmarks_{timestamp}.json"
             filepath = os.path.join(uploads_dir, filename)
             
-            file.save(filepath)
-            file_size = os.path.getsize(filepath)
-            logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
-            
+            try:
+                file.save(filepath)
+                file_size = os.path.getsize(filepath)
+                logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
+            except Exception as save_error:
+                logger.error(f"Error saving file: {str(save_error)}")
+                return jsonify({'success': False, 'error': f'Error saving file: {str(save_error)}'}), 500
+                
         elif request.is_json:
             # Direct JSON payload
-            data = request.get_json()
-            if not data:
-                return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
+            try:
+                data = request.get_json()
+                if not data:
+                    return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
+                    
+                # Save as a file for consistent processing
+                uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
+                os.makedirs(uploads_dir, exist_ok=True)
                 
-            # Save as a file for consistent processing
-            uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
-            os.makedirs(uploads_dir, exist_ok=True)
-            
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"bookmarks_{timestamp}.json"
-            filepath = os.path.join(uploads_dir, filename)
-            
-            with open(filepath, 'w') as f:
-                json.dump(data, f)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"bookmarks_{timestamp}.json"
+                filepath = os.path.join(uploads_dir, filename)
                 
-            logger.info(f"JSON data saved to file: {filepath}")
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(data, f)
+                    
+                logger.info(f"JSON data saved to file: {filepath}")
+            except Exception as e:
+                logger.error(f"Error processing JSON data: {str(e)}")
+                return jsonify({'success': False, 'error': f'Error processing JSON data: {str(e)}'}), 500
         else:
             return jsonify({'success': False, 'error': 'No file or JSON data provided'}), 400
             
         # Copy the uploaded file to the database directory for processing
-        db_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
-        os.makedirs(db_dir, exist_ok=True)
-        
-        target_file = os.path.join(db_dir, 'twitter_bookmarks.json')
-        shutil.copy2(filepath, target_file)
-        
-        logger.info(f"Copied uploaded file to {target_file} for processing")
-        
+        try:
+            db_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
+            os.makedirs(db_dir, exist_ok=True)
+            
+            target_file = os.path.join(db_dir, 'twitter_bookmarks.json')
+            shutil.copy2(filepath, target_file)
+            
+            logger.info(f"Copied uploaded file to {target_file} for processing")
+        except Exception as e:
+            logger.error(f"Error copying file to database directory: {str(e)}")
+            return jsonify({'success': False, 'error': f'Error copying file: {str(e)}'}), 500
+            
         # Process the JSON file
         try:
-            with open(target_file, 'r', encoding='utf-8') as f:
-                bookmark_data = json.load(f)
+            # Read the file safely
+            bookmark_data = None
+            try:
+                with open(target_file, 'r', encoding='utf-8') as f:
+                    bookmark_data = json.load(f)
+            except json.JSONDecodeError as je:
+                logger.error(f"Error parsing JSON: {str(je)}")
+                return jsonify({'success': False, 'error': f'Error parsing JSON: {str(je)}'}), 400
+            except Exception as file_error:
+                logger.error(f"Error opening file: {str(file_error)}")
+                return jsonify({'success': False, 'error': f'Error opening file: {str(file_error)}'}), 500
                 
             # Extracting bookmarks from different possible structures
             bookmarks_list = []
@@ -892,6 +939,7 @@ def process_bookmarks():
                 
                 # Check if we got a SQLAlchemy connection or a psycopg2 connection
                 is_sqlalchemy_conn = hasattr(db_conn, 'execute') and not hasattr(db_conn, 'cursor')
+                logger.info(f"Using {'SQLAlchemy' if is_sqlalchemy_conn else 'psycopg2'} connection")
                 
                 if is_sqlalchemy_conn:
                     # Using SQLAlchemy connection
@@ -998,101 +1046,104 @@ def process_bookmarks():
                     # Using psycopg2 connection (traditional approach)
                     cursor = db_conn.cursor()
                     
-                    # Check for existing bookmarks to avoid duplicates
-                    cursor.execute(
-                        "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
-                        (user_id,)
-                    )
-                    existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
-                    
-                    # Process each bookmark
-                    processed = 0
-                    skipped = 0
-                    errors = 0
-                    
-                    for bookmark in bookmarks_list:
-                        try:
-                            # Handle either direct tweet or nested tweet structure
-                            tweet = bookmark.get('tweet', bookmark)
-                            
-                            # Extract bookmark ID - try various possible fields
-                            bookmark_id = None
-                            for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
-                                if id_field in tweet:
-                                    bookmark_id = str(tweet[id_field])
-                                    break
+                    try:
+                        # Check for existing bookmarks to avoid duplicates
+                        cursor.execute(
+                            "SELECT bookmark_id FROM bookmarks WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        existing_bookmark_ids = {row[0] for row in cursor.fetchall()}
+                        
+                        # Process each bookmark
+                        processed = 0
+                        skipped = 0
+                        errors = 0
+                        
+                        for bookmark in bookmarks_list:
+                            try:
+                                # Handle either direct tweet or nested tweet structure
+                                tweet = bookmark.get('tweet', bookmark)
+                                
+                                # Extract bookmark ID - try various possible fields
+                                bookmark_id = None
+                                for id_field in ['id_str', 'id', 'tweet_id', 'rest_id']:
+                                    if id_field in tweet:
+                                        bookmark_id = str(tweet[id_field])
+                                        break
+                                        
+                                # New format: extract ID from tweet_url if available
+                                if not bookmark_id and 'tweet_url' in tweet:
+                                    # URLs like https://x.com/username/status/1234567890123456789
+                                    tweet_url = tweet['tweet_url']
+                                    if '/status/' in tweet_url:
+                                        # Extract the ID part after /status/
+                                        parts = tweet_url.split('/status/')
+                                        if len(parts) > 1:
+                                            # Get everything after /status/ and before any subsequent /
+                                            potential_id = parts[1].split('/')[0]
+                                            if potential_id.isdigit():
+                                                bookmark_id = potential_id
+                                                logger.info(f"Extracted ID {bookmark_id} from tweet_url")
+                                        
+                                if not bookmark_id:
+                                    logger.warning(f"Could not find ID in bookmark: {tweet}")
+                                    errors += 1
+                                    continue
                                     
-                            # New format: extract ID from tweet_url if available
-                            if not bookmark_id and 'tweet_url' in tweet:
-                                # URLs like https://x.com/username/status/1234567890123456789
-                                tweet_url = tweet['tweet_url']
-                                if '/status/' in tweet_url:
-                                    # Extract the ID part after /status/
-                                    parts = tweet_url.split('/status/')
-                                    if len(parts) > 1:
-                                        # Get everything after /status/ and before any subsequent /
-                                        potential_id = parts[1].split('/')[0]
-                                        if potential_id.isdigit():
-                                            bookmark_id = potential_id
-                                            logger.info(f"Extracted ID {bookmark_id} from tweet_url")
+                                # Skip duplicates
+                                if bookmark_id in existing_bookmark_ids:
+                                    logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
+                                    skipped += 1
+                                    continue
                                     
-                            if not bookmark_id:
-                                logger.warning(f"Could not find ID in bookmark: {tweet}")
+                                # Extract content
+                                tweet_text = tweet.get('full_text', tweet.get('text', ''))
+                                
+                                # Handle different date formats
+                                created_at = tweet.get('created_at', '')
+                                
+                                # Extract author information
+                                author = ''
+                                author_id = ''
+                                
+                                # Try to find author info in various possible locations
+                                user_info = tweet.get('user', {})
+                                if user_info:
+                                    author = user_info.get('screen_name', user_info.get('username', ''))
+                                    author_id = user_info.get('id_str', user_info.get('id', ''))
+                                    
+                                # Store raw data for vector embedding
+                                tweet_content = json.dumps(tweet)
+                                
+                                # Insert into database
+                                cursor.execute("""
+                                    INSERT INTO bookmarks 
+                                    (bookmark_id, user_id, text, raw_data, created_at, author_name, author_username, media_files) 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (bookmark_id) DO NOTHING
+                                """, (
+                                    bookmark_id,
+                                    user_id,
+                                    tweet_text,
+                                    tweet_content,
+                                    created_at,
+                                    author,
+                                    author_id,
+                                    "{}"
+                                ))
+                                
+                                # Track the new ID to prevent duplicates in the same batch
+                                existing_bookmark_ids.add(bookmark_id)
+                                processed += 1
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing bookmark: {str(e)}")
                                 errors += 1
-                                continue
-                                
-                            # Skip duplicates
-                            if bookmark_id in existing_bookmark_ids:
-                                logger.info(f"Skipping duplicate bookmark: {bookmark_id}")
-                                skipped += 1
-                                continue
-                                
-                            # Extract content
-                            tweet_text = tweet.get('full_text', tweet.get('text', ''))
-                            
-                            # Handle different date formats
-                            created_at = tweet.get('created_at', '')
-                            
-                            # Extract author information
-                            author = ''
-                            author_id = ''
-                            
-                            # Try to find author info in various possible locations
-                            user_info = tweet.get('user', {})
-                            if user_info:
-                                author = user_info.get('screen_name', user_info.get('username', ''))
-                                author_id = user_info.get('id_str', user_info.get('id', ''))
-                                
-                            # Store raw data for vector embedding
-                            tweet_content = json.dumps(tweet)
-                            
-                            # Insert into database
-                            cursor.execute("""
-                                INSERT INTO bookmarks 
-                                (bookmark_id, user_id, text, raw_data, created_at, author_name, author_username, media_files) 
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (bookmark_id) DO NOTHING
-                            """, (
-                                bookmark_id,
-                                user_id,
-                                tweet_text,
-                                tweet_content,
-                                created_at,
-                                author,
-                                author_id,
-                                "{}"
-                            ))
-                            
-                            # Track the new ID to prevent duplicates in the same batch
-                            existing_bookmark_ids.add(bookmark_id)
-                            processed += 1
-                            
-                        except Exception as e:
-                            logger.error(f"Error processing bookmark: {str(e)}")
-                            errors += 1
-                    
-                    # Commit changes for psycopg2
-                    db_conn.commit()
+                        
+                        # Commit changes for psycopg2
+                        db_conn.commit()
+                    finally:
+                        cursor.close()
                 
                 logger.info(f"Processed {processed} bookmarks, skipped {skipped}, errors: {errors}")
                 
@@ -1106,6 +1157,7 @@ def process_bookmarks():
                 
             except Exception as db_error:
                 logger.error(f"Database error: {str(db_error)}")
+                logger.error(traceback.format_exc())
                 if 'db_conn' in locals() and db_conn:
                     # Check if we have a SQLAlchemy connection (has execute method)
                     if hasattr(db_conn, 'execute') and not hasattr(db_conn, 'cursor'):
@@ -1117,11 +1169,15 @@ def process_bookmarks():
         except json.JSONDecodeError as je:
             logger.error(f"Invalid JSON format: {str(je)}")
             return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+        except Exception as e:
+            logger.error(f"Error in process_bookmarks: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'success': False, 'error': f'Error processing bookmarks: {str(e)}'}), 500
             
     except Exception as e:
-        logger.error(f"Error in process_bookmarks: {str(e)}")
+        logger.error(f"Unexpected error in process_bookmarks: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/update-status', methods=['GET'])
 def update_status_redirect():
@@ -1176,68 +1232,83 @@ def update_database():
         # Get current user from context
         current_user = get_current_user()
         if not current_user:
-            return jsonify({"error": "Not authenticated"}), 401
+            logger.error("User not authenticated in update-database")
+            return jsonify({"success": False, "error": "Not authenticated"}), 401
             
         # Get parameters
         rebuild_vectors = request.json.get('rebuild_vectors', False)
         background = request.json.get('background', True)
+        
+        # Log the request
+        logger.info(f"Update database request: user={current_user.id}, rebuild_vectors={rebuild_vectors}, background={background}")
         
         # Generate session ID for tracking
         session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         
         if rebuild_vectors:
             # Get bookmarks for the user
-            from database.multi_user_db.db_final import get_bookmarks_for_user
-            bookmarks = get_bookmarks_for_user(current_user.id)
-            
-            if background:
-                # Background processing
-                logger.info(f"Starting background vector rebuild for user {current_user.id}")
+            try:
+                from database.multi_user_db.db_final import get_bookmarks_for_user
+                bookmarks = get_bookmarks_for_user(current_user.id)
+                logger.info(f"Retrieved {len(bookmarks) if bookmarks else 0} bookmarks for user {current_user.id}")
                 
-                def rebuild_task():
-                    with app.app_context():
-                        try:
+                if background:
+                    # Background processing
+                    logger.info(f"Starting background vector rebuild for user {current_user.id}")
+                    
+                    def rebuild_task():
+                        with app.app_context():
+                            try:
+                                vector_store = get_multi_user_vector_store()
+                                success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
+                                if not success:
+                                    logger.error(f"Error rebuilding vector store for user {current_user.id}: {message}")
+                            except Exception as e:
+                                logger.error(f"Error in background rebuild: {str(e)}")
+                                logger.error(traceback.format_exc())
+                    
+                    thread = Thread(target=rebuild_task)
+                    thread.daemon = True
+                    thread.start()
+                    
+                    return jsonify({
+                        "success": True,
+                        "message": "Vector rebuild started in background",
+                        "session_id": session_id
+                    })
+                else:
+                    # Direct processing
+                    logger.info(f"Starting direct vector rebuild for user {current_user.id}")
+                    try:
+                        with app.app_context():
                             vector_store = get_multi_user_vector_store()
                             success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
                             if not success:
-                                logger.error(f"Error rebuilding vector store for user {current_user.id}: {message}")
-                        except Exception as e:
-                            logger.error(f"Error in background rebuild: {str(e)}")
-                            logger.error(traceback.format_exc())
-                
-                thread = Thread(target=rebuild_task)
-                thread.daemon = True
-                thread.start()
-                
-                return jsonify({
-                    "message": "Vector rebuild started in background",
-                    "session_id": session_id
-                })
-            else:
-                # Direct processing
-                logger.info(f"Starting direct vector rebuild for user {current_user.id}")
-                try:
-                    with app.app_context():
-                        vector_store = get_multi_user_vector_store()
-                        success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
-                        if not success:
-                            return jsonify({"error": message}), 500
-                except Exception as e:
-                    logger.error(f"Error rebuilding vector store: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    return jsonify({"error": str(e)}), 500
-                    
-                return jsonify({
-                    "message": "Vector rebuild completed",
-                    "session_id": session_id
-                })
+                                logger.error(f"Vector rebuild failed: {message}")
+                                return jsonify({"success": False, "error": message}), 500
+                                
+                        logger.info(f"Vector rebuild completed for user {current_user.id}")
+                        return jsonify({
+                            "success": True,
+                            "message": "Vector rebuild completed",
+                            "session_id": session_id
+                        })
+                    except Exception as e:
+                        logger.error(f"Error rebuilding vector store: {str(e)}")
+                        logger.error(traceback.format_exc())
+                        return jsonify({"success": False, "error": str(e)}), 500
+            except Exception as e:
+                logger.error(f"Error getting bookmarks: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({"success": False, "error": f"Error getting bookmarks: {str(e)}"}), 500
         
-        return jsonify({"message": "No action taken"})
+        # If we get here, no action was taken
+        return jsonify({"success": True, "message": "No action taken"})
         
     except Exception as e:
         logger.error(f"Error in update_database: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/categories/all', methods=['GET'])
 @login_required
@@ -1302,8 +1373,8 @@ def handle_api_exception(e):
     # Get the path to check if this is an API route
     path = request.path if request else ""
     
-    # Only apply JSON handling to API routes
-    if path.startswith('/api/'):
+    # Apply JSON handling to API routes and specific endpoints that should return JSON
+    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
         logger.error(f"API error on {path}: {str(e)}")
         logger.error(traceback.format_exc())
         
@@ -1315,6 +1386,81 @@ def handle_api_exception(e):
         }), 500
     
     # For non-API routes, let the default Flask error handler manage it
+    return e
+
+# Add specific error handlers for various HTTP errors
+@app.errorhandler(400)
+def handle_bad_request(e):
+    """Handle 400 Bad Request errors"""
+    # Get the path to check if this is an API or upload route
+    path = request.path if request else ""
+    
+    # Only apply JSON handling to API routes and specific endpoints
+    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        logger.error(f"Bad request error on {path}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Bad Request: ' + str(e),
+            'path': path
+        }), 400
+    
+    # For non-API routes, let the default handler manage it
+    return e
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    """Handle 404 Not Found errors"""
+    # Get the path to check if this is an API or upload route
+    path = request.path if request else ""
+    
+    # Only apply JSON handling to API routes and specific endpoints
+    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        logger.error(f"Not found error on {path}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Not Found: The requested resource does not exist',
+            'path': path
+        }), 404
+    
+    # For non-API routes, let the default handler manage it
+    return e
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    """Handle 405 Method Not Allowed errors"""
+    # Get the path to check if this is an API or upload route
+    path = request.path if request else ""
+    
+    # Only apply JSON handling to API routes and specific endpoints
+    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        logger.error(f"Method not allowed error on {path}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Method Not Allowed: The method is not allowed for this endpoint',
+            'path': path,
+            'allowed_methods': e.valid_methods if hasattr(e, 'valid_methods') else None
+        }), 405
+    
+    # For non-API routes, let the default handler manage it
+    return e
+
+@app.errorhandler(500)
+def handle_server_error(e):
+    """Handle 500 Internal Server Error"""
+    # Get the path to check if this is an API or upload route
+    path = request.path if request else ""
+    
+    # Only apply JSON handling to API routes and specific endpoints
+    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        logger.error(f"Server error on {path}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Internal Server Error: The server encountered an unexpected condition',
+            'path': path
+        }), 500
+    
+    # For non-API routes, let the default handler manage it
     return e
 
 # Run the app if this file is executed directly

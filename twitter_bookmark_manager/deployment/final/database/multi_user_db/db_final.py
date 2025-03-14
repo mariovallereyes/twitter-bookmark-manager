@@ -589,22 +589,52 @@ def get_bookmarks_for_user(user_id):
     Returns:
         list: List of dictionaries containing bookmark data
     """
+    conn = None
+    cursor = None
     try:
         conn = get_db_connection()
         
-        # Query to get all bookmarks for the user
-        query = """
-            SELECT bookmark_id, text, created_at, author_name, author_username, 
-                   media_files, raw_data
-            FROM bookmarks 
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-        """
-        
-        with conn.cursor() as cur:
-            cur.execute(query, (user_id,))
+        # Different handling based on connection type
+        if hasattr(conn, 'execute'):  # SQLAlchemy connection
+            # Query to get all bookmarks for the user
+            query = text("""
+                SELECT bookmark_id, text, created_at, author_name, author_username, 
+                       media_files, raw_data
+                FROM bookmarks 
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+            """)
+            
+            result = conn.execute(query, {"user_id": user_id})
+            
             bookmarks = []
-            for row in cur.fetchall():
+            for row in result:
+                bookmark = {
+                    'bookmark_id': row[0],
+                    'text': row[1],
+                    'created_at': row[2],
+                    'author_name': row[3],
+                    'author_username': row[4],
+                    'media_files': row[5],
+                    'raw_data': row[6]
+                }
+                bookmarks.append(bookmark)
+        else:  # psycopg2 connection
+            cursor = conn.cursor()
+            
+            # Query to get all bookmarks for the user
+            query = """
+                SELECT bookmark_id, text, created_at, author_name, author_username, 
+                       media_files, raw_data
+                FROM bookmarks 
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """
+            
+            cursor.execute(query, (user_id,))
+            
+            bookmarks = []
+            for row in cursor.fetchall():
                 bookmark = {
                     'bookmark_id': row[0],
                     'text': row[1],
@@ -616,14 +646,28 @@ def get_bookmarks_for_user(user_id):
                 }
                 bookmarks.append(bookmark)
                 
+        logging.info(f"Retrieved {len(bookmarks)} bookmarks for user {user_id}")
         return bookmarks
         
     except Exception as e:
         logging.error(f"Error getting bookmarks for user {user_id}: {str(e)}")
+        logging.error(traceback.format_exc())
         raise
     finally:
+        # Clean up resources
+        if cursor:
+            try:
+                cursor.close()
+            except Exception as e:
+                logging.warning(f"Error closing cursor: {str(e)}")
+                
         if conn:
-            conn.close()
+            try:
+                # Only close psycopg2 connections, not SQLAlchemy
+                if not hasattr(conn, 'execute'):
+                    conn.close()
+            except Exception as e:
+                logging.warning(f"Error closing connection: {str(e)}")
 
 def create_tables():
     """Create database tables if they don't already exist using the most reliable available method"""
