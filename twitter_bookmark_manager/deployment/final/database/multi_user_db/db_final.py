@@ -972,11 +972,7 @@ def check_engine_health() -> Dict[str, Any]:
             # Failed to parse log
             logger.error(f"Failed to parse error log: {str(parse_error)}")
             
-        # Ensure connection error time is tracked
-        global _connection_error_time
-        if '_connection_error_time' not in globals():
-            _connection_error_time = None
-            
+        # Set connection error time - no need to check globals
         _last_connection_error = str(e)
         _connection_error_time = datetime.now()
         
