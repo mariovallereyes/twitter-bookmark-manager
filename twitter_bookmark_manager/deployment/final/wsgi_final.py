@@ -352,7 +352,7 @@ def health_check():
         
         # Use Flask's json module directly to avoid HTML error responses
         from flask import json
-        return app.response_class(
+        return application.response_class(
             response=json.dumps(error_response),
             status=500,
             mimetype='application/json'
