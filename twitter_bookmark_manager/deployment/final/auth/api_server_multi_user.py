@@ -131,10 +131,40 @@ logging.basicConfig(
 logger = logging.getLogger('api_server_multi_user')
 logger.info(f"Starting multi-user API server with PythonAnywhere improvements... Log file: {LOG_FILE}")
 
-# Create Flask app
+# Create Flask app - with robust template path resolution
+template_paths = [
+    os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+    os.path.join(BASE_DIR, 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+    os.path.join(BASE_DIR, 'web_final/templates'),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'web_final/templates')),
+]
+
+# Find the first existing template path
+template_folder = None
+for path in template_paths:
+    if os.path.exists(path):
+        template_folder = path
+        logger.info(f"Found templates at: {path}")
+        break
+
+if not template_folder:
+    logger.warning(f"Could not find templates in any of: {template_paths}")
+    # Use the default path as fallback
+    template_folder = os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates')
+    logger.info(f"Using default template path: {template_folder}")
+
+# Create static folder path
+static_folder = os.path.join(os.path.dirname(template_folder), 'static')
+os.makedirs(static_folder, exist_ok=True)
+
+# Create Flask app with the resolved template path
 app = Flask(__name__, 
-            template_folder=os.environ.get('TEMPLATE_FOLDER', os.path.join(BASE_DIR, 'twitter_bookmark_manager/web/templates')),
-            static_folder=os.environ.get('STATIC_FOLDER', os.path.join(BASE_DIR, 'twitter_bookmark_manager/web/static')))
+            template_folder=template_folder,
+            static_folder=static_folder)
+
+# Log template information for debugging
+logger.info(f"Flask app created with template_folder: {app.template_folder}")
+logger.info(f"Flask app created with static_folder: {app.static_folder}")
 
 # Enable error catching
 app.config['PROPAGATE_EXCEPTIONS'] = False

@@ -133,32 +133,50 @@ error_details = None
 
 # Attempt to import the full application
 try:
-    # MODIFIED: Always try to load the full application even with DB issues
-    # This allows the application's retry mechanisms to work
-    logger.info("Loading full application from auth.api_server_multi_user")
+    # Try to import flask_session first
+    import flask_session
+    logger.info("flask_session module is available")
+    # Continue with normal app loading
+    from auth.api_server_multi_user import app as flask_app
+    app = flask_app
+    logger.info("Successfully loaded app from auth.api_server_multi_user")
     
-    # Before importing, check if flask_session is available
-    try:
-        import flask_session
-        logger.info("✅ flask_session module is available")
-    except ImportError:
-        logger.warning("⚠️ flask_session module is not installed. Installing or working around...")
-        
-        # Define a mock Session class to allow the app to load without flask_session
-        import sys
-        class MockSession:
-            def __init__(self, app=None):
-                self.app = app
-                logger.info("Using MockSession since flask_session is not available")
-                
-        sys.modules['flask_session'] = type('flask_session', (), {'Session': MockSession})
-        logger.info("Created mock flask_session.Session implementation")
+    # Set template path explicitly
+    if hasattr(app, 'template_folder'):
+        logger.info(f"Template folder is: {app.template_folder}")
+        if not os.path.exists(app.template_folder):
+            logger.warning(f"Template folder does not exist: {app.template_folder}")
+            # Try to find the correct path
+            possible_template_paths = [
+                os.path.join(os.environ.get('APP_BASE_DIR', '/app'), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+                os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates')
+            ]
+            for path in possible_template_paths:
+                if os.path.exists(path):
+                    logger.info(f"Found template folder at: {path}")
+                    app.template_folder = path
+                    logger.info(f"Updated template folder to: {path}")
+                    break
+except ImportError as e:
+    logger.warning(f"flask_session module not available: {e}")
+    logger.info("Creating mock session class")
     
-    from auth.api_server_multi_user import app as full_application
-    logger.info("✅ Successfully loaded full application")
+    # Create a mock Session class to avoid errors
+    class MockSession:
+        def __init__(self, app=None):
+            self.app = app
+            logger.info("Initialized MockSession")
+            
+    # Make flask_session available with mock
+    sys.modules['flask_session'] = type('mock_flask_session', (), {'Session': MockSession})
+    
+    # Load the app
+    from auth.api_server_multi_user import app as flask_app
+    app = flask_app
+    logger.info("Successfully loaded app with MockSession")
     
     # Set the application
-    application = full_application
+    application = app
     
     # Add DB status info for frontend templates
     if not db_status.get('healthy', False):
