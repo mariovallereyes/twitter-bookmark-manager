@@ -728,8 +728,31 @@ def index():
         total_results=len(latest_tweets)
     )
 
+def safe_vector_operation(func):
+    """
+    Decorator to safely handle vector store operations.
+    Catches vector store access errors and returns proper JSON responses.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except RuntimeError as re:
+            error_str = str(re)
+            if "Storage folder" in error_str and "already accessed by another instance" in error_str:
+                logger.error(f"Vector store access error in {func.__name__}: {error_str}")
+                return jsonify({
+                    'success': False,
+                    'error': "Vector database is busy. Please try again in a few minutes.",
+                    'retry_after': 300  # 5 minutes
+                }), 503
+            # Re-raise other runtime errors
+            raise
+    return wrapper
+
 @app.route('/upload-bookmarks', methods=['POST'])
 @login_required
+@safe_vector_operation
 def upload_bookmarks():
     """
     Handle file upload for bookmarks JSON file
@@ -953,6 +976,7 @@ def validate_json_file(filepath):
 
 @app.route('/process-bookmarks', methods=['POST'])
 @login_required
+@safe_vector_operation
 def process_bookmarks():
     """Process bookmarks from a JSON file."""
     try:
@@ -1097,13 +1121,33 @@ def process_bookmarks():
                 with app.app_context():
                     try:
                         logger.info(f"Starting background processing for session {session_id}")
-                        result = final_update_bookmarks(
-                            session_id=session_id,
-                            start_index=0,
-                            rebuild_vector=True,  # Always rebuild vectors when processing
-                            user_id=user_id
-                        )
-                        logger.info(f"Background processing completed for session {session_id}: {result}")
+                        
+                        # Add specific handling for vector store access errors
+                        try:
+                            result = final_update_bookmarks(
+                                session_id=session_id,
+                                start_index=0,
+                                rebuild_vector=True,  # Always rebuild vectors when processing
+                                user_id=user_id
+                            )
+                            logger.info(f"Background processing completed for session {session_id}: {result}")
+                        except RuntimeError as re:
+                            if "Storage folder" in str(re) and "already accessed by another instance" in str(re):
+                                logger.error(f"Vector store access conflict: {str(re)}")
+                                
+                                # Save error status with clear message for client
+                                error_status = {
+                                    'session_id': session_id,
+                                    'status': 'error',
+                                    'message': "Vector database is busy. Please try again in a few minutes.",
+                                    'timestamp': datetime.now().isoformat(),
+                                    'user_id': user_id,
+                                    'technical_details': str(re)
+                                }
+                                save_session_status(session_id, error_status)
+                            else:
+                                # Re-raise if it's not the vector store access error
+                                raise
                     except Exception as e:
                         logger.error(f"Error in background processing for session {session_id}: {str(e)}")
                         logger.error(traceback.format_exc())
@@ -1400,8 +1444,11 @@ def handle_api_exception(e):
     # Get the path to check if this is an API route
     path = request.path if request else ""
     
-    # Apply JSON handling to API routes and specific endpoints that should return JSON
-    if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+    # Check if this request is marked as a JSON API, either by path or by our middleware
+    is_api = hasattr(g, 'is_json_api') or path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']
+    
+    # Apply JSON handling to API routes
+    if is_api:
         logger.error(f"API error on {path}: {str(e)}")
         logger.error(traceback.format_exc())
         
@@ -1499,8 +1546,27 @@ def add_header(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     
     # Force Content-Type to be application/json for API routes
-    if request.path.startswith('/api/') or request.path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
-        response.headers['Content-Type'] = 'application/json'
+    if (request.path.startswith('/api/') or 
+        request.path in ['/upload-bookmarks', '/process-bookmarks', '/update-database'] or
+        hasattr(g, 'is_json_api')):
+        
+        # Check if the response is an error response (4xx or 5xx)
+        is_error = 400 <= response.status_code < 600
+        
+        # If this is a JSON API route, force Content-Type to be application/json
+        # EVEN IF the response was generated by an error handler that set a different type
+        if is_error or not response.headers.get('Content-Type') or 'text/html' in response.headers.get('Content-Type', ''):
+            response.headers['Content-Type'] = 'application/json'
+            
+            # If the response body is HTML but this is a JSON API route, convert it to a JSON error message
+            if 'text/html' in response.headers.get('Content-Type', '') or '<!DOCTYPE' in response.get_data(as_text=True)[:20]:
+                error_message = {
+                    'success': False,
+                    'error': 'An error occurred on the server',
+                    'status_code': response.status_code,
+                    'path': request.path
+                }
+                response.set_data(json.dumps(error_message))
         
     return response
 
@@ -1513,6 +1579,38 @@ def handle_json_error(e):
         'error': f'Invalid JSON format: {str(e)}',
         'path': request.path
     }), 400
+
+# Add a specific handler for vector store errors
+@app.errorhandler(RuntimeError)
+def handle_runtime_error(e):
+    """Handle RuntimeError specifically for vector store access issues"""
+    error_str = str(e)
+    logger.error(f"Runtime error: {error_str}")
+    
+    # Check if this is a vector store access error
+    if "Storage folder" in error_str and "already accessed by another instance" in error_str:
+        return jsonify({
+            'success': False,
+            'error': "Vector database is busy. Please try again in a few minutes.",
+            'path': request.path,
+            'technical_details': error_str
+        }), 503  # Service Unavailable
+    
+    # For other runtime errors, return a generic message
+    return jsonify({
+        'success': False,
+        'error': f"Server runtime error occurred",
+        'path': request.path
+    }), 500
+
+# Add a global error interceptor middleware to ensure JSON responses
+@app.before_request
+def ensure_json_response():
+    """Ensure all API routes return JSON even when errors occur"""
+    # Only apply to API routes and specific endpoints
+    if request.path.startswith('/api/') or request.path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        # Store a flag in g to indicate this is a JSON API route
+        g.is_json_api = True
 
 # Run the app if this file is executed directly
 if __name__ == '__main__':
