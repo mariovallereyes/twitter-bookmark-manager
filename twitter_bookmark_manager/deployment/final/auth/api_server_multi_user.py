@@ -785,22 +785,43 @@ def upload_bookmarks():
             is_valid, error_message, data = validate_json_file(filepath)
             if not is_valid:
                 logger.error(f"Invalid JSON format: {error_message}")
-                return jsonify({'success': False, 'error': error_message}), 400
+                return jsonify({
+                    'success': False, 
+                    'error': error_message,
+                    'file_saved': True,
+                    'filepath': filepath
+                }), 400
+                
+            logger.info(f"File validated successfully: {filepath}")
             
             # Return success with session ID for later processing
             session_id = str(uuid.uuid4())
+            
+            # Count bookmarks for informational purposes
+            bookmark_count = 0
+            if isinstance(data, list):
+                bookmark_count = len(data)
+            elif isinstance(data, dict) and 'bookmarks' in data:
+                bookmark_count = len(data.get('bookmarks', []))
+                
+            logger.info(f"Successfully uploaded and validated file with {bookmark_count} bookmarks")
+            
             return jsonify({
                 'success': True, 
                 'message': 'File uploaded successfully',
                 'file': filename,
                 'session_id': session_id,
-                'bookmark_count': len(data) if isinstance(data, list) else len(data.get('bookmarks', [])) if isinstance(data, dict) and 'bookmarks' in data else 0
+                'bookmark_count': bookmark_count
             })
             
         except Exception as save_error:
-            logger.error(f"Error saving file: {str(save_error)}")
+            logger.error(f"Error processing uploaded file: {str(save_error)}")
             logger.error(traceback.format_exc())
-            return jsonify({'success': False, 'error': f'Error saving file: {str(save_error)}'}), 500
+            return jsonify({
+                'success': False, 
+                'error': f'Error processing file: {str(save_error)}',
+                'file_saved': os.path.exists(filepath)
+            }), 500
             
     except Exception as e:
         logger.error(f"Error in upload_bookmarks: {str(e)}")
@@ -809,7 +830,7 @@ def upload_bookmarks():
 
 def validate_json_file(filepath):
     """
-    Validate that a file contains valid JSON.
+    Validate that a file contains valid JSON and has a structure suitable for bookmarks.
     
     Args:
         filepath (str): Path to the file to validate
@@ -818,47 +839,116 @@ def validate_json_file(filepath):
         tuple: (is_valid, error_message, data)
     """
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        logger.info(f"Validating JSON file: {filepath}")
+        
+        # Check if file exists
+        if not os.path.exists(filepath):
+            logger.error(f"File not found: {filepath}")
+            return False, "File not found", None
             
-        # Check if it's an object or array
-        if not isinstance(data, (dict, list)):
-            return False, "JSON must be an object or array", None
+        # Check file size
+        file_size = os.path.getsize(filepath)
+        if file_size == 0:
+            logger.error(f"File is empty: {filepath}")
+            return False, "File is empty", None
             
-        # Check if data looks like bookmarks
+        # Check if file is too large (over 30MB)
+        if file_size > 30 * 1024 * 1024:
+            logger.error(f"File is too large: {file_size} bytes")
+            return False, f"File is too large: {file_size} bytes (max 30MB)", None
+            
+        # Open and read file - handle encoding issues gracefully
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+                
+            # Check if file content is empty
+            if not file_content.strip():
+                logger.error(f"File content is empty: {filepath}")
+                return False, "File content is empty", None
+                
+            # Try to parse JSON
+            try:
+                data = json.loads(file_content)
+                logger.info(f"Successfully parsed JSON, data type: {type(data).__name__}")
+            except json.JSONDecodeError as je:
+                line_col = f" at line {je.lineno}, column {je.colno}"
+                error_msg = f"Invalid JSON format: {je.msg}{line_col}"
+                logger.error(error_msg)
+                
+                # Try to provide more context about the error
+                if je.lineno > 1:
+                    lines = file_content.split('\n')
+                    if je.lineno <= len(lines):
+                        context_line = lines[je.lineno - 1]
+                        error_msg += f"\nProblematic line: {context_line[:100]}"
+                        
+                return False, error_msg, None
+        except UnicodeDecodeError as ude:
+            logger.error(f"Unicode decode error: {str(ude)}")
+            return False, f"File encoding error: {str(ude)} - Please ensure the file is UTF-8 encoded", None
+        except IOError as ioe:
+            logger.error(f"IO error reading file: {str(ioe)}")
+            return False, f"Error reading file: {str(ioe)}", None
+        
+        # Validate structure based on data type
         if isinstance(data, list):
             if len(data) == 0:
+                logger.error("JSON array is empty")
                 return False, "JSON array is empty", None
+                
+            # Log first item for debugging
+            if len(data) > 0:
+                logger.info(f"First item in array has keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'not a dict'}")
                 
             # It's a direct array of bookmarks
             return True, "", data
             
         elif isinstance(data, dict):
+            # Log keys for debugging
+            logger.info(f"JSON object has top-level keys: {list(data.keys())}")
+            
             # Check for common bookmark fields in dictionary
             if 'bookmarks' in data and isinstance(data['bookmarks'], list):
                 if len(data['bookmarks']) == 0:
+                    logger.error("No bookmarks found in the 'bookmarks' field")
                     return False, "No bookmarks found in the 'bookmarks' field", None
+                    
+                logger.info(f"Found {len(data['bookmarks'])} bookmarks in 'bookmarks' field")
                 return True, "", data
                 
             # Other possible structures
             if 'tweet' in data and isinstance(data['tweet'], list):
                 if len(data['tweet']) == 0:
+                    logger.error("No tweets found in the 'tweet' field")
                     return False, "No tweets found in the 'tweet' field", None
+                    
+                logger.info(f"Found {len(data['tweet'])} tweets in 'tweet' field")
                 return True, "", data
                 
-            # If it has id_str or other tweet fields directly, it might be a single bookmark
-            if any(key in data for key in ['id_str', 'id', 'tweet_id', 'tweet_url']):
+            # Check for common bookmark fields directly in the object
+            bookmark_fields = ['id_str', 'id', 'tweet_id', 'tweet_url', 'text', 'full_text']
+            has_bookmark_fields = any(key in data for key in bookmark_fields)
+            
+            if has_bookmark_fields:
+                # Log which fields were found
+                found_fields = [key for key in bookmark_fields if key in data]
+                logger.info(f"Found bookmark fields directly in object: {found_fields}")
+                
                 # Wrap single bookmark in an array
                 return True, "", [data]
-                
-            return False, "Could not identify bookmark data in JSON", None
             
-        return True, "", data
-        
-    except json.JSONDecodeError as je:
-        line_col = f" at line {je.lineno}, column {je.colno}"
-        return False, f"Invalid JSON format: {je.msg}{line_col}", None
+            # If we get here, structure is not recognized
+            logger.error(f"Unrecognized JSON structure. Found keys: {list(data.keys())}")
+            return False, "Could not identify bookmark data in JSON. Expected 'bookmarks' array or bookmark fields.", None
+        else:
+            # Not an object or array
+            logger.error(f"JSON is not an object or array, found type: {type(data).__name__}")
+            return False, f"JSON must be an object or array, found: {type(data).__name__}", None
+            
     except Exception as e:
+        logger.error(f"Unexpected error validating JSON: {str(e)}")
+        logger.error(traceback.format_exc())
         return False, f"Error validating JSON: {str(e)}", None
 
 @app.route('/process-bookmarks', methods=['POST'])
@@ -881,6 +971,7 @@ def process_bookmarks():
         if 'file' in request.files:
             file = request.files['file']
             if file.filename == '':
+                logger.error("No file selected in the request")
                 return jsonify({'success': False, 'error': 'No file selected'}), 400
                 
             # Check if file is a JSON file
@@ -902,46 +993,76 @@ def process_bookmarks():
                 file_size = os.path.getsize(filepath)
                 logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
                 
-                # Validate it's a valid JSON file
+                # Validate it's a valid JSON file using our comprehensive validator
                 is_valid, error_message, data = validate_json_file(filepath)
                 if not is_valid:
                     logger.error(f"Invalid JSON format: {error_message}")
-                    return jsonify({'success': False, 'error': error_message}), 400
+                    return jsonify({
+                        'success': False, 
+                        'error': error_message,
+                        'file_saved': True,
+                        'filepath': filepath
+                    }), 400
                     
+                # Log validation success
+                logger.info(f"File validation successful: {filepath}")
+                
                 # File is valid JSON, set for processing
                 file_to_process = filepath
             except Exception as e:
-                logger.error(f"Error saving file: {str(e)}")
-                return jsonify({'success': False, 'error': f'Error saving file: {str(e)}'}), 500
+                logger.error(f"Error saving or validating file: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({'success': False, 'error': f'Error processing file: {str(e)}'}), 500
                 
         elif request.is_json:
             # Handle direct JSON payload
-            data = request.get_json()
-            if not data:
-                return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
-                
-            # Save as file for consistent processing
-            uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
-            os.makedirs(uploads_dir, exist_ok=True)
-            
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"bookmarks_{timestamp}.json"
-            filepath = os.path.join(uploads_dir, filename)
-            
             try:
+                data = request.get_json()
+                if not data:
+                    logger.error("Empty JSON data provided")
+                    return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
+                    
+                logger.info(f"Received direct JSON payload of type: {type(data).__name__}")
+                
+                # Save as file for consistent processing
+                uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
+                os.makedirs(uploads_dir, exist_ok=True)
+                
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"bookmarks_{timestamp}.json"
+                filepath = os.path.join(uploads_dir, filename)
+                
                 with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(data, f)
+                    json.dump(data, f, ensure_ascii=False, indent=2)
                     
                 logger.info(f"JSON data saved to file: {filepath}")
+                
+                # Validate the saved file to ensure it has the right structure
+                is_valid, error_message, _ = validate_json_file(filepath)
+                if not is_valid:
+                    logger.error(f"Invalid JSON structure: {error_message}")
+                    return jsonify({
+                        'success': False, 
+                        'error': error_message,
+                        'file_saved': True,
+                        'filepath': filepath
+                    }), 400
+                
                 file_to_process = filepath
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON decode error: {str(je)}")
+                return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
             except Exception as e:
-                logger.error(f"Error saving JSON data to file: {str(e)}")
-                return jsonify({'success': False, 'error': f'Error saving JSON data: {str(e)}'}), 500
+                logger.error(f"Error processing JSON data: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({'success': False, 'error': f'Error processing JSON data: {str(e)}'}), 500
         else:
+            logger.error("No file or JSON data provided in request")
             return jsonify({'success': False, 'error': 'No file or JSON data provided'}), 400
             
         # If we don't have a file to process, something went wrong
         if not file_to_process:
+            logger.error("Failed to prepare file for processing - no file_to_process set")
             return jsonify({'success': False, 'error': 'Failed to prepare file for processing'}), 500
             
         # Copy to database directory
@@ -954,7 +1075,13 @@ def process_bookmarks():
             logger.info(f"Copied file to database directory: {target_file}")
         except Exception as e:
             logger.error(f"Error copying file to database directory: {str(e)}")
-            return jsonify({'success': False, 'error': f'Error copying file: {str(e)}'}), 500
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'success': False, 
+                'error': f'Error copying file: {str(e)}',
+                'file_saved': True,
+                'filepath': file_to_process
+            }), 500
             
         # Process the bookmarks from the JSON file
         try:
@@ -963,21 +1090,33 @@ def process_bookmarks():
             
             # Generate a session ID for tracking
             session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            logger.info(f"Generated session ID for processing: {session_id}")
             
             # Start processing in the background
             def process_task():
                 with app.app_context():
                     try:
+                        logger.info(f"Starting background processing for session {session_id}")
                         result = final_update_bookmarks(
                             session_id=session_id,
                             start_index=0,
                             rebuild_vector=True,  # Always rebuild vectors when processing
                             user_id=user_id
                         )
-                        logger.info(f"Background processing completed: {result}")
+                        logger.info(f"Background processing completed for session {session_id}: {result}")
                     except Exception as e:
-                        logger.error(f"Error in background processing: {str(e)}")
+                        logger.error(f"Error in background processing for session {session_id}: {str(e)}")
                         logger.error(traceback.format_exc())
+                        
+                        # Save error status for client to retrieve
+                        error_status = {
+                            'session_id': session_id,
+                            'status': 'error',
+                            'message': f"Processing error: {str(e)}",
+                            'timestamp': datetime.now().isoformat(),
+                            'user_id': user_id
+                        }
+                        save_session_status(session_id, error_status)
             
             # Start background thread for processing
             thread = Thread(target=process_task)
@@ -988,13 +1127,19 @@ def process_bookmarks():
             return jsonify({
                 'success': True,
                 'message': 'Processing started in background',
-                'session_id': session_id
+                'session_id': session_id,
+                'file_processed': os.path.basename(file_to_process)
             })
             
         except Exception as e:
             logger.error(f"Error initiating bookmark processing: {str(e)}")
             logger.error(traceback.format_exc())
-            return jsonify({'success': False, 'error': f'Error initiating processing: {str(e)}'}), 500
+            return jsonify({
+                'success': False, 
+                'error': f'Error initiating processing: {str(e)}',
+                'file_saved': True,
+                'filepath': file_to_process
+            }), 500
             
     except Exception as e:
         logger.error(f"Unexpected error in process_bookmarks: {str(e)}")
@@ -1352,6 +1497,11 @@ def add_header(response):
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    
+    # Force Content-Type to be application/json for API routes
+    if request.path.startswith('/api/') or request.path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
+        response.headers['Content-Type'] = 'application/json'
+        
     return response
 
 @app.errorhandler(json.JSONDecodeError)
