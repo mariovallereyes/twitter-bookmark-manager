@@ -619,12 +619,12 @@ class VectorStore:
 # Create a singleton instance
 _vector_store_instance = None
 
-def get_vector_store(persist_directory=None):
+def get_vector_store(collection_name="bookmarks"):
     """
     Get a singleton instance of the vector store.
     
     Args:
-        persist_directory: Directory to persist the vector store
+        collection_name: Name of the collection to use
         
     Returns:
         VectorStore instance
@@ -633,8 +633,8 @@ def get_vector_store(persist_directory=None):
     
     if _vector_store_instance is None:
         try:
-            logger.info("Creating vector store instance with persistent storage")
-            _vector_store_instance = VectorStore(persist_directory=persist_directory)
+            logger.info(f"Creating vector store instance with collection {collection_name}")
+            _vector_store_instance = VectorStore(collection_name=collection_name)
         except Exception as e:
             logger.error(f"Error initializing vector store: {str(e)}")
             logger.error(traceback.format_exc())
@@ -642,20 +642,18 @@ def get_vector_store(persist_directory=None):
             
     return _vector_store_instance
 
-# Add this function to match what's called in api_server_multi_user.py
-def get_multi_user_vector_store(persist_directory=None):
+def get_multi_user_vector_store(collection_name="bookmarks"):
     """
     Get a vector store instance for the multi-user environment.
     This is a wrapper around get_vector_store for compatibility.
-    Always uses in-memory mode to avoid file locking issues.
     
     Args:
-        persist_directory: Ignored - using in-memory mode to avoid locking issues
+        collection_name: Name of the collection to use
         
     Returns:
         VectorStore instance
     """
-    return get_vector_store(None)  # Force in-memory mode
+    return get_vector_store(collection_name=collection_name)
 
 def get_memory_usage():
     """Get current memory usage in MB as a float"""
