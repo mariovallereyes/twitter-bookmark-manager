@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Union
 from datetime import datetime, timedelta
 import psycopg2  # Add direct psycopg2 import
+from psycopg2 import pool, OperationalError as PsycopgOperationalError
 
 import sqlalchemy
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, func, text, event, inspect
@@ -26,6 +27,7 @@ from sqlalchemy.pool import QueuePool, NullPool
 from sqlalchemy import exc, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError, OperationalError, InterfaceError
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(
@@ -177,7 +179,6 @@ def get_pg_direct_params() -> Dict[str, str]:
             logger.info("Extracting connection parameters from DATABASE_URL")
             try:
                 # Extract credentials from DATABASE_URL
-                from urllib.parse import urlparse
                 parsed_url = urlparse(db_url)
                 
                 if not params["user"] and parsed_url.username:
@@ -552,27 +553,63 @@ def db_session():
             close_session(session)
 
 # Get a database connection for multi-purpose use
-@with_db_retry(max_tries=5, backoff_in_seconds=1)
 def get_db_connection():
+    """Get a database connection with automatic retries.
+    
+    This version has better error handling and supports both
+    SQLAlchemy and psycopg2 style connections.
+    
+    Returns:
+        A database connection object
     """
-    Get a database connection with improved reliability.
-    Tries both SQLAlchemy and direct psycopg2 approaches.
-    """
-    try:
-        # First try SQLAlchemy
-        engine = get_engine()
-        
-        # Create SQLAlchemy connection
-        return engine.connect()
-    except Exception as e:
-        logger.warning(f"SQLAlchemy connection failed: {e}, trying direct psycopg2 connection")
-        
-        # Fallback to direct psycopg2 connection
-        conn = get_direct_connection()
-        if conn:
-            return conn
-        else:
-            raise Exception("Both SQLAlchemy and direct connection methods failed")
+    max_retries = 3
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            # Try SQLAlchemy connection first (preferred method)
+            try:
+                engine = get_engine()
+                conn = engine.connect()
+                logging.info(f"Successfully connected to database with SQLAlchemy (attempt {attempt+1})")
+                return conn
+            except Exception as e:
+                logging.warning(f"SQLAlchemy connection failed: {str(e)}, trying psycopg2")
+                    
+            # Fallback to psycopg2 connection
+            try:
+                # Parse connection string
+                db_url = get_db_url()
+                url = urlparse(db_url)
+                dbname = url.path[1:]  # Remove leading slash
+                user = url.username
+                password = url.password
+                host = url.hostname
+                port = url.port or 5432
+                
+                # Connect with psycopg2
+                conn = psycopg2.connect(
+                    dbname=dbname,
+                    user=user,
+                    password=password,
+                    host=host,
+                    port=port
+                )
+                logging.info(f"Successfully connected to database with psycopg2 (attempt {attempt+1})")
+                return conn
+            except Exception as e:
+                logging.error(f"psycopg2 connection failed: {str(e)}")
+                raise  # Re-raise to be caught by the outer try/except
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logging.warning(f"Database connection attempt {attempt+1} failed: {str(e)}. Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                # Increase delay for next attempt
+                retry_delay *= 2
+            else:
+                logging.error(f"All {max_retries} database connection attempts failed: {str(e)}")
+                raise
 
 # Alias for backward compatibility
 def get_db_session():
