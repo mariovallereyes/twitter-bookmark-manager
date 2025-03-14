@@ -1210,16 +1210,25 @@ def get_categories():
             # Create search instance with user context
             searcher = BookmarkSearchMultiUser(conn, user.id)
             
-            # Get categories with counts - pass user.id directly
-            categories = searcher.get_categories(user.id)
-            
-            # Sort alphabetically by name
-            categories.sort(key=lambda x: x['name'])
-            
-            return jsonify({
-                'status': 'success',
-                'categories': categories
-            })
+            try:
+                # Get categories with counts - no parameters needed
+                categories = searcher.get_categories()
+                
+                # Sort alphabetically by name
+                categories.sort(key=lambda x: x['name'])
+                
+                return jsonify({
+                    'status': 'success',
+                    'categories': categories
+                })
+            except Exception as e:
+                logger.error(f"Error calling get_categories: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Error retrieving categories: {str(e)}',
+                    'categories': []
+                }), 500
         
         finally:
             # Ensure connection is properly handled

@@ -224,17 +224,27 @@ def get_categories():
         user_id = UserContext.get_user_id()
         conn = get_db_connection()
         
-        # Create search instance
+        # Create search instance - user_id is set here
         searcher = BookmarkSearchMultiUser(conn, user_id)
         
-        # Get categories with counts - pass user_id directly
-        categories = searcher.get_categories(user_id)
-        
-        return jsonify(categories)
+        try:
+            # Get categories with counts - no parameters needed
+            categories = searcher.get_categories()
+            
+            return jsonify(categories)
+        except Exception as e:
+            logger.error(f"Error calling get_categories method: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'status': 'error',
+                'message': f'Error retrieving categories: {str(e)}',
+                'categories': []
+            }), 500
     except Exception as e:
-        logger.error(f"Error getting categories: {e}")
+        logger.error(f"Error in get_categories route: {e}")
         logger.error(traceback.format_exc())
         return jsonify({
-            'error': 'Failed to retrieve categories',
+            'status': 'error',
+            'message': 'Failed to retrieve categories',
             'categories': []
         }), 500 
