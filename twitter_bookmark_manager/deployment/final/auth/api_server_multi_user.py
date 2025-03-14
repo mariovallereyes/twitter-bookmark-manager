@@ -394,6 +394,16 @@ def init_app_debug():
                 cursor = conn.execute(text("UPDATE bookmarks SET user_id = 1 WHERE user_id IS NULL"))
                 logger.info(f"STARTUP DEBUG - Updated {null_count} bookmarks to user_id 1")
                 
+        # Get total bookmarks for user 1
+        cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id = :user_id"), {"user_id": 1})
+        total_user_1 = cursor.scalar()
+        logger.info(f"Total bookmarks for user 1: {total_user_1}")
+        
+        # Get total bookmarks with no user
+        cursor = conn.execute(text("SELECT COUNT(*) FROM bookmarks WHERE user_id IS NULL"))
+        total_no_user = cursor.scalar()
+        logger.info(f"Total bookmarks with no user: {total_no_user}")
+        
         conn.close()
     except Exception as e:
         logger.error(f"STARTUP DEBUG - Error: {e}")
@@ -957,19 +967,19 @@ def process_bookmarks():
                             db_conn.execute(
                                 text("""
                                     INSERT INTO bookmarks 
-                                    (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
-                                    VALUES (:bookmark_id, :user_id, :text, :tweet_content, :created_at, :author, :author_id, :processed)
+                                    (bookmark_id, user_id, text, raw_data, created_at, author_name, author_username, media_files) 
+                                    VALUES (:bookmark_id, :user_id, :text, :raw_data, :created_at, :author_name, :author_username, :media_files)
                                     ON CONFLICT (bookmark_id) DO NOTHING
                                 """),
                                 {
                                     "bookmark_id": bookmark_id,
                                     "user_id": user_id,
                                     "text": tweet_text,
-                                    "tweet_content": tweet_content,
+                                    "raw_data": tweet_content,
                                     "created_at": created_at,
-                                    "author": author,
-                                    "author_id": author_id,
-                                    "processed": False
+                                    "author_name": author,
+                                    "author_username": author_id,
+                                    "media_files": "{}"
                                 }
                             )
                             
@@ -1059,7 +1069,7 @@ def process_bookmarks():
                             # Insert into database
                             cursor.execute("""
                                 INSERT INTO bookmarks 
-                                (bookmark_id, user_id, text, tweet_content, created_at, author, author_id, processed) 
+                                (bookmark_id, user_id, text, raw_data, created_at, author_name, author_username, media_files) 
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (bookmark_id) DO NOTHING
                             """, (
@@ -1070,7 +1080,7 @@ def process_bookmarks():
                                 created_at,
                                 author,
                                 author_id,
-                                False
+                                "{}"
                             ))
                             
                             # Track the new ID to prevent duplicates in the same batch

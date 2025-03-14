@@ -164,7 +164,7 @@ def get_user_bookmarks():
         # Get bookmarks
         cursor.execute(
             """
-            SELECT b.id, b.text, b.author, b.created_at
+            SELECT b.bookmark_id, b.text, b.author_name, b.author_username, b.created_at
             FROM bookmarks b
             WHERE b.user_id = %s
             ORDER BY b.created_at DESC
@@ -178,8 +178,9 @@ def get_user_bookmarks():
             bookmarks.append({
                 'id': row[0],
                 'text': row[1],
-                'author': row[2],
-                'created_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None
+                'author_name': row[2],
+                'author_username': row[3],
+                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if row[4] else None
             })
             
         # Get total count

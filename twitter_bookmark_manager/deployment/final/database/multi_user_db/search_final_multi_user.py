@@ -71,7 +71,7 @@ class BookmarkSearchMultiUser:
         try:
             # Start building the query
             sql_query = """
-            SELECT b.id, b.bookmark_id, b.text, b.author, b.created_at, b.author_id 
+            SELECT b.bookmark_id, b.text, b.author_name, b.author_username, b.created_at, b.media_files 
             FROM bookmarks b 
             WHERE b.user_id = %s
             """
@@ -84,14 +84,14 @@ class BookmarkSearchMultiUser:
                 
             # Add user filter if provided
             if user and user.strip():
-                sql_query += " AND b.author ILIKE %s"
+                sql_query += " AND b.author_name ILIKE %s"
                 params.append(f"%{user}%")
                 
             # Add category filter if provided
             if category_ids and len(category_ids) > 0:
                 placeholder = ','.join(['%s'] * len(category_ids))
                 sql_query += f"""
-                AND b.id IN (
+                AND b.bookmark_id IN (
                     SELECT bookmark_id 
                     FROM bookmark_categories 
                     WHERE category_id IN ({placeholder}))
@@ -152,12 +152,11 @@ class BookmarkSearchMultiUser:
             for row in rows:
                 bookmark = {
                     'id': row[0],
-                    'bookmark_id': row[1],  # Include the Twitter bookmark_id
-                    'text': row[2],
-                    'author': row[3],
-                    'author_username': row[3].replace('@', '') if row[3] else '',
+                    'text': row[1],
+                    'author_name': row[2],
+                    'author_username': row[3],
                     'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                    'author_id': row[5]
+                    'media_files': row[5]
                 }
                 
                 # Get categories for this bookmark
@@ -212,7 +211,7 @@ class BookmarkSearchMultiUser:
         try:
             if is_sqlalchemy:
                 query = text("""
-                SELECT b.id, b.text, b.url, b.author, b.created_at, b.author_id
+                SELECT b.bookmark_id, b.text, b.url, b.author_name, b.created_at, b.media_files
                 FROM bookmarks b
                 WHERE b.user_id = :user_id
                 ORDER BY b.created_at DESC
@@ -222,7 +221,7 @@ class BookmarkSearchMultiUser:
                 rows = result.fetchall()
             else:
                 query = """
-                SELECT b.id, b.text, b.url, b.author, b.created_at, b.author_id
+                SELECT b.bookmark_id, b.text, b.url, b.author_name, b.created_at, b.media_files
                 FROM bookmarks b
                 WHERE b.user_id = %s
                 ORDER BY b.created_at DESC
@@ -236,10 +235,10 @@ class BookmarkSearchMultiUser:
                     'id': row[0],
                     'text': row[1],
                     'url': row[2],
-                    'author': row[3],
+                    'author_name': row[3],
                     'author_username': row[3].replace('@', '') if row[3] else '',
                     'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                    'author_id': row[5]
+                    'media_files': row[5]
                 }
                 
                 # Get categories for this bookmark
@@ -368,13 +367,13 @@ class BookmarkSearchMultiUser:
         try:
             # First, verify that the bookmark belongs to the user
             if is_sqlalchemy:
-                query = text("SELECT id FROM bookmarks WHERE id = :bookmark_id AND user_id = :user_id")
+                query = text("SELECT bookmark_id FROM bookmarks WHERE bookmark_id = :bookmark_id AND user_id = :user_id")
                 result = self.conn.execute(query, {"bookmark_id": bookmark_id, "user_id": self.user_id})
                 if not result.fetchone():
                     logger.warning(f"Bookmark {bookmark_id} does not belong to user {self.user_id}")
                     return {"error": "Access denied or bookmark not found"} 
             else:
-                query = "SELECT id FROM bookmarks WHERE id = %s AND user_id = %s"
+                query = "SELECT bookmark_id FROM bookmarks WHERE bookmark_id = %s AND user_id = %s"
                 cursor.execute(query, (bookmark_id, self.user_id))
                 if not cursor.fetchone():
                     logger.warning(f"Bookmark {bookmark_id} does not belong to user {self.user_id}")
@@ -489,9 +488,9 @@ class BookmarkSearchMultiUser:
         results = []
         try:
             stmt = text("""
-            SELECT b.id, b.bookmark_id, b.text, b.author, b.created_at, b.author_id
+            SELECT b.bookmark_id, b.text, b.author_name, b.author_username, b.created_at, b.media_files
             FROM bookmarks b
-            JOIN bookmark_categories bc ON b.id = bc.bookmark_id
+            JOIN bookmark_categories bc ON b.bookmark_id = bc.bookmark_id
             JOIN categories c ON bc.category_id = c.id
             WHERE c.name = :category_name AND b.user_id = :user_id
             ORDER BY b.created_at DESC
@@ -503,12 +502,11 @@ class BookmarkSearchMultiUser:
             for row in rows:
                 bookmark = {
                     'id': row[0],
-                    'bookmark_id': row[1],
-                    'text': row[2],
-                    'author': row[3],
-                    'author_username': row[3].replace('@', '') if row[3] else '',
+                    'text': row[1],
+                    'author_name': row[2],
+                    'author_username': row[3],
                     'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                    'author_id': row[5]
+                    'media_files': row[5]
                 }
                 results.append(bookmark)
         except Exception as e:
@@ -521,9 +519,9 @@ class BookmarkSearchMultiUser:
         """Get a bookmark by ID"""
         try:
             stmt = text("""
-            SELECT id, bookmark_id, text, author, created_at, author_id
+            SELECT bookmark_id, text, author_name, author_username, created_at, media_files
             FROM bookmarks
-            WHERE id = :bookmark_id AND user_id = :user_id
+            WHERE bookmark_id = :bookmark_id AND user_id = :user_id
             """)
             result = self.conn.execute(stmt, {"bookmark_id": bookmark_id, "user_id": self.user_id})
             row = result.fetchone()
@@ -531,12 +529,11 @@ class BookmarkSearchMultiUser:
             if row:
                 bookmark = {
                     'id': row[0],
-                    'bookmark_id': row[1],
-                    'text': row[2],
-                    'author': row[3],
-                    'author_username': row[3].replace('@', '') if row[3] else '',
+                    'text': row[1],
+                    'author_name': row[2],
+                    'author_username': row[3],
                     'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                    'author_id': row[5]
+                    'media_files': row[5]
                 }
                 return bookmark
             else:
@@ -554,7 +551,7 @@ class BookmarkSearchMultiUser:
             self.conn.execute(stmt, {"bookmark_id": bookmark_id})
             
             # Then delete the bookmark itself
-            stmt = text("DELETE FROM bookmarks WHERE id = :bookmark_id")
+            stmt = text("DELETE FROM bookmarks WHERE bookmark_id = :bookmark_id")
             self.conn.execute(stmt, {"bookmark_id": bookmark_id})
             
             return {"success": True, "message": "Bookmark deleted"}
@@ -602,7 +599,7 @@ class BookmarkSearchMultiUser:
             
             # Query to get all bookmarks for user
             query = """
-                SELECT bookmark_id, text, tweet_content, author, created_at
+                SELECT bookmark_id, text, tweet_content, author_name, created_at
                 FROM bookmarks
                 WHERE user_id = %s
             """
@@ -621,7 +618,7 @@ class BookmarkSearchMultiUser:
                     'id': row['bookmark_id'],
                     'text': text,
                     'tweet_content': tweet_content,
-                    'author': row['author'] or '',
+                    'author_name': row['author_name'] or '',
                     'created_at': row['created_at'] or ''
                 }
                 bookmarks.append(bookmark)
