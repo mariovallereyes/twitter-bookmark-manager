@@ -137,9 +137,27 @@ try:
     import flask_session
     logger.info("flask_session module is available")
     # Continue with normal app loading
-    from auth.api_server_multi_user import app as flask_app
-    app = flask_app
-    logger.info("Successfully loaded app from auth.api_server_multi_user")
+    try:
+        logger.info("Attempting to import app from auth.api_server_multi_user...")
+        from auth.api_server_multi_user import app as flask_app
+        app = flask_app
+        # Set application for later use
+        application = app
+        logger.info("✅ Successfully loaded app from auth.api_server_multi_user")
+        
+        # Skip fallback mode - force using the loaded application
+        logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
+        
+        # Set flags to indicate we're NOT in fallback mode
+        application.config['FALLBACK_MODE'] = False
+        application.config['FULL_APP_LOADED'] = True
+        
+        # Prevent re-entering this block
+        globals()['application'] = application
+    except Exception as import_app_error:
+        logger.error(f"❌ Error importing app from auth.api_server_multi_user: {str(import_app_error)}")
+        logger.error(f"Error details: {traceback.format_exc()}")
+        raise
     
     # Set template path explicitly
     if hasattr(app, 'template_folder'):
@@ -149,7 +167,8 @@ try:
             # Try to find the correct path
             possible_template_paths = [
                 os.path.join(os.environ.get('APP_BASE_DIR', '/app'), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
-                os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates')
+                os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+                os.path.join(os.getcwd(), 'web_final/templates')
             ]
             for path in possible_template_paths:
                 if os.path.exists(path):
@@ -197,7 +216,7 @@ except Exception as e:
     logger.error(f"Error details: {error_details}")
 
 # If full application failed to load, create fallback application
-if 'application' not in locals():
+if 'application' not in locals() and 'application' not in globals():
     logger.info("Creating fallback application")
     
     # Create a fallback Flask application with basic functionality
@@ -205,6 +224,9 @@ if 'application' not in locals():
                        template_folder='web_final/templates',
                        static_folder='web_final/static')
     application.config['DEBUG'] = True
+    
+    # Add a flag to indicate we're in fallback mode
+    application.config['FALLBACK_MODE'] = True
     
     # Add error handling
     @application.errorhandler(Exception)

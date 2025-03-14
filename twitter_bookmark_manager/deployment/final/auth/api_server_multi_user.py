@@ -1647,20 +1647,16 @@ def update_process(user_id, session_id, rebuild=False, rebuild_session_id=None):
                     # Use the rebuild_session_id if provided, otherwise generate a new one
                     vector_session_id = rebuild_session_id if rebuild_session_id else str(uuid.uuid4())[:8]
                     
-                    # Start the rebuild process using the rebuild_process function
-                    try:
-                        # Start the rebuild process in a separate thread
-                        rebuild_thread = Thread(
-                            target=rebuild_process,
-                            args=(user_id, vector_session_id),
-                            kwargs={'batch_size': 20, 'resume': False}
-                        )
-                        rebuild_thread.daemon = True
-                        rebuild_thread.start()
-                        
-                        logger.info(f"Vector rebuild thread started for session {vector_session_id}")
-                    except Exception as rebuild_error:
-                        logger.error(f"Failed to start vector rebuild: {rebuild_error}")
+                    # Start rebuild process directly in a background thread
+                    rebuild_thread = Thread(
+                        target=rebuild_process,
+                        args=(user_id, vector_session_id),
+                        kwargs={'batch_size': 20, 'resume': False}
+                    )
+                    rebuild_thread.daemon = True
+                    rebuild_thread.start()
+                    
+                    logger.info(f"Vector rebuild thread started for session {vector_session_id}")
                 
             except Exception as e:
                 logger.error(f"Error in update process: {e}")
@@ -2558,22 +2554,45 @@ def rebuild_process(user_id, session_id, batch_size=20, resume=True, progress_da
     import traceback
     import tempfile
     import os
+    import json
     
     start_time = datetime.now()
+    logger.info(f"🚀 REBUILD_PROCESS: Starting for user_id={user_id}, session_id={session_id}")
     
     # Set up paths for tracking
     user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+    os.makedirs(user_dir, exist_ok=True)
+    logger.info(f"📁 REBUILD_PROCESS: User directory: {user_dir}")
+    
     status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
     progress_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+    logger.info(f"📄 REBUILD_PROCESS: Status file: {status_file}")
+    logger.info(f"📄 REBUILD_PROCESS: Progress file: {progress_file_path}")
     
     try:
         # Run the vector store rebuild
-        from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+        try:
+            logger.info(f"🔄 REBUILD_PROCESS: Importing rebuild_vector_store...")
+            from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+            logger.info(f"✅ REBUILD_PROCESS: Successfully imported rebuild_vector_store")
+        except ImportError as import_error:
+            logger.error(f"❌ REBUILD_PROCESS: Failed to import rebuild_vector_store: {import_error}")
+            logger.error(traceback.format_exc())
+            # Update status file with error
+            with open(status_file, 'w') as f:
+                json.dump({
+                    'status': 'error',
+                    'message': f'Failed to import rebuild function: {str(import_error)}',
+                    'error': str(import_error),
+                    'traceback': traceback.format_exc(),
+                    'end_time': datetime.now().isoformat()
+                }, f)
+            return
         
         with app.app_context():
             try:
                 # Log the start of the rebuild
-                logger.info(f"Starting vector store rebuild in background - session_id={session_id}")
+                logger.info(f"🏁 REBUILD_PROCESS: Starting vector store rebuild in background - session_id={session_id}")
                 
                 # Update status file
                 update_status_file(status_file, {
