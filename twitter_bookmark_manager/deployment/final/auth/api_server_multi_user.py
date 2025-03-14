@@ -43,6 +43,7 @@ from auth.user_context import get_current_user, UserContext
 from auth.user_context_final import login_required
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.db_final import get_db_connection
+from flask_session import Session
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -132,32 +133,29 @@ logger.info(f"Starting multi-user API server with PythonAnywhere improvements...
 
 # Create Flask app
 app = Flask(__name__, 
-            template_folder='../web_final/templates',
-            static_folder='../web_final/static')
+            template_folder=os.environ.get('TEMPLATE_FOLDER', os.path.join(BASE_DIR, 'twitter_bookmark_manager/web/templates')),
+            static_folder=os.environ.get('STATIC_FOLDER', os.path.join(BASE_DIR, 'twitter_bookmark_manager/web/static')))
 
-# Configure CORS - Allow all origins during deployment
-CORS(app, supports_credentials=True)
+# Enable error catching
+app.config['PROPAGATE_EXCEPTIONS'] = False
+app.config['TRAP_HTTP_EXCEPTIONS'] = True
+app.config['TRAP_BAD_REQUEST_ERRORS'] = True
+app.config['JSON_SORT_KEYS'] = False
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+app.config['JSON_AS_ASCII'] = False
 
-# Configure app
-app.config.update(
-    SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(32)),
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-    get_db_connection=get_db_connection,
-    PREFERRED_URL_SCHEME='https',
-    MAX_CONTENT_LENGTH=32 * 1024 * 1024,  # 32MB max file size
-    UPLOAD_FOLDER=UPLOADS_DIR,
-    DATABASE_DIR=DATABASE_DIR,  # Add DATABASE_DIR to the configuration
-    DB_ERROR=False,  # Default to no database errors
-    ALLOW_API_RETRY=True,  # Allow API routes to retry database connections
-    TRAP_HTTP_EXCEPTIONS=True,  # Trap HTTP exceptions to handle them in our error handler
-    TRAP_BAD_REQUEST_ERRORS=True,  # Trap bad request errors
-    JSON_SORT_KEYS=False,  # Don't sort JSON keys for better readability
-    JSONIFY_PRETTYPRINT_REGULAR=False,  # Don't pretty print JSON in production
-    JSON_AS_ASCII=False  # Allow non-ASCII characters in JSON responses
-)
+# Configure CORS
+CORS(app)
+
+# Set up session handling
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_FILE_DIR'] = os.path.join(BASE_DIR, 'flask_session')
+app.config['SESSION_PERMANENT'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+# Initialize session
+Session(app)
 
 # Global session status tracking
 session_status: Dict[str, Dict[str, Any]] = {}
@@ -1549,28 +1547,22 @@ def check_tweet_content_column():
 @app.errorhandler(Exception)
 def handle_api_exception(e):
     """
-    Handle exceptions on API routes to ensure they return JSON instead of HTML error pages
+    Handle ALL exceptions to ensure they return JSON instead of HTML error pages
     """
-    # Get the path to check if this is an API route
+    # Get path for logging
     path = request.path if request else ""
     
-    # Check if this request is marked as a JSON API, either by path or by our middleware
-    is_api = hasattr(g, 'is_json_api') or path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']
+    # Log the error with traceback
+    logger.error(f"GLOBAL ERROR HANDLER: {path}: {str(e)}")
+    logger.error(traceback.format_exc())
     
-    # Apply JSON handling to API routes
-    if is_api:
-        logger.error(f"API error on {path}: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        # Always return JSON for API routes
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'path': path
-        }), 500
-    
-    # For non-API routes, let the default Flask error handler manage it
-    return e
+    # ALWAYS return JSON for ALL routes - never return HTML for errors
+    return jsonify({
+        'success': False,
+        'error': str(e),
+        'path': path,
+        'type': e.__class__.__name__
+    }), 500
 
 # Add specific error handlers for various HTTP errors
 @app.errorhandler(400)
@@ -2266,3 +2258,99 @@ def rebuild_vector_store_endpoint():
             'success': False,
             'error': str(e)
         }), 500
+
+@app.route('/simplest-upload', methods=['POST'])
+@login_required
+def simplest_upload():
+    """Absolute minimum file upload endpoint with zero dependencies on other code.
+    This endpoint does one thing only: save the uploaded file to disk.
+    No vector store, no validation, no fancy error handling - just save the file.
+    """
+    try:
+        # Get current user ID directly from Flask session
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+        
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file in request'}), 400
+        
+        file = request.files['file']
+        if not file.filename:
+            return jsonify({'success': False, 'error': 'Empty file name'}), 400
+            
+        # Create directories
+        base_dir = '/app/user_files'  # Use an absolute path for simplicity
+        os.makedirs(base_dir, exist_ok=True)
+        
+        user_dir = os.path.join(base_dir, f'user_{user_id}')
+        os.makedirs(user_dir, exist_ok=True)
+        
+        # Save file with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"upload_{timestamp}_{secure_filename(file.filename)}"
+        filepath = os.path.join(user_dir, filename)
+        
+        file.save(filepath)
+        
+        # Copy to standard location
+        db_dir = os.path.join('/app/database', f'user_{user_id}')
+        os.makedirs(db_dir, exist_ok=True)
+        
+        target_path = os.path.join(db_dir, 'twitter_bookmarks.json')
+        shutil.copy2(filepath, target_path)
+        
+        return jsonify({
+            'success': True,
+            'message': 'File saved successfully',
+            'original_path': filepath,
+            'target_path': target_path
+        })
+        
+    except Exception as e:
+        # Most basic error handling possible
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Error handlers - MUST return JSON for all errors
+@app.errorhandler(Exception)
+def handle_all_errors(e):
+    """Catch-all error handler to ensure JSON responses for all errors"""
+    logger.error(f"Unhandled error: {str(e)}")
+    logger.error(traceback.format_exc())
+    return jsonify({
+        'success': False,
+        'error': str(e),
+        'error_type': e.__class__.__name__,
+        'path': request.path
+    }), 500
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    """Return JSON for 404 errors"""
+    return jsonify({
+        'success': False,
+        'error': 'Resource not found',
+        'path': request.path
+    }), 404
+
+@app.errorhandler(401)
+def handle_unauthorized(e):
+    """Return JSON for 401 errors"""
+    return jsonify({
+        'success': False,
+        'error': 'Unauthorized',
+        'path': request.path
+    }), 401
+
+@app.errorhandler(400)
+def handle_bad_request(e):
+    """Return JSON for 400 errors"""
+    return jsonify({
+        'success': False,
+        'error': 'Bad request',
+        'path': request.path
+    }), 400
