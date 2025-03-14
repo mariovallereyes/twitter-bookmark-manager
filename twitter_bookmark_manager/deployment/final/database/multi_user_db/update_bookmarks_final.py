@@ -528,7 +528,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         
         # Get progress for reporting
         progress_percent = calculate_progress(progress_file, total_valid=len(bookmarks) if 'bookmarks' in locals() else 0)
-        
+            
         return {
             'success': False,
             'error': str(e),
