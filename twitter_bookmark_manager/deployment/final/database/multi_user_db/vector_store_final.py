@@ -1,6 +1,6 @@
 """
-Vector store implementation for Railway based on PythonAnywhere's implementation.
-This version uses Qdrant for vector storage and SentenceTransformer for embeddings.
+Vector store implementation for final environment.
+Uses Qdrant for vector storage and SentenceTransformer for embeddings.
 """
 
 import os
@@ -11,7 +11,7 @@ import time
 import traceback
 import math
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple, Union
 import psutil  # Add psutil for memory tracking
 import uuid
@@ -20,12 +20,14 @@ import tempfile
 import shutil
 import random
 import string
+import threading
+import filelock
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
 
 # Import Qdrant for vector storage
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from qdrant_client.http import models as rest
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
@@ -42,6 +44,108 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('vector_store_final')
+
+class VectorStoreMultiUser:
+    """
+    Vector store implementation for multi-user support.
+    Uses a singleton pattern and file locking to prevent concurrent access issues.
+    """
+    _instances = {}  # Class-level dictionary to store instances
+    _lock = threading.Lock()  # Class-level lock for thread safety
+    
+    def __new__(cls, user_id):
+        """
+        Implement singleton pattern per user_id to prevent multiple instances
+        trying to access the same storage location.
+        """
+        with cls._lock:
+            if user_id not in cls._instances:
+                instance = super(VectorStoreMultiUser, cls).__new__(cls)
+                cls._instances[user_id] = instance
+            return cls._instances[user_id]
+    
+    def __init__(self, user_id):
+        """Initialize the vector store for a specific user."""
+        # Only initialize once per instance
+        if hasattr(self, 'initialized'):
+            return
+            
+        self.user_id = user_id
+        self.initialized = False
+        
+        try:
+            # Set up paths
+            self.base_dir = os.environ.get('APP_BASE_DIR', '/app')
+            self.data_dir = os.path.join(self.base_dir, 'twitter_bookmark_manager', 'data')
+            self.vector_store_dir = os.path.join(self.data_dir, 'vector_store')
+            self.lock_file = os.path.join(self.data_dir, f'vector_store_{user_id}.lock')
+            
+            # Ensure directories exist
+            os.makedirs(self.data_dir, exist_ok=True)
+            os.makedirs(self.vector_store_dir, exist_ok=True)
+            
+            # Initialize with file lock to prevent concurrent access
+            lock = filelock.FileLock(self.lock_file, timeout=60)  # 60 second timeout
+            
+            with lock:
+                self._initialize_vector_store()
+                
+            self.initialized = True
+            logger.info(f"✅ Vector store initialized for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error initializing vector store: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+    
+    def _initialize_vector_store(self):
+        """Initialize the vector store components with proper error handling."""
+        try:
+            # Initialize sentence transformer
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            
+            # Initialize Qdrant client with proper settings for single-instance use
+            self.client = QdrantClient(
+                path=self.vector_store_dir,
+                force_disable_multiple_clients_check=True  # Allow multiple workers to access
+            )
+            
+            # Create collection if it doesn't exist
+            collection_name = "bookmarks"
+            try:
+                collections = self.client.get_collections()
+                collection_names = [c.name for c in collections.collections]
+                
+                if collection_name not in collection_names:
+                    logger.info(f"Creating vector store instance with collection {collection_name}")
+                    self.client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config=models.VectorParams(
+                            size=384,  # Dimension for all-MiniLM-L6-v2
+                            distance=models.Distance.COSINE
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"Error checking/creating collection: {str(e)}")
+                raise
+                
+        except Exception as e:
+            logger.error(f"Error in _initialize_vector_store: {str(e)}")
+            raise
+    
+    def __del__(self):
+        """Cleanup when the instance is destroyed."""
+        try:
+            # Remove instance from _instances
+            with self._lock:
+                if self.user_id in self._instances:
+                    del self._instances[self.user_id]
+            
+            # Close client connection
+            if hasattr(self, 'client'):
+                self.client.close()
+        except:
+            pass  # Ignore cleanup errors
 
 class VectorStore:
     """

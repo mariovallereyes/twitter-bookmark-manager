@@ -1,3 +1,8 @@
+"""
+WSGI entry point for the Twitter Bookmark Manager application.
+Configures the environment and starts the Flask application.
+"""
+
 import os
 import sys
 import logging
@@ -8,31 +13,36 @@ from flask_cors import CORS
 from database.multi_user_db.db_final import init_database
 from datetime import datetime
 
-# Configure logging
+# Configure logging to write to both console and file
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console handler
+        logging.FileHandler('wsgi.log')  # File handler
+    ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('wsgi_final')
 
-# Gunicorn configuration for long-running tasks
-timeout = 7200          # 2 hours - much longer timeout for large rebuilds
-workers = 1             # Single worker to avoid memory competition
-worker_class = 'sync'   # Synchronous worker for stability
-keepalive = 120
+# Gunicorn configuration
+# Using a single worker to avoid concurrent access issues with Qdrant vector store
+# If more concurrency is needed, switch to Qdrant server mode instead of local storage
+timeout = 7200  # 2 hours - for long-running tasks
+workers = 1     # Single worker to prevent concurrent vector store access
+worker_class = 'gthread'  # Thread-based workers
+capture_output = True  # Capture stdout/stderr into error log
+enable_stdio_inheritance = True  # Inherit stdio from Gunicorn
+
+# Logging configuration
+accesslog = '-'         # Log to stdout
+errorlog = '-'         # Log to stderr
+loglevel = 'info'      # Detailed logging
 max_requests = 0        # Disable worker recycling to maintain context
 max_requests_jitter = 0
 worker_tmp_dir = '/dev/shm'  # Use RAM for temp files
 preload_app = True      # Preload app to maintain context
 graceful_timeout = 600  # 10 minutes grace period for cleanup
 worker_connections = 10 # Limit concurrent connections
-
-# Logging configuration
-accesslog = '-'         # Log to stdout
-errorlog = '-'         # Log to stderr
-loglevel = 'info'      # Detailed logging
-capture_output = True   # Capture stdout/stderr from workers
-enable_stdio_inheritance = True  # Inherit stdio settings
 
 logger.info("==================================================")
 logger.info("Starting Progressive WSGI Application for Railway")
