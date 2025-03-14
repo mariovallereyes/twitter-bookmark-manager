@@ -143,6 +143,7 @@ app.config['TRAP_BAD_REQUEST_ERRORS'] = True
 app.config['JSON_SORT_KEYS'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 app.config['JSON_AS_ASCII'] = False
+app.config['get_db_connection'] = get_db_connection  # Add back the missing database connection function
 
 # Configure CORS
 CORS(app)
