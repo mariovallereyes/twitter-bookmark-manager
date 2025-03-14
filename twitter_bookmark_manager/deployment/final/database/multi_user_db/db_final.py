@@ -646,16 +646,29 @@ def get_bookmarks_for_user(user_id):
             
             bookmarks = []
             for row in result:
-                bookmark = {
-                    'bookmark_id': row[0],
-                    'text': row[1],
-                    'created_at': row[2],
-                    'author_name': row[3],
-                    'author_username': row[4],
-                    'media_files': row[5],
-                    'raw_data': row[6]
-                }
-                bookmarks.append(bookmark)
+                try:
+                    # Convert raw_data from JSON string if necessary
+                    raw_data = row[6]
+                    if isinstance(raw_data, str):
+                        try:
+                            raw_data = json.loads(raw_data)
+                        except json.JSONDecodeError as je:
+                            logging.warning(f"Error decoding JSON for bookmark {row[0]}: {str(je)}")
+                            raw_data = {}
+                    
+                    bookmark = {
+                        'bookmark_id': row[0],
+                        'text': row[1],
+                        'created_at': row[2],
+                        'author_name': row[3],
+                        'author_username': row[4],
+                        'media_files': row[5],
+                        'raw_data': raw_data
+                    }
+                    bookmarks.append(bookmark)
+                except Exception as row_error:
+                    logging.error(f"Error processing bookmark row: {str(row_error)}")
+                    # Continue processing other rows
         else:  # psycopg2 connection
             cursor = conn.cursor()
             
@@ -672,16 +685,29 @@ def get_bookmarks_for_user(user_id):
             
             bookmarks = []
             for row in cursor.fetchall():
-                bookmark = {
-                    'bookmark_id': row[0],
-                    'text': row[1],
-                    'created_at': row[2],
-                    'author_name': row[3],
-                    'author_username': row[4],
-                    'media_files': row[5],
-                    'raw_data': row[6]
-                }
-                bookmarks.append(bookmark)
+                try:
+                    # Convert raw_data from JSON string if necessary
+                    raw_data = row[6]
+                    if isinstance(raw_data, str):
+                        try:
+                            raw_data = json.loads(raw_data)
+                        except json.JSONDecodeError as je:
+                            logging.warning(f"Error decoding JSON for bookmark {row[0]}: {str(je)}")
+                            raw_data = {}
+                    
+                    bookmark = {
+                        'bookmark_id': row[0],
+                        'text': row[1],
+                        'created_at': row[2],
+                        'author_name': row[3],
+                        'author_username': row[4],
+                        'media_files': row[5],
+                        'raw_data': raw_data
+                    }
+                    bookmarks.append(bookmark)
+                except Exception as row_error:
+                    logging.error(f"Error processing bookmark row: {str(row_error)}")
+                    # Continue processing other rows
                 
         logging.info(f"Retrieved {len(bookmarks)} bookmarks for user {user_id}")
         return bookmarks
@@ -698,11 +724,9 @@ def get_bookmarks_for_user(user_id):
             except Exception as e:
                 logging.warning(f"Error closing cursor: {str(e)}")
                 
-        if conn:
+        if conn and not hasattr(conn, 'execute'):
             try:
-                # Only close psycopg2 connections, not SQLAlchemy
-                if not hasattr(conn, 'execute'):
-                    conn.close()
+                conn.close()
             except Exception as e:
                 logging.warning(f"Error closing connection: {str(e)}")
 

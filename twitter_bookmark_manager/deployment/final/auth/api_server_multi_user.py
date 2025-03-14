@@ -782,14 +782,10 @@ def upload_bookmarks():
             logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
             
             # Validate JSON format
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-                    bookmark_count = len(json_data) if isinstance(json_data, list) else len(json_data.get('bookmarks', [])) if isinstance(json_data, dict) and 'bookmarks' in json_data else 0
-                    logger.info(f"JSON validated - Contains {bookmark_count} entries")
-            except json.JSONDecodeError as je:
-                logger.error(f"Invalid JSON format: {str(je)}")
-                return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+            is_valid, error_message, data = validate_json_file(filepath)
+            if not is_valid:
+                logger.error(f"Invalid JSON format: {error_message}")
+                return jsonify({'success': False, 'error': error_message}), 400
             
             # Return success with session ID for later processing
             session_id = str(uuid.uuid4())
@@ -798,7 +794,7 @@ def upload_bookmarks():
                 'message': 'File uploaded successfully',
                 'file': filename,
                 'session_id': session_id,
-                'bookmark_count': bookmark_count
+                'bookmark_count': len(data) if isinstance(data, list) else len(data.get('bookmarks', [])) if isinstance(data, dict) and 'bookmarks' in data else 0
             })
             
         except Exception as save_error:
@@ -810,6 +806,60 @@ def upload_bookmarks():
         logger.error(f"Error in upload_bookmarks: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
+
+def validate_json_file(filepath):
+    """
+    Validate that a file contains valid JSON.
+    
+    Args:
+        filepath (str): Path to the file to validate
+        
+    Returns:
+        tuple: (is_valid, error_message, data)
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # Check if it's an object or array
+        if not isinstance(data, (dict, list)):
+            return False, "JSON must be an object or array", None
+            
+        # Check if data looks like bookmarks
+        if isinstance(data, list):
+            if len(data) == 0:
+                return False, "JSON array is empty", None
+                
+            # It's a direct array of bookmarks
+            return True, "", data
+            
+        elif isinstance(data, dict):
+            # Check for common bookmark fields in dictionary
+            if 'bookmarks' in data and isinstance(data['bookmarks'], list):
+                if len(data['bookmarks']) == 0:
+                    return False, "No bookmarks found in the 'bookmarks' field", None
+                return True, "", data
+                
+            # Other possible structures
+            if 'tweet' in data and isinstance(data['tweet'], list):
+                if len(data['tweet']) == 0:
+                    return False, "No tweets found in the 'tweet' field", None
+                return True, "", data
+                
+            # If it has id_str or other tweet fields directly, it might be a single bookmark
+            if any(key in data for key in ['id_str', 'id', 'tweet_id', 'tweet_url']):
+                # Wrap single bookmark in an array
+                return True, "", [data]
+                
+            return False, "Could not identify bookmark data in JSON", None
+            
+        return True, "", data
+        
+    except json.JSONDecodeError as je:
+        line_col = f" at line {je.lineno}, column {je.colno}"
+        return False, f"Invalid JSON format: {je.msg}{line_col}", None
+    except Exception as e:
+        return False, f"Error validating JSON: {str(e)}", None
 
 @app.route('/process-bookmarks', methods=['POST'])
 @login_required
@@ -853,14 +903,13 @@ def process_bookmarks():
                 logger.info(f"File saved: {filepath} - Size: {file_size} bytes")
                 
                 # Validate it's a valid JSON file
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        json.load(f)
-                    # File is valid JSON, set for processing
-                    file_to_process = filepath
-                except json.JSONDecodeError as je:
-                    logger.error(f"Invalid JSON format in uploaded file: {str(je)}")
-                    return jsonify({'success': False, 'error': f'Invalid JSON format: {str(je)}'}), 400
+                is_valid, error_message, data = validate_json_file(filepath)
+                if not is_valid:
+                    logger.error(f"Invalid JSON format: {error_message}")
+                    return jsonify({'success': False, 'error': error_message}), 400
+                    
+                # File is valid JSON, set for processing
+                file_to_process = filepath
             except Exception as e:
                 logger.error(f"Error saving file: {str(e)}")
                 return jsonify({'success': False, 'error': f'Error saving file: {str(e)}'}), 500
@@ -1128,6 +1177,57 @@ def get_all_categories():
     
     except Exception as e:
         logger.error(f"Error getting all categories: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/api/categories', methods=['GET'])
+@login_required
+def get_categories():
+    """API endpoint to get all categories for the current user - alias for /api/categories/all"""
+    try:
+        # Get current user's ID from UserContext
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user context found for request")
+            return jsonify({
+                'status': 'error',
+                'message': 'User not authenticated'
+            }), 401
+
+        # Get database connection
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Failed to get database connection")
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection error'
+            }), 500
+        
+        try:
+            # Create search instance with user context
+            searcher = BookmarkSearchMultiUser(conn, user.id)
+            
+            # Get categories with counts
+            categories = searcher.get_categories(user_id=user.id)
+            
+            # Sort alphabetically by name
+            categories.sort(key=lambda x: x['name'])
+            
+            return jsonify({
+                'status': 'success',
+                'categories': categories
+            })
+        
+        finally:
+            # Ensure connection is properly handled
+            if hasattr(conn, 'close') and not isinstance(conn, sqlalchemy.engine.base.Engine):
+                conn.close()
+    
+    except Exception as e:
+        logger.error(f"Error getting categories: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({
             'status': 'error',
