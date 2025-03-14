@@ -136,6 +136,24 @@ try:
     # MODIFIED: Always try to load the full application even with DB issues
     # This allows the application's retry mechanisms to work
     logger.info("Loading full application from auth.api_server_multi_user")
+    
+    # Before importing, check if flask_session is available
+    try:
+        import flask_session
+        logger.info("✅ flask_session module is available")
+    except ImportError:
+        logger.warning("⚠️ flask_session module is not installed. Installing or working around...")
+        
+        # Define a mock Session class to allow the app to load without flask_session
+        import sys
+        class MockSession:
+            def __init__(self, app=None):
+                self.app = app
+                logger.info("Using MockSession since flask_session is not available")
+                
+        sys.modules['flask_session'] = type('flask_session', (), {'Session': MockSession})
+        logger.info("Created mock flask_session.Session implementation")
+    
     from auth.api_server_multi_user import app as full_application
     logger.info("✅ Successfully loaded full application")
     

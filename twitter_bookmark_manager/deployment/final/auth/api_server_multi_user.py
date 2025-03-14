@@ -155,7 +155,13 @@ app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # Initialize session
-Session(app)
+try:
+    Session(app)
+    logger.info("Flask session initialized with Flask-Session")
+except Exception as e:
+    logger.warning(f"Could not initialize Flask-Session: {e}")
+    logger.info("Continuing with Flask's built-in session management")
+    # Continue with Flask's built-in session
 
 # Global session status tracking
 session_status: Dict[str, Dict[str, Any]] = {}
