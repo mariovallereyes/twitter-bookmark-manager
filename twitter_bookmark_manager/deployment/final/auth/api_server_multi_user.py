@@ -1475,27 +1475,39 @@ def update_database():
                         # Log the start of the update
                         logger.info(f"Starting database update in background - session_id={session_id}")
                         
-                        # Run the update process with skip_vector=True to avoid vector store interactions
-                        result = final_update_bookmarks(
-                            session_id=session_id,
-                            start_index=start_index,
-                            rebuild_vector=False,  # Never rebuild vector in the initial pass
-                            user_id=user_id,
-                            skip_vector=True  # Add this parameter to completely skip vector operations
-                        )
+                        # When rebuild is explicitly requested
+                        if rebuild_vector and direct_path:
+                            logger.info(f"Starting database update with vector rebuild for session {session_id}")
+                            import_result = final_update_bookmarks(
+                                session_id=session_id, 
+                                start_index=int(start_index),
+                                rebuild_vector=True,
+                                user_id=user_id,
+                                skip_vector=True  # Skip vector operations to avoid errors
+                            )
+                        # Normal case - don't rebuild
+                        else:
+                            logger.info(f"Starting database update without vector rebuild for session {session_id}")
+                            import_result = final_update_bookmarks(
+                                session_id=session_id, 
+                                start_index=int(start_index),
+                                rebuild_vector=False,
+                                user_id=user_id,
+                                skip_vector=True  # Skip vector operations to avoid errors
+                            )
                         
                         # Update status file with result
                         with open(status_file, 'w') as f:
                             status = {
                                 'user_id': user_id,
                                 'session_id': session_id,
-                                'status': 'completed' if result.get('success', False) else 'error',
-                                'message': 'Database update completed' if result.get('success', False) else 'Database update failed',
-                                'result': result,
+                                'status': 'completed' if import_result.get('success', False) else 'error',
+                                'message': 'Database update completed' if import_result.get('success', False) else 'Database update failed',
+                                'result': import_result,
                                 'start_time': start_time.isoformat(),
                                 'end_time': datetime.now().isoformat(),
                                 'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                                'progress': 100 if result.get('success', False) else 0,
+                                'progress': 100 if import_result.get('success', False) else 0,
                                 'vector_update_needed': not skip_vector  # Indicate vector update is needed as a second step
                             }
                             json.dump(status, f)
@@ -1504,7 +1516,7 @@ def update_database():
                         
                         # If vector operations are requested and database update was successful,
                         # trigger a separate vector update process
-                        if not skip_vector and result.get('success', False):
+                        if not skip_vector and import_result.get('success', False):
                             try:
                                 logger.info(f"Starting vector store update process - session_id={session_id}")
                                 # This should be a separate endpoint call in a real implementation

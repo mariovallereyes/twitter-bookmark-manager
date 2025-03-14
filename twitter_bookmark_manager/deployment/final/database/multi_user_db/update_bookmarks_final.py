@@ -307,33 +307,97 @@ def rebuild_vector_store(user_id=None, session_id=None):
     logger.info(f"🔄 [REBUILD-{session_id}] Starting vector store rebuild for user {user_id if user_id else 'all'}")
     start_time = datetime.now()
     
+    # Add safety mechanism to avoid concurrent vector store access
+    lock_file = os.path.join(os.environ.get('TEMP', '/tmp'), 'vector_rebuild_lock')
+    
+    if os.path.exists(lock_file):
+        # Check if lock is stale (older than 10 minutes)
+        lock_time = os.path.getmtime(lock_file)
+        current_time = time.time()
+        if current_time - lock_time < 600:  # 10 minutes in seconds
+            logger.warning(f"⚠️ [REBUILD-{session_id}] Another vector rebuild process is already running. Skipping.")
+            return {
+                "success": False,
+                "error": "Another vector rebuild process is already running. Please try again later.",
+                "duration_seconds": 0,
+                "user_id": user_id
+            }
+        else:
+            # Lock is stale, remove it
+            logger.info(f"🔄 [REBUILD-{session_id}] Removing stale lock file from previous rebuild attempt")
+            try:
+                os.remove(lock_file)
+            except Exception as e:
+                logger.error(f"❌ [REBUILD-{session_id}] Failed to remove stale lock file: {e}")
+    
+    # Create lock file
+    try:
+        with open(lock_file, 'w') as f:
+            f.write(f"Vector rebuild started at {datetime.now().isoformat()} for user {user_id}, session {session_id}")
+    except Exception as e:
+        logger.error(f"❌ [REBUILD-{session_id}] Failed to create lock file: {e}")
+    
     try:
         # Initialize vector store
-        vector_store = VectorStore()
-        logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
-        
-        # Get all bookmarks from database
-        from .db_final import get_bookmarks_for_user
+        try:
+            vector_store = VectorStore()
+            logger.info(f"✅ [REBUILD-{session_id}] Vector store initialized with collection: {vector_store.collection_name}")
+        except Exception as ve:
+            logger.error(f"❌ [REBUILD-{session_id}] Vector store initialization failed: {ve}")
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": f"Vector store initialization failed: {str(ve)}",
+                "traceback": traceback.format_exc(),
+                "duration_seconds": (datetime.now() - start_time).total_seconds(),
+                "user_id": user_id
+            }
         
         # Get bookmarks for user
         bookmarks = []
         if user_id:
-            bookmarks = get_bookmarks_for_user(user_id)
+            raw_bookmarks = get_bookmarks_for_user(user_id)
+            # Convert dictionary bookmarks to Bookmark objects
+            for bookmark_dict in raw_bookmarks:
+                bookmark = dict_to_bookmark(bookmark_dict)
+                if bookmark:
+                    bookmarks.append(bookmark)
+            logger.info(f"📊 [REBUILD-{session_id}] Converted {len(bookmarks)} bookmarks from dictionaries")
         else:
             # Get bookmarks for all users using direct SQL
             with db_session() as session:
-                cursor = session.connection().connection.cursor()
-                cursor.execute("""
-                    SELECT id, text, created_at, author_name, author_username, 
-                        media_files, raw_data, user_id
-                    FROM bookmarks
-                    ORDER BY created_at DESC
-                """)
-                rows = cursor.fetchall()
-                for row in rows:
-                    bookmarks.append(Bookmark.from_row(row))
-                cursor.close()
-                
+                try:
+                    cursor = session.connection().connection.cursor()
+                    cursor.execute("""
+                        SELECT bookmark_id as id, text, created_at, author_name, author_username, 
+                            media_files, raw_data, user_id
+                        FROM bookmarks
+                        ORDER BY created_at DESC
+                    """)
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        # Create dict first then convert to Bookmark object to leverage our converter
+                        bookmark_dict = {
+                            'id': row[0],
+                            'text': row[1],
+                            'created_at': row[2],
+                            'author_name': row[3],
+                            'author_username': row[4],
+                            'media_files': row[5],
+                            'raw_data': row[6],
+                            'user_id': row[7]
+                        }
+                        bookmark = dict_to_bookmark(bookmark_dict)
+                        if bookmark:
+                            bookmarks.append(bookmark)
+                    cursor.close()
+                except Exception as sql_error:
+                    logger.error(f"❌ [REBUILD-{session_id}] SQL error: {sql_error}")
+                    logger.error(traceback.format_exc())
+                    # Fallback to individual user queries if that fails
+                    bookmarks = []
+                    logger.info(f"🔄 [REBUILD-{session_id}] Falling back to individual user queries")
+        
         # Count total bookmarks
         total_count = len(bookmarks)
         logger.info(f"📊 [REBUILD-{session_id}] Found {total_count} bookmarks to process")
@@ -459,6 +523,15 @@ def rebuild_vector_store(user_id=None, session_id=None):
     except Exception as e:
         logger.error(f"❌ [REBUILD-{session_id}] Vector store rebuild failed: {str(e)}")
         logger.error(traceback.format_exc())
+        
+        # Clean up lock file
+        try:
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+                logger.info(f"🧹 [REBUILD-{session_id}] Removed lock file after error")
+        except Exception as le:
+            logger.error(f"❌ [REBUILD-{session_id}] Failed to remove lock file: {le}")
+            
         return {
             "success": False,
             "error": str(e),
@@ -466,6 +539,14 @@ def rebuild_vector_store(user_id=None, session_id=None):
             "duration_seconds": (datetime.now() - start_time).total_seconds(),
             "user_id": user_id
         }
+    finally:
+        # Always try to clean up lock file
+        try:
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+                logger.info(f"🧹 [REBUILD-{session_id}] Removed lock file in finally block")
+        except Exception as le:
+            logger.error(f"❌ [REBUILD-{session_id}] Failed to remove lock file in finally block: {le}")
 
 def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
     """
@@ -727,18 +808,36 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             existing_bookmarks = {}
             
             try:
-                # Use ORM approach to get existing bookmarks
+                # Use direct SQL to get existing bookmarks
                 with get_db_session() as session:
-                    query = session.query(Bookmark)
+                    query = """
+                    SELECT bookmark_id, raw_data
+                    FROM bookmarks
+                    WHERE user_id = :user_id
+                    """
                     
-                    # Filter by user_id if provided
-                    if user_id:
-                        query = query.filter(Bookmark.user_id == user_id)
+                    result = session.execute(text(query), {"user_id": user_id})
+                    
+                    for row in result:
+                        bookmark_id = row[0]
+                        raw_data_json = row[1]
                         
-                    # Execute the query
-                    for bookmark in query.all():
-                        if bookmark.raw_data and 'tweet_url' in bookmark.raw_data:
-                            existing_bookmarks[bookmark.raw_data['tweet_url']] = bookmark
+                        # Parse raw_data to extract URL
+                        if isinstance(raw_data_json, str):
+                            try:
+                                raw_data = json.loads(raw_data_json)
+                            except json.JSONDecodeError:
+                                raw_data = {}
+                        else:
+                            raw_data = raw_data_json or {}
+                            
+                        # Get tweet URL from raw_data
+                        tweet_url = raw_data.get('tweet_url')
+                        if tweet_url:
+                            existing_bookmarks[tweet_url] = {
+                                'id': bookmark_id,
+                                'tweet_url': tweet_url
+                            }
                     
                     logger.info(f"Found {len(existing_bookmarks)} existing bookmarks in database")
                     monitor_memory("after loading existing bookmarks")
@@ -798,17 +897,45 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
                                     try:
                                         # Check if bookmark exists
                                         if url not in existing_bookmarks:
-                                            # Create new bookmark using ORM
-                                            new_bookmark = Bookmark(**data)
-                                            session.add(new_bookmark)
+                                            # Create new bookmark using direct SQL
+                                            insert_query = """
+                                            INSERT INTO bookmarks 
+                                            (bookmark_id, text, created_at, author_name, author_username, media_files, raw_data, user_id)
+                                            VALUES (:id, :text, :created_at, :author_name, :author_username, :media_files, :raw_data, :user_id)
+                                            """
+                                            
+                                            # Convert complex objects to JSON
+                                            if isinstance(data['media_files'], (dict, list)):
+                                                data['media_files'] = json.dumps(data['media_files'])
+                                            if isinstance(data['raw_data'], (dict, list)):
+                                                data['raw_data'] = json.dumps(data['raw_data'])
+                                                
+                                            # Execute insert
+                                            session.execute(text(insert_query), data)
                                             stats['new_count'] += 1
                                         else:
-                                            # Update existing bookmark using ORM
-                                            existing = existing_bookmarks[url]
-                                            for key, value in data.items():
-                                                setattr(existing, key, value)
-                                            stats['updated_count'] += 1
+                                            # Update existing bookmark using direct SQL
+                                            update_query = """
+                                            UPDATE bookmarks SET
+                                            text = :text,
+                                            created_at = :created_at,
+                                            author_name = :author_name,
+                                            author_username = :author_username,
+                                            media_files = :media_files,
+                                            raw_data = :raw_data
+                                            WHERE bookmark_id = :id AND user_id = :user_id
+                                            """
                                             
+                                            # Convert complex objects to JSON
+                                            if isinstance(data['media_files'], (dict, list)):
+                                                data['media_files'] = json.dumps(data['media_files'])
+                                            if isinstance(data['raw_data'], (dict, list)):
+                                                data['raw_data'] = json.dumps(data['raw_data'])
+                                                
+                                            # Execute update
+                                            session.execute(text(update_query), data)
+                                            stats['updated_count'] += 1
+                                        
                                         # Add to processed IDs
                                         processed_ids.add(url)
                                         batch_success += 1
@@ -1204,6 +1331,34 @@ def run_vector_rebuild(user_id, session_id=None, max_bookmarks=50):
             
         logger.error(f"❌ [REBUILD-{session_id}] Error during vector rebuild: {str(e)}")
         logger.error(traceback.format_exc())
+
+# Add a function to convert dictionary bookmarks to Bookmark objects
+def dict_to_bookmark(bookmark_dict):
+    """Convert a bookmark dictionary to a Bookmark object"""
+    if not bookmark_dict:
+        return None
+        
+    # Extract basic fields
+    bookmark_id = bookmark_dict.get('bookmark_id') or bookmark_dict.get('id')
+    text = bookmark_dict.get('text', '')
+    created_at = bookmark_dict.get('created_at')
+    author_name = bookmark_dict.get('author_name')
+    author_username = bookmark_dict.get('author_username')
+    media_files = bookmark_dict.get('media_files', {})
+    raw_data = bookmark_dict.get('raw_data', {})
+    user_id = bookmark_dict.get('user_id')
+    
+    # Create Bookmark object
+    return Bookmark(
+        id=bookmark_id,
+        text=text,
+        created_at=created_at,
+        author_name=author_name,
+        author_username=author_username,
+        media_files=media_files,
+        raw_data=raw_data,
+        user_id=user_id
+    )
 
 if __name__ == "__main__":
     import argparse
