@@ -1341,7 +1341,7 @@
                         // Create success message
                         const successDiv = document.createElement('div');
                         successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
-                        successDiv.textContent = 'Vector store rebuilt successfully!';
+                        successDiv.textContent = data.message || 'Vector store rebuilt successfully!';
                         document.getElementById('progress-steps').appendChild(successDiv);
                     } else {
                         alert('Vector store rebuilt successfully!');
@@ -1584,19 +1584,19 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
-                        rebuild: true,
-                        direct_call: true
+                        rebuild_vectors: true,
+                        background: false
                     }),
                     credentials: 'include'
                 });
                 
                 const rebuildResult = await rebuildResponse.json();
                 
-                if (rebuildResponse.ok && rebuildResult.success) {
+                if (rebuildResponse.ok) {
                     updateStepStatus('step-vectors', 'done');
                     const successDiv = document.createElement('div');
                     successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
-                    successDiv.textContent = 'Vector store rebuilt successfully!';
+                    successDiv.textContent = rebuildResult.message || 'Vector store rebuilt successfully!';
                     document.getElementById('progress-steps').appendChild(successDiv);
                 } else {
                     updateStepStatus('step-vectors', 'error');
