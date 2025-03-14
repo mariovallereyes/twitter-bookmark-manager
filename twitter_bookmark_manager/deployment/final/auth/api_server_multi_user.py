@@ -1245,22 +1245,6 @@ def add_header(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Simple health check endpoint."""
-    try:
-        # Try connecting to the database
-        conn = get_db_connection()
-        
-        # Check connection type and close accordingly
-        if hasattr(conn, 'close') and not hasattr(conn, 'execute'):
-            conn.close()
-            
-        return jsonify({'status': 'healthy', 'db': 'connected'})
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
-
 @app.errorhandler(json.JSONDecodeError)
 def handle_json_error(e):
     """Handle JSON decode errors"""
