@@ -24,7 +24,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import sqlite3
 import psutil
 import string
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g, flash
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, send_from_directory, abort, g, flash, current_app
 from flask.sessions import SecureCookieSessionInterface
 import uuid
 import traceback
@@ -1226,89 +1226,210 @@ def process_status():
         return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
 
 @app.route('/api/update-database', methods=['POST'])
+@login_required
 def update_database():
-    """Update the database with new bookmarks"""
+    """API endpoint to update the database from a JSON file
+    This function is improved based on the PythonAnywhere approach
+    with complete separation of vector operations from database updates
+    """
     try:
-        # Get current user from context
-        current_user = get_current_user()
-        if not current_user:
-            logger.error("User not authenticated in update-database")
-            return jsonify({"success": False, "error": "Not authenticated"}), 401
+        # Get current user
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user context found for request")
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
             
-        # Get parameters
-        rebuild_vectors = request.json.get('rebuild_vectors', False)
-        background = request.json.get('background', True)
+        user_id = user.id
+        logger.info(f"Processing database update for user {user_id}")
         
-        # Log the request
-        logger.info(f"Update database request: user={current_user.id}, rebuild_vectors={rebuild_vectors}, background={background}")
+        # Get request JSON data
+        data = request.get_json() or {}
+        session_id = data.get('session_id', str(uuid.uuid4())[:8])
+        start_index = data.get('start_index', 0)
+        skip_vector = data.get('skip_vector', True)  # Default to skipping vector operations
         
-        # Generate session ID for tracking
-        session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        # Check if file exists
+        user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+        json_file = os.path.join(user_dir, 'twitter_bookmarks.json')
         
-        if rebuild_vectors:
-            # Get bookmarks for the user
-            try:
-                from database.multi_user_db.db_final import get_bookmarks_for_user
-                bookmarks = get_bookmarks_for_user(current_user.id)
-                logger.info(f"Retrieved {len(bookmarks) if bookmarks else 0} bookmarks for user {current_user.id}")
-                
-                if background:
-                    # Background processing
-                    logger.info(f"Starting background vector rebuild for user {current_user.id}")
-                    
-                    def rebuild_task():
-                        with app.app_context():
-                            try:
-                                vector_store = get_multi_user_vector_store()
-                                success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
-                                if not success:
-                                    logger.error(f"Error rebuilding vector store for user {current_user.id}: {message}")
-                            except Exception as e:
-                                logger.error(f"Error in background rebuild: {str(e)}")
-                                logger.error(traceback.format_exc())
-                    
-                    thread = Thread(target=rebuild_task)
-                    thread.daemon = True
-                    thread.start()
-                    
+        if not os.path.exists(json_file):
+            logger.error(f"JSON file not found at {json_file}")
+            return jsonify({
+                'success': False,
+                'error': f'Bookmarks file not found. Please upload a file first.',
+                'file_path': json_file
+            }), 404
+            
+        # Log file size for debugging
+        file_size = os.path.getsize(json_file)
+        logger.info(f"Found JSON file at {json_file} (size: {file_size} bytes)")
+        
+        # Check if the file is valid JSON (just the basic check)
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+                if not (first_line.startswith('{') or first_line.startswith('[')):
                     return jsonify({
-                        "success": True,
-                        "message": "Vector rebuild started in background",
-                        "session_id": session_id
-                    })
-                else:
-                    # Direct processing
-                    logger.info(f"Starting direct vector rebuild for user {current_user.id}")
-                    try:
-                        with app.app_context():
-                            vector_store = get_multi_user_vector_store()
-                            success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
-                            if not success:
-                                logger.error(f"Vector rebuild failed: {message}")
-                                return jsonify({"success": False, "error": message}), 500
-                                
-                        logger.info(f"Vector rebuild completed for user {current_user.id}")
-                        return jsonify({
-                            "success": True,
-                            "message": "Vector rebuild completed",
-                            "session_id": session_id
-                        })
-                    except Exception as e:
-                        logger.error(f"Error rebuilding vector store: {str(e)}")
-                        logger.error(traceback.format_exc())
-                        return jsonify({"success": False, "error": str(e)}), 500
-            except Exception as e:
-                logger.error(f"Error getting bookmarks: {str(e)}")
-                logger.error(traceback.format_exc())
-                return jsonify({"success": False, "error": f"Error getting bookmarks: {str(e)}"}), 500
+                        'success': False,
+                        'error': 'File does not appear to be valid JSON',
+                        'first_line': first_line
+                    }), 400
+        except Exception as json_error:
+            logger.error(f"Error checking JSON file: {json_error}")
+            return jsonify({
+                'success': False,
+                'error': f'Error checking JSON file: {str(json_error)}'
+            }), 500
+            
+        # Start the update process in the background
+        logger.info(f"Starting background database update process with session_id {session_id}")
         
-        # If we get here, no action was taken
-        return jsonify({"success": True, "message": "No action taken"})
+        # Generate a status file
+        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+        with open(status_file, 'w') as f:
+            status = {
+                'user_id': user_id,
+                'session_id': session_id,
+                'status': 'processing',
+                'message': 'Database update started',
+                'start_time': datetime.now().isoformat(),
+                'progress': 0
+            }
+            json.dump(status, f)
+            
+        # Launch update process in background thread
+        def update_process():
+            from datetime import datetime
+            import traceback
+            
+            start_time = datetime.now()
+            
+            try:
+                # Run the database update WITHOUT vector operations
+                from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
+                
+                with app.app_context():
+                    try:
+                        # Log the start of the update
+                        logger.info(f"Starting database update in background - session_id={session_id}")
+                        
+                        # Run the update process with skip_vector=True to avoid vector store interactions
+                        result = final_update_bookmarks(
+                            session_id=session_id,
+                            start_index=start_index,
+                            rebuild_vector=False,  # Never rebuild vector in the initial pass
+                            user_id=user_id,
+                            skip_vector=True  # Add this parameter to completely skip vector operations
+                        )
+                        
+                        # Update status file with result
+                        with open(status_file, 'w') as f:
+                            status = {
+                                'user_id': user_id,
+                                'session_id': session_id,
+                                'status': 'completed' if result.get('success', False) else 'error',
+                                'message': 'Database update completed' if result.get('success', False) else 'Database update failed',
+                                'result': result,
+                                'start_time': start_time.isoformat(),
+                                'end_time': datetime.now().isoformat(),
+                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                                'progress': 100 if result.get('success', False) else 0,
+                                'vector_update_needed': not skip_vector  # Indicate vector update is needed as a second step
+                            }
+                            json.dump(status, f)
+                            
+                        logger.info(f"Database update completed - session_id={session_id}")
+                        
+                        # If vector operations are requested and database update was successful,
+                        # trigger a separate vector update process
+                        if not skip_vector and result.get('success', False):
+                            try:
+                                logger.info(f"Starting vector store update process - session_id={session_id}")
+                                # This should be a separate endpoint call in a real implementation
+                                # For now, we'll just log that it would happen
+                                logger.info(f"Vector store update would be started here - session_id={session_id}")
+                            except Exception as vector_error:
+                                logger.error(f"Error in vector store update: {vector_error}")
+                                logger.error(traceback.format_exc())
+                                # Don't fail the whole process if vector update fails
+                                
+                    except Exception as e:
+                        # Log error and update status file
+                        logger.error(f"Error in database update process: {e}")
+                        logger.error(traceback.format_exc())
+                        
+                        with open(status_file, 'w') as f:
+                            status = {
+                                'user_id': user_id,
+                                'session_id': session_id,
+                                'status': 'error',
+                                'message': f'Error updating database: {str(e)}',
+                                'error': str(e),
+                                'traceback': traceback.format_exc(),
+                                'start_time': start_time.isoformat(),
+                                'end_time': datetime.now().isoformat(),
+                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                                'progress': 0
+                            }
+                            json.dump(status, f)
+            except Exception as e:
+                # Handle outer exceptions
+                logger.error(f"Fatal error in update thread: {e}")
+                logger.error(traceback.format_exc())
+                
+                try:
+                    with open(status_file, 'w') as f:
+                        status = {
+                            'user_id': user_id,
+                            'session_id': session_id,
+                            'status': 'error',
+                            'message': f'Fatal error in update process: {str(e)}',
+                            'error': str(e),
+                            'traceback': traceback.format_exc(),
+                            'start_time': start_time.isoformat(),
+                            'end_time': datetime.now().isoformat(),
+                            'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                            'progress': 0
+                        }
+                        json.dump(status, f)
+                except Exception:
+                    pass
+        
+        # Start the update process in a background thread
+        update_thread = Thread(target=update_process)
+        update_thread.daemon = True
+        update_thread.start()
+        
+        # Return immediate success response with session ID for tracking
+        return jsonify({
+            'success': True,
+            'message': 'Database update started in background',
+            'session_id': session_id,
+            'file': os.path.basename(json_file),
+            'status_file': os.path.basename(status_file),
+            'next_step': {
+                'endpoint': '/api/process-status',
+                'method': 'GET',
+                'params': {'session_id': session_id}
+            },
+            'vector_rebuild': {
+                'needed': not skip_vector,
+                'endpoint': '/api/rebuild-vector-store',
+                'method': 'POST',
+                'params': {'session_id': session_id}
+            }
+        })
         
     except Exception as e:
-        logger.error(f"Error in update_database: {str(e)}")
+        logger.error(f"Error in update_database endpoint: {e}")
         logger.error(traceback.format_exc())
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/api/categories/all', methods=['GET'])
 @login_required
@@ -1726,6 +1847,195 @@ def emergency_upload():
             mimetype='application/json'
         )
 
+@app.route('/direct-upload', methods=['POST'])
+@login_required
+def direct_upload():
+    """Handle bookmark JSON file upload without any vector store interaction
+    This is a simplified version of the upload process that completely avoids
+    vector store operations to ensure reliable file uploads even when vector
+    operations might fail.
+    """
+    # Generate a unique ID for this upload session
+    session_id = str(uuid.uuid4())[:8]
+    temp_path = None
+    
+    try:
+        logger.info("="*80)
+        logger.info(f"🚀 [UPLOAD-{session_id}] Starting direct upload handler at {datetime.now().isoformat()}")
+        
+        # Get current user ID
+        user = UserContext.get_current_user()
+        if not user:
+            raise ValueError("User not found or not authenticated")
+        
+        user_id = user.id
+        logger.info(f"👤 [UPLOAD-{session_id}] User ID: {user_id}")
+        
+        # 1. Check if file exists in request
+        logger.info(f"📋 [UPLOAD-{session_id}] STEP 1: Checking if file exists in request")
+        if 'file' not in request.files:
+            logger.error(f"❌ [UPLOAD-{session_id}] No file part in request")
+            return jsonify({
+                'error': 'No file provided',
+                'details': {
+                    'request_method': request.method,
+                    'has_files': bool(request.files),
+                    'form_keys': list(request.form.keys()) if request.form else None
+                }
+            }), 400
+        
+        file = request.files['file']
+        logger.info(f"✅ [UPLOAD-{session_id}] Received file object: {file}")
+        logger.info(f"📄 [UPLOAD-{session_id}] File name: {file.filename}")
+        
+        # 2. Validate file name
+        logger.info(f"📋 [UPLOAD-{session_id}] STEP 2: Validating file name")
+        if not file.filename:
+            logger.error(f"❌ [UPLOAD-{session_id}] No selected file")
+            return jsonify({'error': 'No file selected'}), 400
+            
+        if not file.filename.endswith('.json'):
+            logger.error(f"❌ [UPLOAD-{session_id}] Invalid file type: {file.filename}")
+            return jsonify({'error': 'Only JSON files are allowed'}), 400
+        
+        # 3. Validate JSON content
+        logger.info(f"📋 [UPLOAD-{session_id}] STEP 3: Validating JSON content")
+        try:
+            file_content = file.read()
+            file.seek(0)
+            json_data = json.loads(file_content)
+            logger.info(f"✅ [UPLOAD-{session_id}] JSON validation successful")
+            logger.info(f"📊 [UPLOAD-{session_id}] JSON content size: {len(file_content)} bytes")
+            
+            # Log some basic statistics about the JSON data
+            if isinstance(json_data, list):
+                logger.info(f"📊 [UPLOAD-{session_id}] JSON contains a list with {len(json_data)} items")
+            elif isinstance(json_data, dict):
+                logger.info(f"📊 [UPLOAD-{session_id}] JSON contains a dictionary with {len(json_data.keys())} keys")
+                if 'bookmarks' in json_data:
+                    logger.info(f"📊 [UPLOAD-{session_id}] JSON contains {len(json_data['bookmarks'])} bookmarks")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ [UPLOAD-{session_id}] Invalid JSON file: {str(e)}")
+            return jsonify({'error': 'Invalid JSON file: ' + str(e)}), 400
+        
+        # 4. Create user-specific directories
+        if file.filename == '':
+            return app.response_class(
+                response=json.dumps({'success': False, 'error': 'No file selected'}),
+                status=400,
+                mimetype='application/json'
+            )
+            
+        # Check if it's a JSON file
+        if not file.filename.lower().endswith('.json'):
+            return app.response_class(
+                response=json.dumps({'success': False, 'error': 'File must be a JSON file'}),
+                status=400,
+                mimetype='application/json'
+            )
+            
+        # Ensure directory exists for this user
+        upload_dir = os.path.join(app.config.get('UPLOAD_FOLDER', '/app/uploads'), f'user_{user_id}')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Create database directory if not exists
+        database_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+        os.makedirs(database_dir, exist_ok=True)
+        
+        # Save the file with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"twitter_bookmarks_{timestamp}.json"
+        upload_path = os.path.join(upload_dir, filename)
+        target_path = os.path.join(database_dir, 'twitter_bookmarks.json')
+        
+        try:
+            # Save to uploads folder
+            file.save(upload_path)
+            logger.info(f"File saved to {upload_path}")
+            
+            # Do a simple test that the file is valid JSON
+            try:
+                with open(upload_path, 'r', encoding='utf-8') as f:
+                    # Just read the first line to check it starts with valid JSON characters
+                    first_chars = f.read(10).strip()
+                    if not first_chars.startswith('{') and not first_chars.startswith('['):
+                        return app.response_class(
+                            response=json.dumps({
+                                'success': False, 
+                                'error': 'File does not appear to be valid JSON',
+                                'first_chars': first_chars,
+                                'file_saved': True,
+                                'path': upload_path
+                            }),
+                            status=400,
+                            mimetype='application/json'
+                        )
+            except Exception as json_error:
+                logger.error(f"Error checking JSON: {json_error}")
+                return app.response_class(
+                    response=json.dumps({
+                        'success': False, 
+                        'error': f'Error checking JSON file: {str(json_error)}',
+                        'file_saved': True,
+                        'path': upload_path
+                    }),
+                    status=400,
+                    mimetype='application/json'
+                )
+                
+            # Copy to database directory
+            try:
+                shutil.copy2(upload_path, target_path)
+                logger.info(f"File copied to database directory: {target_path}")
+            except Exception as copy_error:
+                logger.error(f"Error copying file: {copy_error}")
+                return app.response_class(
+                    response=json.dumps({
+                        'success': False, 
+                        'error': f'Error copying file to database: {str(copy_error)}',
+                        'file_saved': True,
+                        'upload_path': upload_path
+                    }),
+                    status=500,
+                    mimetype='application/json'
+                )
+            
+            # Return success
+            return app.response_class(
+                response=json.dumps({
+                    'success': True,
+                    'message': 'File uploaded successfully via direct upload endpoint',
+                    'file': filename,
+                    'upload_path': upload_path,
+                    'database_path': target_path,
+                    'timestamp': timestamp
+                }),
+                status=200,
+                mimetype='application/json'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            return app.response_class(
+                response=json.dumps({'success': False, 'error': str(e)}),
+                status=500,
+                mimetype='application/json'
+            )
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in direct upload: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Always return JSON even on unexpected errors
+        return app.response_class(
+            response=json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
+            }),
+            status=500,
+            mimetype='application/json'
+        )
+
 # Run the app if this file is executed directly
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
@@ -1762,3 +2072,197 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Failed to start server: {e}")
         logger.exception(e) 
+
+def safe_get_vector_store():
+    """
+    Safely attempt to get a vector store instance, handling all possible errors
+    without propagating exceptions to the caller. This completely isolates vector 
+    store operations from the rest of the application.
+    
+    Returns:
+        VectorStore or None: The initialized vector store or None if any error occurred
+    """
+    try:
+        # First try to import the module
+        logger.info("Attempting to import VectorStoreMultiUser")
+        try:
+            from database.multi_user_db.vector_store_final import VectorStoreMultiUser
+            logger.info("Successfully imported VectorStoreMultiUser")
+        except ImportError as e:
+            logger.error(f"Import error for VectorStoreMultiUser: {e}")
+            logger.error(traceback.format_exc())
+            return None
+        
+        # Then try to initialize it
+        logger.info("Attempting to initialize VectorStoreMultiUser")
+        try:
+            user = UserContext.get_current_user()
+            if not user:
+                logger.warning("No user context found, cannot initialize vector store")
+                return None
+                
+            user_id = user.id
+            vector_store = VectorStoreMultiUser(user_id=user_id)
+            logger.info(f"Successfully initialized vector store for user {user_id}")
+            return vector_store
+        except Exception as e:
+            # Check for common errors
+            if "Storage folder is locked" in str(e) or "already being accessed" in str(e):
+                logger.warning(f"Vector store folder is locked, another instance is accessing it: {e}")
+            elif "Permission denied" in str(e):
+                logger.error(f"Permission denied when accessing vector store: {e}")
+            else:
+                logger.error(f"Error initializing vector store: {e}")
+                logger.error(traceback.format_exc())
+            return None
+    except Exception as e:
+        # Catch absolutely any error to avoid breaking API requests
+        logger.error(f"Unexpected error in safe_get_vector_store: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+@app.route('/api/rebuild-vector-store', methods=['POST'])
+@login_required
+def rebuild_vector_store_endpoint():
+    """API endpoint to rebuild the vector store from the database
+    This is separated from the database update process to avoid
+    vector store errors affecting the database update.
+    """
+    try:
+        # Get current user
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user context found for request")
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
+            
+        user_id = user.id
+        logger.info(f"Starting vector store rebuild for user {user_id}")
+        
+        # Get request JSON data
+        data = request.get_json() or {}
+        session_id = data.get('session_id', str(uuid.uuid4())[:8])
+        
+        # Generate a status file
+        user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+        status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
+        
+        with open(status_file, 'w') as f:
+            status = {
+                'user_id': user_id,
+                'session_id': session_id,
+                'status': 'processing',
+                'message': 'Vector store rebuild started',
+                'start_time': datetime.now().isoformat(),
+                'progress': 0
+            }
+            json.dump(status, f)
+            
+        # Launch rebuild process in background thread
+        def rebuild_process():
+            from datetime import datetime
+            import traceback
+            
+            start_time = datetime.now()
+            
+            try:
+                # Run the vector store rebuild
+                from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+                
+                with app.app_context():
+                    try:
+                        # Log the start of the rebuild
+                        logger.info(f"Starting vector store rebuild in background - session_id={session_id}")
+                        
+                        # Run the rebuild process
+                        result = rebuild_vector_store(
+                            session_id=session_id,
+                            user_id=user_id
+                        )
+                        
+                        # Update status file with result
+                        with open(status_file, 'w') as f:
+                            status = {
+                                'user_id': user_id,
+                                'session_id': session_id,
+                                'status': 'completed' if result.get('success', False) else 'error',
+                                'message': 'Vector store rebuild completed' if result.get('success', False) else 'Vector store rebuild failed',
+                                'result': result,
+                                'start_time': start_time.isoformat(),
+                                'end_time': datetime.now().isoformat(),
+                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                                'progress': 100 if result.get('success', False) else 0
+                            }
+                            json.dump(status, f)
+                            
+                        logger.info(f"Vector store rebuild completed - session_id={session_id}")
+                        
+                    except Exception as e:
+                        # Log error and update status file
+                        logger.error(f"Error in vector store rebuild process: {e}")
+                        logger.error(traceback.format_exc())
+                        
+                        with open(status_file, 'w') as f:
+                            status = {
+                                'user_id': user_id,
+                                'session_id': session_id,
+                                'status': 'error',
+                                'message': f'Error rebuilding vector store: {str(e)}',
+                                'error': str(e),
+                                'traceback': traceback.format_exc(),
+                                'start_time': start_time.isoformat(),
+                                'end_time': datetime.now().isoformat(),
+                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                                'progress': 0
+                            }
+                            json.dump(status, f)
+            except Exception as e:
+                # Handle outer exceptions
+                logger.error(f"Fatal error in rebuild thread: {e}")
+                logger.error(traceback.format_exc())
+                
+                try:
+                    with open(status_file, 'w') as f:
+                        status = {
+                            'user_id': user_id,
+                            'session_id': session_id,
+                            'status': 'error',
+                            'message': f'Fatal error in rebuild process: {str(e)}',
+                            'error': str(e),
+                            'traceback': traceback.format_exc(),
+                            'start_time': start_time.isoformat(),
+                            'end_time': datetime.now().isoformat(),
+                            'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                            'progress': 0
+                        }
+                        json.dump(status, f)
+                except Exception:
+                    pass
+        
+        # Start the rebuild process in a background thread
+        rebuild_thread = Thread(target=rebuild_process)
+        rebuild_thread.daemon = True
+        rebuild_thread.start()
+        
+        # Return immediate success response with session ID for tracking
+        return jsonify({
+            'success': True,
+            'message': 'Vector store rebuild started in background',
+            'session_id': session_id,
+            'status_file': os.path.basename(status_file),
+            'next_step': {
+                'endpoint': '/api/process-status',
+                'method': 'GET',
+                'params': {'session_id': session_id}
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in rebuild_vector_store endpoint: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500

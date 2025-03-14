@@ -546,7 +546,7 @@ def detect_update_loop(progress_file, max_loop_count=3, user_id=None):
         return False, {"error": str(e)}
 
 # Enhance the update_bookmarks function with better debugging and vector store updates
-def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
+def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None, skip_vector=False):
     """
     Update bookmarks database from JSON file with improved ORM approach.
     
@@ -555,6 +555,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         start_index (int, optional): Index to start/resume processing from. Defaults to 0.
         rebuild_vector (bool, optional): Whether to rebuild the vector store. Defaults to False.
         user_id (int, optional): User ID for multi-user support. Defaults to None.
+        skip_vector (bool, optional): Whether to skip vector store operations entirely. Defaults to False.
         
     Returns:
         dict: Result dictionary with progress information and success status
@@ -569,6 +570,14 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             
         # Monitor memory at start
         monitor_memory(f"start of update session {session_id}")
+        
+        # Log vector handling approach
+        if skip_vector:
+            logger.info(f"🚫 [UPDATE-{session_id}] Vector store operations will be SKIPPED entirely (skip_vector=True)")
+        elif rebuild_vector:
+            logger.info(f"🔄 [UPDATE-{session_id}] Vector store will be REBUILT after update (rebuild_vector=True)")
+        else:
+            logger.info(f"📝 [UPDATE-{session_id}] Vector store will be UPDATED incrementally")
         
         # Set up user directory
         user_dir = f"user_{user_id}" if user_id else ""
@@ -856,13 +865,21 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             logger.info(f"Update completed in {duration_seconds:.2f} seconds")
             logger.info(f"Stats: {stats['new_count']} new, {stats['updated_count']} updated, {stats['errors']} errors")
             
-            # Rebuild vector store if requested
+            # Rebuild vector store if requested and not skipped
             vector_rebuilt = False
             rebuild_result = None
-            if rebuild_vector:
+            if rebuild_vector and not skip_vector:
                 logger.info("Rebuilding vector store as requested")
                 rebuild_result = rebuild_vector_store(session_id=session_id, user_id=user_id)
                 vector_rebuilt = rebuild_result.get('success', False)
+            elif skip_vector:
+                logger.info("Skipping vector store operations as requested (skip_vector=True)")
+                vector_rebuilt = False
+                rebuild_result = {
+                    "success": True,
+                    "message": "Vector store operations skipped as requested",
+                    "skipped": True
+                }
             
             # Return success response
             return {
