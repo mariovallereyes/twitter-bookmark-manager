@@ -162,115 +162,85 @@ class VectorStore:
     Uses SentenceTransformer for embeddings and Qdrant for vector storage.
     """
     
-    def __init__(self, collection_name="bookmarks"):
-        """Initialize the vector store with retries and proper cleanup."""
+    def __init__(self, collection_name="bookmarks", server_mode=False):
+        """Initialize the vector store."""
         self.collection_name = collection_name
         self.client = None
-        self.max_retries = 3
-        self.retry_delay = 1
-        self._initialize_client_with_retry()
+        self.model = None
+        self.vector_size = 384  # for all-MiniLM-L6-v2
+        self.server_mode = server_mode
+        self._initialize_client()
 
-    def _initialize_client_with_retry(self):
-        """Initialize Qdrant client with retry mechanism."""
-        import time
-        import random
-        from qdrant_client import QdrantClient
-        from qdrant_client.http import models
-        
-        attempt = 0
-        last_error = None
-        
-        while attempt < self.max_retries:
-            try:
-                # Clean up any existing connections first
-                if self.client:
-                    try:
-                        self.client.close()
-                    except:
-                        pass
-                    self.client = None
-                
-                # Try to remove lock file if it exists
-                lock_file = os.path.join(VECTOR_STORE_PATH, "qdrant.lock")
-                if os.path.exists(lock_file):
-                    try:
-                        os.remove(lock_file)
-                        logger.info("Removed existing lock file")
-                    except:
-                        pass
-                
-                # Initialize new client
+    def _initialize_client(self):
+        """Initialize Qdrant client with proper error handling."""
+        try:
+            # Clean up any existing connections
+            if self.client:
+                try:
+                    self.client.close()
+                except:
+                    pass
+                self.client = None
+
+            if self.server_mode:
+                # Server mode - use REST API
+                self.client = QdrantClient(
+                    host="localhost",
+                    port=6333
+                )
+            else:
+                # Local mode - use file system
                 self.client = QdrantClient(
                     path=VECTOR_STORE_PATH,
-                    force_disable_server_version_check=True
+                    prefer_grpc=False,
+                    timeout=60
                 )
-                
-                # Test the connection
-                self.client.get_collections()
-                logger.info("Successfully initialized vector store client")
-                return
-                
-            except Exception as e:
-                last_error = e
-                attempt += 1
-                if attempt < self.max_retries:
-                    wait_time = self.retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.1)
-                    logger.warning(f"Vector store initialization attempt {attempt} failed: {str(e)}. Retrying in {wait_time:.1f}s...")
-                    time.sleep(wait_time)
-                    
-        # If we get here, all retries failed
-        logger.error(f"Failed to initialize vector store after {self.max_retries} attempts: {str(last_error)}")
-        raise RuntimeError(f"Could not initialize vector store: {str(last_error)}")
 
-    def __del__(self):
-        """Ensure proper cleanup on deletion."""
-        if self.client:
+            # Ensure collection exists
             try:
-                self.client.close()
-            except:
-                pass
-            self.client = None
+                collections = self.client.get_collections()
+                collection_names = [c.name for c in collections.collections]
+                
+                if self.collection_name not in collection_names:
+                    logger.info(f"Creating collection {self.collection_name}")
+                    self.client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=VectorParams(
+                            size=self.vector_size,
+                            distance=Distance.COSINE
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"Error checking/creating collection: {str(e)}")
+                raise
 
-    def _ensure_model_loaded(self):
-        """Ensure the model is loaded before using it"""
-        if self.model is None:
-            self._load_model()
-            
-    def _load_model(self):
-        """Load the model optimized for low memory usage"""
-        try:
-            memory_before = self.get_memory_usage()
-            logger.info(f"Memory before model loading: {memory_before:.2f}MB")
-            
-            # Import here to avoid loading torch until needed
-            import torch
-            from sentence_transformers import SentenceTransformer
-            
-            # Force initial garbage collection
-            gc.collect()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-            # Use the smaller model to reduce memory usage
-            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
-                                           device='cpu')  # Use CPU for stability
-            
-            # Verify vector size matches what we expect
-            model_vector_size = self.model.get_sentence_embedding_dimension()
-            if model_vector_size != self.vector_size:
-                logger.error(f"Model vector size {model_vector_size} does not match collection size {self.vector_size}")
-                raise ValueError("Model vector size mismatch")
-            
-            logger.info(f"Model loaded successfully with vector size {self.vector_size}")
-            
-            memory_after = self.get_memory_usage()
-            memory_increase = memory_after - memory_before
-            logger.info(f"Memory after model loading: {memory_after:.2f}MB")
-            logger.info(f"Memory increase: {memory_increase:.2f}MB")
-            
+            logger.info("Successfully initialized vector store client")
+
         except Exception as e:
-            logger.error(f"Error loading model: {e}")
+            logger.error(f"Error initializing vector store client: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
-            
+
+    def _load_model(self):
+        """Load the sentence transformer model."""
+        if self.model is None:
+            try:
+                self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                logger.info("Successfully loaded sentence transformer model")
+            except Exception as e:
+                logger.error(f"Error loading model: {str(e)}")
+                raise
+
+    def _get_embedding(self, text: str) -> np.ndarray:
+        """Get embedding for text."""
+        try:
+            if self.model is None:
+                self._load_model()
+            return self.model.encode(text)
+        except Exception as e:
+            logger.error(f"Error generating embedding: {str(e)}")
+            raise
+
     def add_bookmark(self, bookmark_id: int, text: str, user_id: int, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         Add a bookmark to the vector store.
@@ -305,10 +275,10 @@ class VectorStore:
             logger.info(f"Memory before embedding (bookmark {bookmark_id}): {memory_before}")
             
             # Ensure model is loaded
-            self._ensure_model_loaded()
+            self._load_model()
             
             # Generate embedding - simple approach like PythonAnywhere
-            embedding = self.model.encode(text)
+            embedding = self._get_embedding(text)
             
             # Immediately unload model to save memory
             self._unload_model()
@@ -377,10 +347,10 @@ class VectorStore:
             
         try:
             # Ensure model is loaded
-            self._ensure_model_loaded()
+            self._load_model()
             
             # Generate embedding for query
-            query_embedding = self.model.encode(query)
+            query_embedding = self._get_embedding(query)
             
             # Search for similar vectors
             search_result = self.client.search(
@@ -449,7 +419,7 @@ class VectorStore:
         """Rebuild vectors for a user's bookmarks in batches"""
         try:
             # Re-initialize client to ensure clean state
-            self._initialize_client_with_retry()
+            self._initialize_client()
             
             collection_name = f"{self.collection_name}_{user_id}"
             logging.info(f"Starting vector rebuild for user {user_id} in collection {collection_name}")
@@ -761,31 +731,71 @@ class VectorStore:
         memory_after = self.get_memory_usage()
         logger.debug(f"Memory cleanup: {memory_before:.2f}MB → {memory_after:.2f}MB")
 
-# Create a singleton instance
+# Singleton instance with lock
 _vector_store_instance = None
+_vector_store_lock = threading.Lock()
 
 def get_vector_store(collection_name="bookmarks"):
     """
     Get a singleton instance of the vector store.
-    
-    Args:
-        collection_name: Name of the collection to use
-        
-    Returns:
-        VectorStore instance
+    Uses double-checked locking pattern for thread safety.
     """
     global _vector_store_instance
     
+    # First check without lock
     if _vector_store_instance is None:
-        try:
-            logger.info(f"Creating vector store instance with collection {collection_name}")
-            _vector_store_instance = VectorStore(collection_name=collection_name)
-        except Exception as e:
-            logger.error(f"Error initializing vector store: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-            
+        with _vector_store_lock:
+            # Second check with lock
+            if _vector_store_instance is None:
+                try:
+                    logger.info(f"Initializing vector store with collection {collection_name}")
+                    
+                    # Try server mode first, fall back to local if needed
+                    try:
+                        logger.info("Attempting to initialize in server mode")
+                        _vector_store_instance = VectorStore(
+                            collection_name=collection_name,
+                            server_mode=True
+                        )
+                    except Exception as server_error:
+                        logger.warning(f"Server mode failed: {str(server_error)}, falling back to local mode")
+                        _vector_store_instance = VectorStore(
+                            collection_name=collection_name,
+                            server_mode=False
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Failed to initialize vector store: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    return DummyVectorStore(str(e))
+    
     return _vector_store_instance
+
+def cleanup_vector_store():
+    """Clean up the vector store instance."""
+    global _vector_store_instance
+    with _vector_store_lock:
+        if _vector_store_instance is not None:
+            try:
+                if hasattr(_vector_store_instance, 'client') and _vector_store_instance.client is not None:
+                    _vector_store_instance.client.close()
+            except:
+                pass
+            _vector_store_instance = None
+            logger.info("Vector store instance cleaned up")
+
+class DummyVectorStore:
+    """A dummy vector store that logs errors but doesn't fail."""
+    
+    def __init__(self, error_message):
+        self.error_message = error_message
+        logger.error(f"Using dummy vector store due to initialization error: {error_message}")
+    
+    def __getattr__(self, name):
+        def dummy_method(*args, **kwargs):
+            logger.error(f"Vector store operation '{name}' failed - store is in dummy mode due to: {self.error_message}")
+            return None
+        return dummy_method
 
 def get_multi_user_vector_store(collection_name="bookmarks"):
     """
