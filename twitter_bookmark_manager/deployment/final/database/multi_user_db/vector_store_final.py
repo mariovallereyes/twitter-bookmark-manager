@@ -49,72 +49,43 @@ class VectorStore:
     Uses SentenceTransformer for embeddings and Qdrant for vector storage.
     """
     
-    def __init__(self, persist_directory: Optional[str] = None):
-        """
-        Initialize the vector store with a specified persist directory.
-        
-        Args:
-            persist_directory: Directory to persist the vector store. If None,
-                              a default location in the user's directory is used.
-        """
-        self.model = None  # Will be loaded lazily when needed
+    def __init__(self, collection_name="bookmarks"):
+        self.collection_name = collection_name
+        self.vector_size = 384  # for all-MiniLM-L6-v2
+        self.model = None
         self.client = None
+        self._initialize_client()
+
+    def _initialize_client(self):
+        if self.client is not None:
+            try:
+                self.client.close()
+            except:
+                pass
         
-        # Set default persist directory for Railway if not specified
-        if persist_directory is None:
-            # Use Railway's volume mount path
-            self.persist_directory = os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', '/app/twitter_bookmark_manager/data')
-            self.persist_directory = os.path.join(self.persist_directory, 'vector_store')
-        else:
-            self.persist_directory = persist_directory
-            
-        # Ensure directory exists
-        os.makedirs(self.persist_directory, exist_ok=True)
-        logger.info(f"Using persistent storage at: {self.persist_directory}")
+        # Use Railway's volume mount path for persistent storage
+        storage_path = "/app/twitter_bookmark_manager/data/vector_store"
         
-        # Generate a unique instance ID to prevent collisions
-        instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        self.collection_name = f"bookmark_embeddings_{instance_id}"
-        
-        self.vector_size = 384  # Default for all-MiniLM-L6-v2 (changed from 768)
-        
-        # Initialize Qdrant client with persistent storage
         try:
-            logger.info(f"Initializing Qdrant client with persistent storage at {self.persist_directory}")
-            self.client = QdrantClient(path=self.persist_directory)
-            logger.info(f"Qdrant client initialized successfully with persistent storage")
-            
-            # Initialize model as None - will load on demand
-            self.model = None
-            
-            # Create or get collection
-            collections = self.client.get_collections().collections
-            collection_exists = any(c.name == self.collection_name for c in collections)
-            
-            if collection_exists:
-                # Check if dimensions match
-                collection_info = self.client.get_collection(self.collection_name)
-                current_dims = collection_info.config.params.vectors.size
-                if current_dims != self.vector_size:
-                    logger.warning(f"Collection dimensions mismatch: expected {self.vector_size}, found {current_dims}")
-                    # Delete and recreate with correct dimensions
-                    self.client.delete_collection(self.collection_name)
-                    collection_exists = False
-                    
-            if not collection_exists:
-                self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=self.vector_size,
-                        distance=Distance.COSINE
-                    )
-                )
-                logger.info(f"Created collection: {self.collection_name} with {self.vector_size} dimensions")
+            # First try to connect to existing client
+            self.client = QdrantClient(
+                path=storage_path,
+                force_new_instance=True  # Force new instance to avoid conflicts
+            )
+            logging.info(f"Successfully initialized Qdrant client with storage at {storage_path}")
         except Exception as e:
-            logger.error(f"Failed to initialize Qdrant client: {str(e)}")
-            logger.error(traceback.format_exc())
+            logging.error(f"Error initializing Qdrant client: {e}")
             raise
-            
+
+    def __del__(self):
+        """Cleanup when the instance is destroyed"""
+        if self.client is not None:
+            try:
+                self.client.close()
+                logging.info("Qdrant client closed successfully")
+            except Exception as e:
+                logging.error(f"Error closing Qdrant client: {e}")
+
     def _ensure_model_loaded(self):
         """Ensure the model is loaded before using it"""
         if self.model is None:
@@ -329,174 +300,88 @@ class VectorStore:
             logger.error(f"Error adding vector for bookmark {bookmark_id}: {str(e)}")
             return False
 
-    def rebuild_user_vectors(self, user_id: int, rebuild_id: str = None) -> bool:
-        """Rebuild vectors for a specific user's bookmarks with improved memory management.
-        
-        Args:
-            user_id: The ID of the user whose vectors need to be rebuilt
-            rebuild_id: Optional identifier for tracking this rebuild operation
-            
-        Returns:
-            bool: True if rebuild was successful, False otherwise
-        """
-        if not rebuild_id:
-            rebuild_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-            
-        start_time = time.time()
-        logger.info(f"🔄 [REBUILD-{rebuild_id}] Starting vector rebuild for user {user_id}")
-        
+    def rebuild_user_vectors(self, user_id, bookmarks):
+        """Rebuild vectors for a user's bookmarks in batches"""
         try:
-            # Get database connection
-            conn = get_db_connection()
+            # Re-initialize client to ensure clean state
+            self._initialize_client()
             
-            try:
-                # First, count total bookmarks
-                count_stmt = sql_text("""
-                    SELECT COUNT(*) as total 
-                    FROM bookmarks 
-                    WHERE user_id = :user_id
-                """).bindparams(bindparam('user_id', type_=Integer))
+            collection_name = f"{self.collection_name}_{user_id}"
+            logging.info(f"Starting vector rebuild for user {user_id} in collection {collection_name}")
+            
+            # Create or recreate collection
+            self._recreate_collection(collection_name)
+            
+            # Process in smaller batches
+            batch_size = 3
+            total_batches = (len(bookmarks) + batch_size - 1) // batch_size
+            
+            for i in range(0, len(bookmarks), batch_size):
+                batch = bookmarks[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
                 
-                result = conn.execute(count_stmt, {"user_id": user_id})
-                total_bookmarks = result.scalar()
+                logging.info(f"Processing batch {batch_num}/{total_batches} for user {user_id}")
                 
-                logger.info(f"📊 [REBUILD-{rebuild_id}] Found {total_bookmarks} total bookmarks to process")
+                # Process batch
+                points = []
+                for bookmark in batch:
+                    try:
+                        vector = self._get_embedding(bookmark['text'])
+                        points.append(PointStruct(
+                            id=bookmark['bookmark_id'],
+                            vector=vector.tolist(),
+                            payload={"text": bookmark['text']}
+                        ))
+                    except Exception as e:
+                        logging.error(f"Error processing bookmark {bookmark['bookmark_id']}: {e}")
                 
-                if total_bookmarks == 0:
-                    logger.warning(f"⚠️ [REBUILD-{rebuild_id}] No bookmarks found for user {user_id}")
-                    return True
-                
-                # Process in smaller chunks to manage memory
-                CHUNK_SIZE = 10   # Smaller chunks for more frequent progress updates
-                BATCH_SIZE = 3    # Small batches for stability
-                offset = 0
-                total_processed = 0
-                errors = 0
-                
-                # Clear existing vectors for this user
-                try:
-                    logger.info(f"🗑️ [REBUILD-{rebuild_id}] Deleting existing vectors for user {user_id}")
-                    self._delete_vectors_for_user(user_id)
-                    logger.info(f"✅ [REBUILD-{rebuild_id}] Deleted existing vectors for user {user_id}")
-                except Exception as e:
-                    logger.error(f"❌ [REBUILD-{rebuild_id}] Error clearing existing vectors: {e}")
-                
-                # Process bookmarks in chunks
-                while offset < total_bookmarks:
-                    chunk_start = time.time()
-                    memory_before = self.get_memory_usage()
-                    
-                    # Get a chunk of bookmarks
-                    stmt = sql_text("""
-                        SELECT bookmark_id, text 
-                        FROM bookmarks 
-                        WHERE user_id = :user_id 
-                        ORDER BY created_at DESC 
-                        LIMIT :limit OFFSET :offset
-                    """).bindparams(
-                        bindparam('user_id', type_=Integer),
-                        bindparam('limit', type_=Integer),
-                        bindparam('offset', type_=Integer)
+                # Upload batch
+                if points:
+                    self.client.upsert(
+                        collection_name=collection_name,
+                        points=points
                     )
-                    
-                    result = conn.execute(stmt, {
-                        "user_id": user_id,
-                        "limit": CHUNK_SIZE,
-                        "offset": offset
-                    })
-                    
-                    # Convert to list and filter out empty text
-                    valid_bookmarks = []
-                    for row in result:
-                        if row.text and row.text.strip():
-                            valid_bookmarks.append((row.bookmark_id, row.text.strip()))
-                        else:
-                            logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} due to empty text")
-                    
-                    logger.info(f"📊 [REBUILD-{rebuild_id}] Processing chunk {offset//CHUNK_SIZE + 1}: {len(valid_bookmarks)} valid bookmarks")
-                    
-                    # Process valid bookmarks in small batches
-                    for i in range(0, len(valid_bookmarks), BATCH_SIZE):
-                        batch = valid_bookmarks[i:i + BATCH_SIZE]
-                        batch_start = time.time()
-                        
-                        try:
-                            # Load model once for the batch
-                            self._ensure_model_loaded()
-                            
-                            for bookmark_id, text in batch:
-                                try:
-                                    # Generate embedding
-                                    embedding = self.model.encode(text)
-                                    
-                                    # Add to Qdrant
-                                    success = self._add_vector(bookmark_id, embedding, user_id)
-                                    if success:
-                                        total_processed += 1
-                                        logger.info(f"✅ [REBUILD-{rebuild_id}] Added vector for bookmark {bookmark_id}")
-                                    else:
-                                        errors += 1
-                                        logger.error(f"❌ [REBUILD-{rebuild_id}] Failed to add vector for bookmark {bookmark_id}")
-                                    
-                                    # Clean up embedding
-                                    del embedding
-                                    
-                                except Exception as e:
-                                    errors += 1
-                                    logger.error(f"❌ [REBUILD-{rebuild_id}] Error processing bookmark {bookmark_id}: {str(e)}")
-                                    continue
-                                    
-                            # Calculate and log progress
-                            progress = (offset + i + len(batch)) / total_bookmarks * 100
-                            logger.info(f"📈 [REBUILD-{rebuild_id}] Progress: {progress:.1f}%")
-                            
-                        finally:
-                            # Unload model after batch
-                            self._unload_model()
-                            
-                            # Force garbage collection
-                            gc.collect()
-                            
-                            # Add a small delay between batches
-                            time.sleep(0.5)
-                            
-                            # Log memory usage
-                            memory_after = self.get_memory_usage()
-                            memory_diff = memory_after - memory_before
-                            logger.info(f"🧮 [REBUILD-{rebuild_id}] Memory change: {memory_diff:.2f}MB")
-                    
-                    # Move to next chunk
-                    offset += CHUNK_SIZE
-                    
-                    # Log chunk completion
-                    chunk_time = time.time() - chunk_start
-                    logger.info(f"⏱️ [REBUILD-{rebuild_id}] Chunk processed in {chunk_time:.2f}s")
-                    
-                    # Add a longer delay between chunks
-                    time.sleep(1.0)
                 
-                # Log final statistics
-                total_time = time.time() - start_time
-                logger.info(f"""
-✅ [REBUILD-{rebuild_id}] Vector rebuild completed:
-- Total processed: {total_processed}/{total_bookmarks}
-- Success rate: {(total_processed/total_bookmarks*100):.1f}%
-- Errors: {errors}
-- Total time: {total_time/60:.1f} minutes
-- Average speed: {total_processed/(total_time/60):.1f} bookmarks/minute
-""")
-                
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ [REBUILD-{rebuild_id}] Database error: {str(e)}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ [REBUILD-{rebuild_id}] Unexpected error in rebuild_user_vectors: {str(e)}")
-            logger.error(traceback.format_exc())
-            return False
+                # Clean up after batch
+                gc.collect()
+                time.sleep(1)  # Small delay between batches
             
+            logging.info(f"Successfully rebuilt vectors for user {user_id}")
+            return True, "Vector store rebuilt successfully"
+            
+        except Exception as e:
+            error_msg = f"Error rebuilding vector store: {str(e)}"
+            logging.error(error_msg)
+            return False, error_msg
+        finally:
+            # Ensure client is properly closed
+            if self.client is not None:
+                try:
+                    self.client.close()
+                except Exception as e:
+                    logging.error(f"Error closing client: {e}")
+            gc.collect()
+
+    def _recreate_collection(self, collection_name):
+        """Recreate the collection with proper error handling"""
+        try:
+            # Try to delete if exists
+            try:
+                self.client.delete_collection(collection_name)
+                logging.info(f"Deleted existing collection: {collection_name}")
+            except Exception as e:
+                logging.info(f"Collection didn't exist or couldn't be deleted: {e}")
+
+            # Create new collection
+            self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+            )
+            logging.info(f"Created new collection: {collection_name}")
+        except Exception as e:
+            logging.error(f"Error recreating collection: {e}")
+            raise
+
     def _unload_model(self):
         """Unload model to free memory"""
         try:
