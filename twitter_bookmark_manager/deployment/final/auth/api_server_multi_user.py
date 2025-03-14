@@ -161,18 +161,18 @@ def init_status_db():
         conn = sqlite3.connect(STATUS_DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS session_status (
-                session_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                message TEXT,
-                timestamp TEXT NOT NULL,
-                is_complete BOOLEAN DEFAULT 0,
-                success BOOLEAN DEFAULT 0,
-                data TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
+        CREATE TABLE IF NOT EXISTS session_status (
+            session_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            message TEXT,
+            timestamp TEXT NOT NULL,
+            is_complete BOOLEAN DEFAULT 0,
+            success BOOLEAN DEFAULT 0,
+            data TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
         ''')
         conn.commit()
         conn.close()
@@ -406,10 +406,141 @@ def index():
         categories = []
         error_message = ""
         all_methods_tried = False
-        
+    except Exception as e:
+        logger.error(f"Error getting user context: {e}")
+        return render_template('error_final.html', error="Error accessing user data")
+    
         # --- Method 1: Direct psycopg2 Connection ---
+    try:
+        logger.info("Trying direct psycopg2 connection")
+        db_url = get_db_url()
+        if 'postgresql://' in db_url:
+            conn_parts = db_url.replace('postgresql://', '').split('@')
+            user_pass = conn_parts[0].split(':')
+            host_port_db = conn_parts[1].split('/')
+            host_port = host_port_db[0].split(':')
+            db_user = user_pass[0]
+            db_password = user_pass[1]
+            db_host = host_port[0]
+            db_port = host_port[1] if len(host_port) > 1 else '5432'
+            db_name = host_port_db[1]
+            logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+            direct_conn = psycopg2.connect(
+                user=db_user,
+                password=db_password,
+                host=db_host,
+                port=db_port,
+                dbname=db_name,
+                connect_timeout=3,
+                application_name='twitter_bookmark_manager_direct'
+            )
+            direct_conn.autocommit = True
+            cursor = direct_conn.cursor()
+            try:
+                    cursor.execute("""
+                    SELECT id, name, description 
+                    FROM categories 
+                    WHERE user_id = %s 
+                    ORDER BY name
+                """, (user.id,))
+            except Exception as e:
+                logger.warning(f"Error querying categories with description: {e}")
+                cursor.execute("""
+                    SELECT id, name, '' as description
+                    FROM categories 
+                    WHERE user_id = %s 
+                    ORDER BY name
+                """, (user.id,))
+            for row in cursor.fetchall():
+                categories.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'description': row[2]
+                })
+            try:
+                cursor.execute("""
+                        SELECT bookmark_id, text, author_name, author_username, created_at
+                    FROM bookmarks 
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC 
+                    LIMIT 5
+                """, (user.id,))
+                for row in cursor.fetchall():
+                    tweet = {
+                            'id': row[0],
+                        'text': row[1],
+                        'author': row[2],
+                        'author_username': row[3],
+                        'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                            'categories': []
+                    }
+                    latest_tweets.append(tweet)
+                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+            except Exception as e:
+                logger.warning(f"Error getting recent bookmarks: {e}")
+            cursor.close()
+            direct_conn.close()
+            logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
+        else:
+            raise Exception("Not a PostgreSQL database, trying SQLAlchemy")
+    except Exception as e:
+        logger.warning(f"Direct psycopg2 connection failed: {e}")
+        error_message = str(e)
+    
+        # --- Method 2: SQLAlchemy Connection ---
+    if not categories:
         try:
-            logger.info("Trying direct psycopg2 connection")
+            logger.info("Trying SQLAlchemy connection")
+            from database.multi_user_db.db_final import setup_database
+            setup_database(force_reconnect=True)
+            conn = get_db_connection()
+            try:
+                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                if len(latest_tweets) == 0 and user and user.id != 1:
+                    logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
+                    searcher = BookmarkSearchMultiUser(conn, 1)
+                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                    logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
+                    if len(latest_tweets) == 0:
+                        logger.warning("No system bookmarks found, trying direct query for any bookmarks")
+                        query = """
+                        SELECT id, bookmark_id, text, author, created_at, author_id
+                        FROM bookmarks
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                        """
+                        if isinstance(conn, sqlalchemy.engine.Connection):
+                            result = conn.execute(text(query))
+                            rows = result.fetchall()
+                        else:
+                            cursor = conn.cursor()
+                            cursor.execute(query)
+                            rows = cursor.fetchall()
+                        for row in rows:
+                            bookmark = {
+                                'id': row[0],
+                                'bookmark_id': row[1],
+                                'text': row[2],
+                                'author': row[3],
+                                'author_username': row[3].replace('@', '') if row[3] else '',
+                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                'author_id': row[5]
+                            }
+                            latest_tweets.append(bookmark)
+                        logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"SQLAlchemy connection failed: {e}")
+            if not error_message:
+                error_message = str(e)
+    
+        # --- Method 3: Alternative Direct Connection ---
+    if not categories:
+        try:
+            logger.info("Trying alternative direct connection")
             db_url = get_db_url()
             if 'postgresql://' in db_url:
                 conn_parts = db_url.replace('postgresql://', '').split('@')
@@ -421,20 +552,24 @@ def index():
                 db_host = host_port[0]
                 db_port = host_port[1] if len(host_port) > 1 else '5432'
                 db_name = host_port_db[1]
-                logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+                logger.info(f"Trying alternative connection to PostgreSQL")
                 direct_conn = psycopg2.connect(
                     user=db_user,
                     password=db_password,
                     host=db_host,
                     port=db_port,
                     dbname=db_name,
-                    connect_timeout=3,
-                    application_name='twitter_bookmark_manager_direct'
+                        connect_timeout=5,
+                    application_name='twitter_bookmark_manager_last_resort',
+                    keepalives=1,
+                    keepalives_idle=10,
+                    keepalives_interval=2,
+                    keepalives_count=3
                 )
-                direct_conn.autocommit = True
+                direct_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
                 cursor = direct_conn.cursor()
                 try:
-                    cursor.execute("""
+                        cursor.execute("""
                         SELECT id, name, description 
                         FROM categories 
                         WHERE user_id = %s 
@@ -448,171 +583,39 @@ def index():
                         WHERE user_id = %s 
                         ORDER BY name
                     """, (user.id,))
+                categories = []
                 for row in cursor.fetchall():
                     categories.append({
                         'id': row[0],
                         'name': row[1],
                         'description': row[2]
                     })
-                try:
-                    cursor.execute("""
-                        SELECT bookmark_id, text, author_name, author_username, created_at
-                        FROM bookmarks 
-                        WHERE user_id = %s
-                        ORDER BY created_at DESC 
-                        LIMIT 5
-                    """, (user.id,))
-                    for row in cursor.fetchall():
-                        tweet = {
-                            'id': row[0],
-                            'text': row[1],
-                            'author': row[2],
-                            'author_username': row[3],
-                            'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                            'categories': []
-                        }
-                        latest_tweets.append(tweet)
-                    logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
-                except Exception as e:
-                    logger.warning(f"Error getting recent bookmarks: {e}")
                 cursor.close()
                 direct_conn.close()
-                logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
+                logger.info(f"Successfully loaded {len(categories)} categories via alternative connection")
             else:
-                raise Exception("Not a PostgreSQL database, trying SQLAlchemy")
-        except Exception as e:
-            logger.warning(f"Direct psycopg2 connection failed: {e}")
-            error_message = str(e)
-        
-        # --- Method 2: SQLAlchemy Connection ---
-        if not categories:
-            try:
-                logger.info("Trying SQLAlchemy connection")
-                from database.multi_user_db.db_final import setup_database
-                setup_database(force_reconnect=True)
-                conn = get_db_connection()
-                try:
-                    searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                    logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
-                    if len(latest_tweets) == 0 and user and user.id != 1:
-                        logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
-                        searcher = BookmarkSearchMultiUser(conn, 1)
-                        latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                        logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
-                        if len(latest_tweets) == 0:
-                            logger.warning("No system bookmarks found, trying direct query for any bookmarks")
-                            query = """
-                            SELECT id, bookmark_id, text, author, created_at, author_id
-                            FROM bookmarks
-                            ORDER BY created_at DESC
-                            LIMIT 5
-                            """
-                            if isinstance(conn, sqlalchemy.engine.Connection):
-                                result = conn.execute(text(query))
-                                rows = result.fetchall()
-                            else:
-                                cursor = conn.cursor()
-                                cursor.execute(query)
-                                rows = cursor.fetchall()
-                            for row in rows:
-                                bookmark = {
-                                    'id': row[0],
-                                    'bookmark_id': row[1],
-                                    'text': row[2],
-                                    'author': row[3],
-                                    'author_username': row[3].replace('@', '') if row[3] else '',
-                                    'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                                    'author_id': row[5]
-                                }
-                                latest_tweets.append(bookmark)
-                            logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
-                finally:
-                    conn.close()
-            except Exception as e:
-                logger.warning(f"SQLAlchemy connection failed: {e}")
-                if not error_message:
-                    error_message = str(e)
-        
-        # --- Method 3: Alternative Direct Connection ---
-        if not categories:
-            try:
-                logger.info("Trying alternative direct connection")
-                db_url = get_db_url()
-                if 'postgresql://' in db_url:
-                    conn_parts = db_url.replace('postgresql://', '').split('@')
-                    user_pass = conn_parts[0].split(':')
-                    host_port_db = conn_parts[1].split('/')
-                    host_port = host_port_db[0].split(':')
-                    db_user = user_pass[0]
-                    db_password = user_pass[1]
-                    db_host = host_port[0]
-                    db_port = host_port[1] if len(host_port) > 1 else '5432'
-                    db_name = host_port_db[1]
-                    logger.info(f"Trying alternative connection to PostgreSQL")
-                    direct_conn = psycopg2.connect(
-                        user=db_user,
-                        password=db_password,
-                        host=db_host,
-                        port=db_port,
-                        dbname=db_name,
-                        connect_timeout=5,
-                        application_name='twitter_bookmark_manager_last_resort',
-                        keepalives=1,
-                        keepalives_idle=10,
-                        keepalives_interval=2,
-                        keepalives_count=3
-                    )
-                    direct_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-                    cursor = direct_conn.cursor()
-                    try:
-                        cursor.execute("""
-                            SELECT id, name, description 
-                            FROM categories 
-                            WHERE user_id = %s 
-                            ORDER BY name
-                        """, (user.id,))
-                    except Exception as e:
-                        logger.warning(f"Error querying categories with description: {e}")
-                        cursor.execute("""
-                            SELECT id, name, '' as description
-                            FROM categories 
-                            WHERE user_id = %s 
-                            ORDER BY name
-                        """, (user.id,))
-                    categories = []
-                    for row in cursor.fetchall():
-                        categories.append({
-                            'id': row[0],
-                            'name': row[1],
-                            'description': row[2]
-                        })
-                    cursor.close()
-                    direct_conn.close()
-                    logger.info(f"Successfully loaded {len(categories)} categories via alternative connection")
-                else:
-                    all_methods_tried = True
-            except Exception as e:
-                logger.warning(f"Alternative direct connection failed: {e}")
-                if not error_message:
-                    error_message = str(e)
                 all_methods_tried = True
-        
-        if not categories:
+        except Exception as e:
+            logger.warning(f"Alternative direct connection failed: {e}")
+            if not error_message:
+                error_message = str(e)
             all_methods_tried = True
-        
-        is_admin = getattr(user, 'is_admin', False)
-        if all_methods_tried and error_message and not categories:
-            logger.error(f"All database connection methods failed. Last error: {error_message}")
-            return render_template(
-                template, 
+    
+    if not categories:
+        all_methods_tried = True
+    
+    is_admin = getattr(user, 'is_admin', False)
+    if all_methods_tried and error_message and not categories:
+        logger.error(f"All database connection methods failed. Last error: {error_message}")
+        return render_template(
+            template, 
                 categories=[], 
-                user=user, 
-                is_admin=is_admin,
-                db_error=True,
-                error_message="Database connection issues. Some features may be unavailable."
-            )
-        
+            user=user, 
+            is_admin=is_admin,
+            db_error=True,
+            error_message="Database connection issues. Some features may be unavailable."
+        )
+    try:    
         return render_template(
             template, 
             categories=categories or [], 
@@ -1003,84 +1006,83 @@ def process_status():
         process_type = request.args.get('type', 'upload')
         logger.info(f"Checking {process_type} status for session {session_id}, user {user_id}")
         user_dir = get_user_directory(user_id)
-        if process_type == 'vector-rebuild':
-            status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
-            if not os.path.exists(status_file):
-                lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
-                if os.path.exists(lock_file):
-                    try:
-                        with open(lock_file, 'r') as f:
-                            lock_content = f.read()
-                            if session_id in lock_content:
-                                return jsonify({
-                                    'success': True,
-                                    'status': 'initializing',
-                                    'message': 'Vector rebuild is initializing...',
-                                    'progress': 0
-                                })
-                    except Exception as e:
-                        logger.error(f"Error reading lock file: {e}")
-                return jsonify({
-                    'success': False,
-                    'status': 'not_found',
-                    'message': f'No process found for session {session_id}',
-                    'error': 'Process not found or may have been terminated'
-                }), 404
-            try:
-                with open(status_file, 'r') as f:
-                    status_data = json.load(f)
-                file_user_id = status_data.get('user_id')
-                if file_user_id and int(file_user_id) != user_id:
-                    return jsonify({'success': False, 'error': 'Unauthorized access to process status'}), 403
-                process_status_val = status_data.get('status', 'unknown')
-                progress_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
-                if os.path.exists(progress_file):
-                    try:
-                        with open(progress_file, 'r') as f:
-                            progress_data = json.load(f)
-                            if 'bookmarks_processed' in progress_data and 'total_valid' in progress_data:
-                                status_data['bookmarks_processed'] = progress_data.get('bookmarks_processed', 0)
-                                status_data['total_valid'] = progress_data.get('total_valid', 0)
-                                status_data['success_count'] = progress_data.get('total_success', 0) 
-                                status_data['error_count'] = progress_data.get('total_errors', 0)
-                                status_data['progress'] = progress_data.get('progress_percent', status_data.get('progress', 0))
-                    except Exception as e:
-                        logger.error(f"Error reading progress file: {e}")
-                if process_status_val == 'completed' and status_data.get('progress', 0) < 100:
-                    status_data['progress'] = 100
-                if process_status_val == 'error' and 'error' not in status_data:
-                    status_data['error'] = 'Unknown error occurred'
-                if process_status_val == 'processing':
-                    lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
-                    if not os.path.exists(lock_file):
-                        status_data['status'] = 'interrupted'
-                        status_data['message'] = 'Process appears to have been interrupted'
-                return jsonify({'success': True, **status_data})
-            except Exception as e:
-                logger.error(f"Error reading status file: {e}")
-                logger.error(traceback.format_exc())
-                return jsonify({'success': False, 'error': f'Error reading status file: {str(e)}', 'traceback': traceback.format_exc()}), 500
-        else:
-            status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-            if not os.path.exists(status_file):
-                logger.error(f"Status file not found: {status_file}")
-                return jsonify({'error': 'Session not found'}), 404
-            try:
-                with open(status_file, 'r') as f:
-                    status_data = json.load(f)
-                return jsonify({
-                    'success': True,
-                    'session_id': session_id,
-                    'status': status_data.get('status', 'unknown'),
-                    'details': status_data
-                })
-            except Exception as e:
-                logger.error(f"Error reading status file: {e}")
-                return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
     except Exception as e:
-        logger.error(f"Error in process_status endpoint: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
+        logger.error(f"Error in process_status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    if process_type == 'vector-rebuild':
+        status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
+        if not os.path.exists(status_file):
+            lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+            if os.path.exists(lock_file):
+                try:
+                    with open(lock_file, 'r') as f:
+                        lock_content = f.read()
+                        if session_id in lock_content:
+                            return jsonify({
+                                'success': True,
+                                'status': 'initializing',
+                                'message': 'Vector rebuild is initializing...',
+                                'progress': 0
+                            })
+                except Exception as e:
+                    logger.error(f"Error reading lock file: {e}")
+            return jsonify({
+                'success': False,
+                'status': 'not_found',
+                'message': f'No process found for session {session_id}',
+                'error': 'Process not found or may have been terminated'
+            }), 404
+        try:
+            with open(status_file, 'r') as f:
+                status_data = json.load(f)
+            file_user_id = status_data.get('user_id')
+            if file_user_id and int(file_user_id) != user_id:
+                return jsonify({'success': False, 'error': 'Unauthorized access to process status'}), 403
+            process_status_val = status_data.get('status', 'unknown')
+            progress_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r') as f:
+                        progress_data = json.load(f)
+                        if 'bookmarks_processed' in progress_data and 'total_valid' in progress_data:
+                            status_data['bookmarks_processed'] = progress_data.get('bookmarks_processed', 0)
+                            status_data['total_valid'] = progress_data.get('total_valid', 0)
+                            status_data['success_count'] = progress_data.get('total_success', 0) 
+                            status_data['error_count'] = progress_data.get('total_errors', 0)
+                            status_data['progress'] = progress_data.get('progress_percent', status_data.get('progress', 0))
+                except Exception as e:
+                    logger.error(f"Error reading progress file: {e}")
+            if process_status_val == 'completed' and status_data.get('progress', 0) < 100:
+                status_data['progress'] = 100
+            if process_status_val == 'error' and 'error' not in status_data:
+                status_data['error'] = 'Unknown error occurred'
+            if process_status_val == 'processing':
+                lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+                if not os.path.exists(lock_file):
+                    status_data['status'] = 'interrupted'
+                    status_data['message'] = 'Process appears to have been interrupted'
+            return jsonify({'success': True, **status_data})
+        except Exception as e:
+            logger.error(f"Error reading status file: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({'success': False, 'error': f'Error reading status file: {str(e)}', 'traceback': traceback.format_exc()}), 500
+    else:
+        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+        if not os.path.exists(status_file):
+            logger.error(f"Status file not found: {status_file}")
+            return jsonify({'error': 'Session not found'}), 404
+        try:
+            with open(status_file, 'r') as f:
+                status_data = json.load(f)
+            return jsonify({
+                'success': True,
+                'session_id': session_id,
+                'status': status_data.get('status', 'unknown'),
+                'details': status_data
+            })
+        except Exception as e:
+            logger.error(f"Error reading status file: {e}")
+            return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
 
 @app.route('/api/update-database', methods=['POST'])
 def update_database():
@@ -1457,10 +1459,19 @@ def check_auth():
     logger.info(f"Auth check - Session: {getattr(session, 'sid', 'No SID')} - User ID: {user_id}")
     if user_id:
         logger.info(f"Auth check success - user_id found in session: {user_id}")
-        return jsonify({'success': True, 'authenticated': True, 'message': 'User is authenticated via session', 'user_id': user_id})
+        return jsonify({
+            'success': True, 
+            'authenticated': True, 
+            'message': 'User is authenticated via session', 
+            'user_id': user_id
+        })
     else:
         logger.warning("Auth check failed - No user_id in session")
-        return jsonify({'success': False, 'authenticated': False, 'error': 'User not authenticated. Please log out and log in again.'}), 401
+        return jsonify({
+            'success': False, 
+            'authenticated': False, 
+            'error': 'User not authenticated. Please log out and log in again.'
+        }), 401
 
 def safe_get_vector_store():
     """Safely attempt to get a vector store instance with retry logic."""
@@ -1470,38 +1481,26 @@ def safe_get_vector_store():
     for attempt in range(MAX_RETRIES):
         try:
             logger.info(f"[RETRY-{session_id}] Attempting to import VectorStoreMultiUser (attempt {attempt+1}/{MAX_RETRIES})")
-            try:
-                from database.multi_user_db.vector_store_final import VectorStoreMultiUser
-                logger.info(f"[RETRY-{session_id}] Successfully imported VectorStoreMultiUser")
-            except ImportError as e:
-                logger.error(f"[RETRY-{session_id}] Import error for VectorStoreMultiUser: {e}")
-                logger.error(traceback.format_exc())
+            from database.multi_user_db.vector_store_final import VectorStoreMultiUser
+            logger.info(f"[RETRY-{session_id}] Successfully imported VectorStoreMultiUser")
+            user = UserContext.get_current_user()
+            if not user:
+                logger.warning(f"[RETRY-{session_id}] No user context found, cannot initialize vector store")
                 return None
-            logger.info(f"[RETRY-{session_id}] Attempting to initialize VectorStoreMultiUser (attempt {attempt+1}/{MAX_RETRIES})")
-            try:
-                user = UserContext.get_current_user()
-                if not user:
-                    logger.warning(f"[RETRY-{session_id}] No user context found, cannot initialize vector store")
-                    return None
-                user_id = user.id
-                vector_store = VectorStoreMultiUser(user_id=user_id)
-                logger.info(f"[RETRY-{session_id}] Successfully initialized vector store for user {user_id} on attempt {attempt+1}")
-                return vector_store
-            except Exception as e:
-                if "Storage folder is locked" in str(e) or "already being accessed" in str(e):
-                    logger.warning(f"[RETRY-{session_id}] Vector store folder is locked (attempt {attempt+1}/{MAX_RETRIES}): {e}")
-                elif "Permission denied" in str(e):
-                    logger.error(f"[RETRY-{session_id}] Permission denied when accessing vector store: {e}")
-                else:
-                    logger.error(f"[RETRY-{session_id}] Error initializing vector store: {e}")
-                    logger.error(traceback.format_exc())
-                if attempt < MAX_RETRIES - 1:
-                    backoff = initial_backoff * (2 ** attempt)
-                    logger.info(f"[RETRY-{session_id}] Retrying in {backoff} seconds...")
-                    time.sleep(backoff)
-                else:
-                    logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
-                    return None
+            user_id = user.id
+            vector_store = VectorStoreMultiUser(user_id=user_id)
+            logger.info(f"[RETRY-{session_id}] Successfully initialized vector store for user {user_id} on attempt {attempt+1}")
+            return vector_store
+        except ImportError as e:
+            logger.error(f"[RETRY-{session_id}] Import error for VectorStoreMultiUser: {e}")
+            logger.error(traceback.format_exc())
+            if attempt < MAX_RETRIES - 1:
+                backoff = initial_backoff * (2 ** attempt)
+                logger.info(f"[RETRY-{session_id}] Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+            else:
+                logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
+            return None
         except Exception as e:
             logger.error(f"[RETRY-{session_id}] Unexpected error in safe_get_vector_store: {e}")
             logger.error(traceback.format_exc())
@@ -1511,7 +1510,7 @@ def safe_get_vector_store():
                 time.sleep(backoff)
             else:
                 logger.error(f"[RETRY-{session_id}] Failed to recover from unexpected error after {MAX_RETRIES} attempts")
-                return None
+            return None
     return None
 
 @app.route('/api/rebuild-vector-store', methods=['POST'])
@@ -1601,22 +1600,9 @@ def rebuild_process(user_id, session_id, batch_size=20, resume=True, progress_da
     logger.info(f"REBUILD_PROCESS: Status file: {status_file}")
     logger.info(f"REBUILD_PROCESS: Progress file: {progress_file_path}")
     try:
-        try:
-            logger.info("REBUILD_PROCESS: Importing rebuild_vector_store...")
-            from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
-            logger.info("REBUILD_PROCESS: Successfully imported rebuild_vector_store")
-        except ImportError as import_error:
-            logger.error(f"REBUILD_PROCESS: Failed to import rebuild_vector_store: {import_error}")
-            logger.error(traceback.format_exc())
-            with open(status_file, 'w') as f:
-                json.dump({
-                    'status': 'error',
-                    'message': f'Failed to import rebuild function: {str(import_error)}',
-                    'error': str(import_error),
-                    'traceback': traceback.format_exc(),
-                    'end_time': datetime.now().isoformat()
-                }, f)
-            return
+        logger.info("REBUILD_PROCESS: Importing rebuild_vector_store...")
+        from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+        logger.info("REBUILD_PROCESS: Successfully imported rebuild_vector_store")
         with app.app_context():
             try:
                 logger.info(f"REBUILD_PROCESS: Starting vector store rebuild - session_id={session_id}")
@@ -1670,6 +1656,18 @@ def rebuild_process(user_id, session_id, batch_size=20, resume=True, progress_da
                     'duration_seconds': (datetime.now() - start_time).total_seconds(),
                     'progress': progress
                 })
+    except ImportError as import_error:
+        logger.error(f"REBUILD_PROCESS: Failed to import rebuild_vector_store: {import_error}")
+        logger.error(traceback.format_exc())
+        with open(status_file, 'w') as f:
+            status = {
+                'status': 'error',
+                'message': f'Failed to import rebuild function: {str(import_error)}',
+                'error': str(import_error),
+                'traceback': traceback.format_exc(),
+                'end_time': datetime.now().isoformat()
+            }
+            json.dump(status, f)
     except Exception as e:
         logger.error(f"Fatal error in rebuild thread: {e}")
         logger.error(traceback.format_exc())
@@ -1697,11 +1695,8 @@ def update_status_file(file_path, updates):
     try:
         existing_data = {}
         if os.path.exists(file_path):
-            try:
-                with open(file_path, 'r') as f:
-                    existing_data = json.load(f)
-            except Exception as e:
-                logger.error(f"Error reading status file {file_path}: {e}")
+            with open(file_path, 'r') as f:
+                existing_data = json.load(f)
         existing_data.update(updates)
         with open(file_path, 'w') as f:
             json.dump(existing_data, f)
@@ -1808,9 +1803,9 @@ def handle_method_not_allowed(e):
 @app.errorhandler(500)
 def handle_server_error(e):
     path = request.path if request else ""
+    logger.error(f"Server error on {path}: {str(e)}")
+    logger.error(traceback.format_exc())
     if path.startswith('/api/') or path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
-        logger.error(f"Server error on {path}: {str(e)}")
-        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': 'Internal Server Error: The server encountered an unexpected condition',
@@ -1848,8 +1843,7 @@ def handle_type_error(e):
                 'error': 'Session error - please try logging in again',
                 'path': request.path
             }), 400
-        else:
-            return redirect('/auth/login')
+        return redirect('/auth/login')
     return jsonify({
         'success': False,
         'error': error_message
