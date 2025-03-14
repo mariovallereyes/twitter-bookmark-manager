@@ -582,53 +582,48 @@ def get_db_session():
 def get_bookmarks_for_user(user_id):
     """
     Get all bookmarks for a specific user.
-    Uses SQLAlchemy for consistency like the PythonAnywhere implementation.
     
     Args:
-        user_id: User ID to get bookmarks for
+        user_id: The ID of the user
         
     Returns:
-        List of Bookmark objects
+        list: List of dictionaries containing bookmark data
     """
-    from .models_final import Bookmark
-    
-    logger.info(f"Fetching bookmarks for user {user_id}")
-    
-    bookmarks = []
-    
     try:
-        # Get connection using session for consistency
-        with db_session() as session:
-            # Use SQLAlchemy session.execute with text query for better control
-            # Use the exact column names from the production database
-            query = """
-                SELECT bookmark_id, text, created_at, 
-                       author_name, author_username, 
-                       media_files, raw_data, user_id
-                FROM bookmarks
-                WHERE user_id = :user_id
-                ORDER BY created_at DESC
-            """
-            
-            result = session.execute(text(query), {"user_id": user_id})
-            rows = result.fetchall()
-            logger.info(f"Found {len(rows)} bookmarks for user {user_id}")
-            
-            # Convert to Bookmark objects with error handling for each row
-            for row in rows:
-                try:
-                    bookmarks.append(Bookmark.from_row(row))
-                except Exception as e:
-                    logger.error(f"Error converting row to Bookmark: {e}")
-                    logger.error(f"Problematic row: {row}")
-                    # Continue to next row
-            
+        conn = get_db_connection()
+        
+        # Query to get all bookmarks for the user
+        query = """
+            SELECT bookmark_id, text, created_at, author_name, author_username, 
+                   media_files, raw_data
+            FROM bookmarks 
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+        
+        with conn.cursor() as cur:
+            cur.execute(query, (user_id,))
+            bookmarks = []
+            for row in cur.fetchall():
+                bookmark = {
+                    'bookmark_id': row[0],
+                    'text': row[1],
+                    'created_at': row[2],
+                    'author_name': row[3],
+                    'author_username': row[4],
+                    'media_files': row[5],
+                    'raw_data': row[6]
+                }
+                bookmarks.append(bookmark)
+                
         return bookmarks
         
     except Exception as e:
-        logger.error(f"Error fetching bookmarks for user {user_id}: {e}")
-        logger.error(traceback.format_exc())
-        return []
+        logging.error(f"Error getting bookmarks for user {user_id}: {str(e)}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def create_tables():
     """Create database tables if they don't already exist using the most reliable available method"""

@@ -1186,6 +1186,10 @@ def update_database():
         session_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         
         if rebuild_vectors:
+            # Get bookmarks for the user
+            from database.multi_user_db.db_final import get_bookmarks_for_user
+            bookmarks = get_bookmarks_for_user(current_user.id)
+            
             if background:
                 # Background processing
                 logger.info(f"Starting background vector rebuild for user {current_user.id}")
@@ -1194,9 +1198,9 @@ def update_database():
                     with app.app_context():
                         try:
                             vector_store = get_multi_user_vector_store()
-                            success = vector_store.rebuild_user_vectors(current_user.id, rebuild_id=session_id)
+                            success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
                             if not success:
-                                logger.error(f"Error rebuilding vector store for user {current_user.id}")
+                                logger.error(f"Error rebuilding vector store for user {current_user.id}: {message}")
                         except Exception as e:
                             logger.error(f"Error in background rebuild: {str(e)}")
                             logger.error(traceback.format_exc())
@@ -1215,9 +1219,9 @@ def update_database():
                 try:
                     with app.app_context():
                         vector_store = get_multi_user_vector_store()
-                        success = vector_store.rebuild_user_vectors(current_user.id, rebuild_id=session_id)
+                        success, message = vector_store.rebuild_user_vectors(current_user.id, bookmarks)
                         if not success:
-                            return jsonify({"error": "Error rebuilding vector store"}), 500
+                            return jsonify({"error": message}), 500
                 except Exception as e:
                     logger.error(f"Error rebuilding vector store: {str(e)}")
                     logger.error(traceback.format_exc())
