@@ -1803,10 +1803,7 @@ def check_tweet_content_column():
 # Add a catch-all error handler for API routes to ensure they return JSON, not HTML
 @app.errorhandler(Exception)
 def handle_api_exception(e):
-    """
-    Handle ALL exceptions to ensure they return JSON instead of HTML error pages
-    """
-    # Get path for logging
+    """Global exception handler that ensures all API errors return JSON responses"""
     path = request.path if request else ""
     
     # Log the error with traceback
@@ -1814,8 +1811,8 @@ def handle_api_exception(e):
     logger.error(traceback.format_exc())
     
     # ALWAYS return JSON for ALL routes - never return HTML for errors
-                return jsonify({
-                    'success': False,
+    return jsonify({
+        'success': False,
         'error': str(e),
         'path': path,
         'type': e.__class__.__name__
@@ -2718,9 +2715,9 @@ def get_rebuild_progress(user_id, session_id):
     user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
     status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
     if os.path.exists(status_file):
-            try:
-                with open(status_file, 'r') as f:
-                    status_data = json.load(f)
+        try:
+            with open(status_file, 'r') as f:
+                status_data = json.load(f)
                 return status_data.get('progress', 0)
         except Exception as e:
             logger.error(f"Error reading status file: {e}")
@@ -2803,24 +2800,13 @@ def simplest_upload():
             logger.info(f"Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
             error_message = "Server configuration issue with database folder. It has been fixed, please try again."
         
-                    return jsonify({
-                        'success': False,
+        return jsonify({
+            'success': False,
             'error': f"Upload error: {error_message}",
             'retry_recommended': True
         }), 500
 
-# Error handlers - MUST return JSON for all errors
-@app.errorhandler(Exception)
-def handle_all_errors(e):
-    """Catch-all error handler to ensure JSON responses for all errors"""
-    logger.error(f"Unhandled error: {str(e)}")
-    logger.error(traceback.format_exc())
-    return jsonify({
-        'success': False,
-        'error': str(e),
-        'error_type': e.__class__.__name__,
-        'path': request.path
-    }), 500
+
 
 @app.errorhandler(404)
 def handle_not_found(e):
