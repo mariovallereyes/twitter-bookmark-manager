@@ -191,6 +191,12 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_NAME'] = 'twitter_bookmark_session'
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
+# Set up upload folder configuration
+app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+logger.info(f"Upload folder configured at: {app.config['UPLOAD_FOLDER']}")
+
 # Initialize session
 try:
     Session(app)
@@ -1104,9 +1110,16 @@ def process_bookmarks():
                 logger.error(f"Invalid file type: {file.filename}")
                 return jsonify({'success': False, 'error': 'File must be a .json file'}), 400
                 
+            # Ensure UPLOAD_FOLDER is configured
+            if 'UPLOAD_FOLDER' not in app.config:
+                logger.warning("UPLOAD_FOLDER not configured, setting default")
+                app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                
             # Set uploads directory
             uploads_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
             os.makedirs(uploads_dir, exist_ok=True)
+            logger.info(f"Upload directory created/verified: {uploads_dir}")
             
             # Generate filename and save
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1289,7 +1302,22 @@ def process_bookmarks():
     except Exception as e:
         logger.error(f"Unexpected error in process_bookmarks: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': f'Unexpected error: {str(e)}'}), 500
+        
+        # Provide more specific error message based on what happened
+        error_message = str(e)
+        if "UPLOAD_FOLDER" in error_message:
+            # If this specific error occurs, give a more helpful error
+            if 'UPLOAD_FOLDER' not in app.config:
+                app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                logger.info(f"Created missing upload folder at {app.config['UPLOAD_FOLDER']}")
+            error_message = "Server configuration issue with upload folder. It has been fixed, please try again."
+        
+        return jsonify({
+            'success': False, 
+            'error': f"Unexpected error: {error_message}",
+            'retry_recommended': True
+        }), 500
 
 @app.route('/update-status', methods=['GET'])
 def update_status_redirect():
@@ -2041,12 +2069,29 @@ def direct_upload():
             )
             
         # Ensure directory exists for this user
-        upload_dir = os.path.join(app.config.get('UPLOAD_FOLDER', '/app/uploads'), f'user_{user_id}')
+        # Ensure UPLOAD_FOLDER is configured
+        if 'UPLOAD_FOLDER' not in app.config:
+            logger.warning(f"⚠️ [UPLOAD-{session_id}] UPLOAD_FOLDER not configured, setting default")
+            app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            logger.info(f"✅ [UPLOAD-{session_id}] Created UPLOAD_FOLDER at {app.config['UPLOAD_FOLDER']}")
+            
+        # Now create user-specific directory
+        upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
         os.makedirs(upload_dir, exist_ok=True)
+        logger.info(f"📁 [UPLOAD-{session_id}] Created user upload directory: {upload_dir}")
         
         # Create database directory if not exists
-        database_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+        # Also ensure DATABASE_DIR is configured
+        if 'DATABASE_DIR' not in app.config:
+            logger.warning(f"⚠️ [UPLOAD-{session_id}] DATABASE_DIR not configured, setting default")
+            app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+            os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+            logger.info(f"✅ [UPLOAD-{session_id}] Created DATABASE_DIR at {app.config['DATABASE_DIR']}")
+            
+        database_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
         os.makedirs(database_dir, exist_ok=True)
+        logger.info(f"📁 [UPLOAD-{session_id}] Created user database directory: {database_dir}")
         
         # Save the file with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2129,14 +2174,33 @@ def direct_upload():
             )
             
     except Exception as e:
-        logger.error(f"Unexpected error in direct upload: {e}")
+        logger.error(f"❌ [UPLOAD-{session_id}] Unexpected error in direct upload: {e}")
         logger.error(traceback.format_exc())
+        
+        # Check if this is a configuration issue and try to fix it automatically
+        error_message = str(e)
+        if "UPLOAD_FOLDER" in error_message:
+            # Fix missing UPLOAD_FOLDER configuration
+            if 'UPLOAD_FOLDER' not in app.config:
+                app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                logger.info(f"✅ [UPLOAD-{session_id}] Created missing UPLOAD_FOLDER at {app.config['UPLOAD_FOLDER']}")
+            error_message = "Server configuration issue with upload folder. It has been fixed, please try again."
+            
+        elif "DATABASE_DIR" in error_message:
+            # Fix missing DATABASE_DIR configuration
+            if 'DATABASE_DIR' not in app.config:
+                app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+                os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+                logger.info(f"✅ [UPLOAD-{session_id}] Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
+            error_message = "Server configuration issue with database folder. It has been fixed, please try again."
         
         # Always return JSON even on unexpected errors
         return app.response_class(
             response=json.dumps({
                 "success": False,
-                "error": f"Unexpected error: {str(e)}"
+                "error": f"Upload error: {error_message}",
+                "retry_recommended": True
             }),
             status=500,
             mimetype='application/json'
@@ -2394,11 +2458,14 @@ def simplest_upload():
         if not file.filename:
             return jsonify({'success': False, 'error': 'Empty file name'}), 400
             
-        # Create directories
-        base_dir = '/app/user_files'  # Use an absolute path for simplicity
-        os.makedirs(base_dir, exist_ok=True)
-        
-        user_dir = os.path.join(base_dir, f'user_{user_id}')
+        # Ensure UPLOAD_FOLDER is configured
+        if 'UPLOAD_FOLDER' not in app.config:
+            app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            logger.info(f"Created missing UPLOAD_FOLDER at {app.config['UPLOAD_FOLDER']}")
+            
+        # Create user upload directory
+        user_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
         os.makedirs(user_dir, exist_ok=True)
         
         # Save file with timestamp
@@ -2408,8 +2475,14 @@ def simplest_upload():
         
         file.save(filepath)
         
+        # Ensure DATABASE_DIR is configured
+        if 'DATABASE_DIR' not in app.config:
+            app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+            os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+            logger.info(f"Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
+            
         # Copy to standard location
-        db_dir = os.path.join('/app/database', f'user_{user_id}')
+        db_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
         os.makedirs(db_dir, exist_ok=True)
         
         target_path = os.path.join(db_dir, 'twitter_bookmarks.json')
@@ -2423,10 +2496,27 @@ def simplest_upload():
         })
         
     except Exception as e:
-        # Most basic error handling possible
+        # More robust error handling
+        logger.error(f"Error in simplest_upload: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Try to fix the error if it's related to configuration
+        error_message = str(e)
+        if "UPLOAD_FOLDER" in error_message:
+            app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            logger.info(f"Created missing UPLOAD_FOLDER at {app.config['UPLOAD_FOLDER']}")
+            error_message = "Server configuration issue with upload folder. It has been fixed, please try again."
+        elif "DATABASE_DIR" in error_message:
+            app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+            os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+            logger.info(f"Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
+            error_message = "Server configuration issue with database folder. It has been fixed, please try again."
+        
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': f"Upload error: {error_message}",
+            'retry_recommended': True
         }), 500
 
 # Error handlers - MUST return JSON for all errors
