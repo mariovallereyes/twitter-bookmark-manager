@@ -882,7 +882,12 @@ def check_engine_health() -> Dict[str, Any]:
     Returns:
         Dict with health status information and diagnostics
     """
-    global _engine, _last_connection_error
+    global _engine, _last_connection_error, _connection_error_time
+    
+    # Initialize the connection error time if it doesn't exist
+    if '_connection_error_time' not in globals():
+        global _connection_error_time
+        _connection_error_time = None
     
     # Start with a default response
     health_info = {
@@ -961,11 +966,29 @@ def check_engine_health() -> Dict[str, Any]:
         _last_connection_error = str(e)
         _connection_error_time = datetime.now()
         
-        # Return detailed error information
+        # Try to parse log using database URL
+        try:
+            conn.close()
+            return {
+                "success": False,
+                "error": f"Database error: {str(e)}"
+            }
+        except Exception as parse_error:
+            # Failed to parse log
+            logger.error(f"Failed to parse error log: {str(parse_error)}")
+            
+        # Ensure connection error time is tracked
+        if '_connection_error_time' not in globals():
+            global _connection_error_time
+            _connection_error_time = None
+            
+        _last_connection_error = str(e)
+        _connection_error_time = datetime.now()
+        
         return {
-            "healthy": False,
-            "message": f"Connection error: {str(e)}",
-            "error_type": type(e).__name__,
+            "success": False,
+            "error": f"Database error: {str(e)}",
+            "retries": retries,
             "last_error": _last_connection_error,
             "last_error_time": _connection_error_time.isoformat() if _connection_error_time else None
         }

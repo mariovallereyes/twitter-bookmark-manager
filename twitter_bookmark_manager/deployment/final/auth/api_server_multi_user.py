@@ -316,35 +316,24 @@ def check_db_health():
     try:
         # Only check health on percentage of requests to avoid overhead
         if random.random() < 0.05:  # 5% of requests (reduced from 10%)
-            # Use retry logic for health check
-            max_attempts = 3
-            attempt = 0
-            last_error = None
-            
-            while attempt < max_attempts:
-                try:
-                    health = check_engine_health()
-                    if not health['healthy']:
-                        logger.warning(f"Database health check failed: {health['message']}")
-                        
-                        # Force reconnect on unhealthy status
-                        setup_database(force_reconnect=True)
-                        logger.info("Forced database reconnection after unhealthy status")
-                    
-                    # If we get here, either health check passed or we reconnected
+            try:
+                # Use a simple direct database check instead of the complex engine health check
+                conn = get_db_connection()
+                if conn:
+                    # We got a connection, so the database is up
+                    if hasattr(conn, 'close'):
+                        conn.close()  # Close the connection properly
                     return
+                else:
+                    # Force reconnect if we couldn't get a connection
+                    logger.warning("Database connection check failed, forcing reconnect")
+                    setup_database(force_reconnect=True)
+                    logger.info("Forced database reconnection after connection check failure")
                     
-                except Exception as e:
-                    attempt += 1
-                    last_error = e
-                    wait_time = 0.5 * (2 ** (attempt - 1))  # Short exponential backoff
-                    
-                    if attempt < max_attempts:
-                        logger.warning(f"Health check attempt {attempt} failed, retrying in {wait_time}s: {e}")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Health check failed after {max_attempts} attempts: {e}")
-                        # Don't fail the request, just log the issue
+            except Exception as e:
+                # Log the error but don't fail the request
+                logger.error(f"Database health check error: {str(e)}")
+                
     except Exception as e:
         logger.error(f"Error in health check routine: {e}")
         # Continue processing the request even if health check fails
@@ -1611,6 +1600,131 @@ def ensure_json_response():
     if request.path.startswith('/api/') or request.path in ['/upload-bookmarks', '/process-bookmarks', '/update-database']:
         # Store a flag in g to indicate this is a JSON API route
         g.is_json_api = True
+
+@app.route('/emergency-upload', methods=['POST'])
+@login_required
+def emergency_upload():
+    """
+    Emergency file upload endpoint with minimal dependencies
+    Designed to work even when other endpoints have issues
+    """
+    try:
+        # Get current authenticated user
+        user = UserContext.get_current_user()
+        if not user:
+            return app.response_class(
+                response=json.dumps({
+                    "success": False, 
+                    "error": "User not authenticated"
+                }),
+                status=401,
+                mimetype='application/json'
+            )
+            
+        user_id = user.id
+        
+        # Check if file part exists
+        if 'file' not in request.files:
+            return app.response_class(
+                response=json.dumps({
+                    "success": False, 
+                    "error": "No file part in the request"
+                }),
+                status=400,
+                mimetype='application/json'
+            )
+            
+        file = request.files['file']
+        if file.filename == '':
+            return app.response_class(
+                response=json.dumps({
+                    "success": False, 
+                    "error": "No file selected"
+                }),
+                status=400,
+                mimetype='application/json'
+            )
+            
+        # Check if it's a JSON file
+        if not file.filename.lower().endswith('.json'):
+            return app.response_class(
+                response=json.dumps({
+                    "success": False, 
+                    "error": "File must be a JSON file"
+                }),
+                status=400,
+                mimetype='application/json'
+            )
+            
+        # Create directory for user
+        upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], f'user_{user_id}')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"emergency_upload_{timestamp}.json"
+        filepath = os.path.join(upload_dir, filename)
+        
+        try:
+            file.save(filepath)
+            file_size = os.path.getsize(filepath)
+            logger.info(f"Emergency upload saved file: {filepath} - Size: {file_size} bytes")
+            
+            # Minimal validation - just check if it at least looks like JSON
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    first_char = f.read(1).strip()
+                    if first_char not in ['{', '[']:
+                        return app.response_class(
+                            response=json.dumps({
+                                "success": False, 
+                                "error": "File doesn't appear to be valid JSON",
+                                "file_saved": True,
+                                "filepath": filepath
+                            }),
+                            status=400,
+                            mimetype='application/json'
+                        )
+            except Exception as read_error:
+                # Log but don't fail if we can't validate
+                logger.error(f"Error validating uploaded file: {str(read_error)}")
+            
+            # Return success directly with application/json content type
+            return app.response_class(
+                response=json.dumps({
+                    "success": True,
+                    "message": "File uploaded successfully via emergency upload",
+                    "file": filename,
+                    "path": filepath
+                }),
+                status=200,
+                mimetype='application/json'
+            )
+            
+        except Exception as save_error:
+            logger.error(f"Error in emergency upload saving file: {str(save_error)}")
+            return app.response_class(
+                response=json.dumps({
+                    "success": False,
+                    "error": f"Error saving file: {str(save_error)}"
+                }),
+                status=500,
+                mimetype='application/json'
+            )
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in emergency upload: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Always return JSON even on unexpected errors
+        return app.response_class(
+            response=json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
+            }),
+            status=500,
+            mimetype='application/json'
+        )
 
 # Run the app if this file is executed directly
 if __name__ == '__main__':

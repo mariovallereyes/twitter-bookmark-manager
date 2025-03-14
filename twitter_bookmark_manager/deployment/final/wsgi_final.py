@@ -333,17 +333,29 @@ init_database()
 def health_check():
     """Health check endpoint for Railway"""
     try:
-        # Basic health check - just verify we can handle requests
+        # Return a simple healthy response without any database checks
         return jsonify({
             "status": "healthy",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "service": "twitter-bookmark-manager",
+            "version": "1.0"
         })
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({
+        # In case of any errors, also return JSON
+        error_response = {
             "status": "unhealthy",
             "error": str(e),
             "timestamp": datetime.now().isoformat()
-        }), 500
+        }
+        # Log the error but don't crash the app
+        logger.error(f"Health check error: {str(e)}")
+        
+        # Use Flask's json module directly to avoid HTML error responses
+        from flask import json
+        return app.response_class(
+            response=json.dumps(error_response),
+            status=500,
+            mimetype='application/json'
+        )
 
 logger.info("✅ Successfully imported and configured main application") 
