@@ -193,9 +193,14 @@ app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 # Set up upload folder configuration
 app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
+app.config['DATABASE_DIR'] = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database'))
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
+
+# Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
 logger.info(f"Upload folder configured at: {app.config['UPLOAD_FOLDER']}")
+logger.info(f"Database directory configured at: {app.config['DATABASE_DIR']}")
 
 # Initialize session
 try:
@@ -1203,9 +1208,16 @@ def process_bookmarks():
             logger.error("Failed to prepare file for processing - no file_to_process set")
             return jsonify({'success': False, 'error': 'Failed to prepare file for processing'}), 500
             
+        # Ensure DATABASE_DIR is configured
+        if 'DATABASE_DIR' not in app.config:
+            app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+            os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+            logger.info(f"Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
+            
         # Copy to database directory
         db_dir = os.path.join(app.config['DATABASE_DIR'], f'user_{user_id}')
         os.makedirs(db_dir, exist_ok=True)
+        logger.info(f"Database directory created/verified: {db_dir}")
         
         target_file = os.path.join(db_dir, 'twitter_bookmarks.json')
         try:
@@ -1312,6 +1324,13 @@ def process_bookmarks():
                 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
                 logger.info(f"Created missing upload folder at {app.config['UPLOAD_FOLDER']}")
             error_message = "Server configuration issue with upload folder. It has been fixed, please try again."
+        elif "DATABASE_DIR" in error_message:
+            # If this specific error occurs, give a more helpful error
+            if 'DATABASE_DIR' not in app.config:
+                app.config['DATABASE_DIR'] = os.path.join(BASE_DIR, 'database')
+                os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
+                logger.info(f"Created missing database directory at {app.config['DATABASE_DIR']}")
+            error_message = "Server configuration issue with database directory. It has been fixed, please try again."
         
         return jsonify({
             'success': False, 
