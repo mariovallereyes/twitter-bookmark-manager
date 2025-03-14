@@ -60,29 +60,29 @@ class VectorStore:
         self.model = None  # Will be loaded lazily when needed
         self.client = None
         
-        # Generate a unique instance ID to prevent collisions, like PythonAnywhere
-        instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        self.collection_name = f"bookmark_embeddings_{instance_id}"
-        logger.info(f"Creating Qdrant in-memory instance with ID: {instance_id}")
-        
-        self.vector_size = 768  # Default for all-mpnet-base-v2
-        
         # Set default persist directory for Railway if not specified
         if persist_directory is None:
-            # Check environment variables first
-            base_dir = os.environ.get('VECTOR_STORE_DIR', '/app/vector_store')
-            self.persist_directory = base_dir
+            # Use Railway's volume mount path
+            self.persist_directory = os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', '/app/twitter_bookmark_manager/data')
+            self.persist_directory = os.path.join(self.persist_directory, 'vector_store')
         else:
             self.persist_directory = persist_directory
             
         # Ensure directory exists
         os.makedirs(self.persist_directory, exist_ok=True)
+        logger.info(f"Using persistent storage at: {self.persist_directory}")
         
-        # Initialize Qdrant client in memory mode to avoid file locking issues
+        # Generate a unique instance ID to prevent collisions
+        instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        self.collection_name = f"bookmark_embeddings_{instance_id}"
+        
+        self.vector_size = 768  # Default for all-mpnet-base-v2
+        
+        # Initialize Qdrant client with persistent storage
         try:
-            logger.info(f"Initializing Qdrant client in memory mode to avoid file locking issues")
-            self.client = QdrantClient(":memory:")  # Always use in-memory mode
-            logger.info(f"Qdrant client initialized successfully in memory mode")
+            logger.info(f"Initializing Qdrant client with persistent storage at {self.persist_directory}")
+            self.client = QdrantClient(path=self.persist_directory)
+            logger.info(f"Qdrant client initialized successfully with persistent storage")
             
             # Initialize model as None - will load on demand
             self.model = None
@@ -752,7 +752,7 @@ def get_vector_store(persist_directory=None):
     Get a singleton instance of the vector store.
     
     Args:
-        persist_directory: Ignored - using in-memory mode to avoid locking issues
+        persist_directory: Directory to persist the vector store
         
     Returns:
         VectorStore instance
@@ -761,15 +761,14 @@ def get_vector_store(persist_directory=None):
     
     if _vector_store_instance is None:
         try:
-            # Force in-memory mode to avoid file locking regardless of passed parameter
-            logger.info("Creating vector store instance in memory mode")
-            _vector_store_instance = VectorStore(persist_directory=None)
+            logger.info("Creating vector store instance with persistent storage")
+            _vector_store_instance = VectorStore(persist_directory=persist_directory)
         except Exception as e:
             logger.error(f"Error initializing vector store: {str(e)}")
             logger.error(traceback.format_exc())
             raise
             
-    return _vector_store_instance 
+    return _vector_store_instance
 
 # Add this function to match what's called in api_server_multi_user.py
 def get_multi_user_vector_store(persist_directory=None):
