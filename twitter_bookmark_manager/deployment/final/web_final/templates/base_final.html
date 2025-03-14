@@ -9,6 +9,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script async src="https://platform.twitter.com/widgets.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/progress.js"></script>
     
     <style>
         [x-cloak] { display: none !important; }
@@ -433,10 +437,6 @@
                                 <span class="progress-icon">⭕</span>
                                 <span class="text-sm text-gray-400">Updating SQL database...</span>
                             </div>
-                            <div id="step-categories" class="flex items-center gap-2">
-                                <span class="progress-icon">⭕</span>
-                                <span class="text-sm text-gray-400">Processing categories...</span>
-                            </div>
                             <div id="step-vectors" class="flex items-center gap-2">
                                 <span class="progress-icon">⭕</span>
                                 <span class="text-sm text-gray-400">Rebuilding vector store...</span>
@@ -587,6 +587,29 @@
       </div>
     </div>
 
+    <!-- Add this right before the closing </body> tag -->
+    <div id="rebuild-progress-container" class="container mt-4 mb-4" style="display: none;">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">
+                    <i class="fas fa-sync-alt me-2"></i>Vector Rebuild Progress
+                    <span id="rebuild-spinner" class="spinner-border spinner-border-sm ms-2" role="status" style="display: none;">
+                        <span class="visually-hidden">Loading...</span>
+                    </span>
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="progress mb-3">
+                    <div id="rebuild-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-info" 
+                         role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+                <p id="rebuild-progress-text" class="mb-2">Initializing...</p>
+                <div id="rebuild-error-details" class="alert alert-danger mt-2" style="display: none; white-space: pre-wrap; font-family: monospace; font-size: 0.8rem;"></div>
+            </div>
+        </div>
+        <div id="rebuild-resume-container" style="display: none;"></div>
+    </div>
+
     <script>
     // File handling functions
     function handleFileDrop(event) {
@@ -698,7 +721,7 @@
                 updateStepStatus('step-upload', 'error');
                 const errorDiv = document.createElement('div');
                 errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-                errorDiv.innerHTML = 'User not authenticated. Please <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
+                errorDiv.textContent = 'User not authenticated. Please <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
                 document.getElementById('progress-steps').appendChild(errorDiv);
                 return;
             }
@@ -712,7 +735,7 @@
             // Show detailed error message
             const errorDiv = document.createElement('div');
             errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-            errorDiv.innerHTML = 'Upload failed: ' + error.message + '. You may need to <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
+            errorDiv.textContent = 'Upload failed: ' + error.message + '. You may need to <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
             document.getElementById('progress-steps').appendChild(errorDiv);
         }
     }
@@ -1038,20 +1061,24 @@
         // Reset form
         resetForm();
         
+        // Show rebuild progress container
+        document.getElementById('rebuild-progress-container').style.display = 'block';
+        
         // Show status
         showStatus('Starting vector rebuild...', 10);
         
-        console.log('Calling /api/update-database endpoint to rebuild vectors');
+        console.log('Calling /api/rebuild-vector-store endpoint');
         
         // Call rebuild API
-        fetch('/api/update-database', {
+        fetch('/api/rebuild-vector-store', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             credentials: 'include',
             body: JSON.stringify({
-                rebuild: true  // Explicitly set rebuild flag to true
+                batch_size: 20,
+                resume: false
             })
         })
         .then(response => response.json())
@@ -1059,13 +1086,13 @@
             console.log('Rebuild response:', data);
             
             if (data.success) {
-                showStatus('Vector rebuild started...', 30);
-                
-                // Check status regularly
+                // Initialize progress tracking with the session ID
                 if (data.session_id) {
-                    checkUpdateStatus(data.session_id);
+                    // Use the progress.js functionality
+                    window.progressTracker.initRebuildProgress(data.session_id, data.resume || false);
+                    showStatus('Vector rebuild started. Progress is being tracked below.', 100);
                 } else {
-                    showSuccess('Vector rebuild started. No session ID returned for tracking progress.');
+                    showStatus('Vector rebuild started, but no session ID was returned for tracking.', 100);
                 }
             } else {
                 throw new Error(data.error || 'Failed to start vector rebuild');
@@ -1074,381 +1101,108 @@
         .catch(error => {
             console.error('Error:', error);
             showError('Error: ' + error.message);
+            
+            // Update progress container with error
+            const progressText = document.getElementById('rebuild-progress-text');
+            if (progressText) {
+                progressText.textContent = 'Error: ' + error.message;
+                
+                // Change progress bar to red
+                const progressBar = document.getElementById('rebuild-progress-bar');
+                if (progressBar) {
+                    progressBar.classList.remove('bg-info');
+                    progressBar.classList.add('bg-danger');
+                }
+            }
         });
     }
 
-    // Add direct polling function
-    function directPollStatus(sessionId) {
-        console.log('Polling status for session:', sessionId);
+    // Function to resume a rebuild
+    function resumeRebuild(sessionId) {
+        if (!sessionId) {
+            showError('No session ID provided for resume');
+            return;
+        }
         
-        fetch(`/update-status?session_id=${sessionId}`)
+        // Use the progress.js functionality
+        window.progressTracker.resumeRebuild(sessionId);
+    }
+
+    // Update the uploadAndProcess function to use the new progress tracking
+    function uploadAndProcess() {
+        // Check if file is selected
+        if (!fileInput.files || fileInput.files.length === 0) {
+            showError('Please select a file to upload');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        // Set rebuild vectors flag
+        const rebuildVectors = rebuildVectorsCheckbox.checked;
+        
+        // Reset form
+        resetForm();
+        
+        // Show status
+        showStatus('Uploading file...', 10);
+        
+        // Upload file
+        fetch('/upload-bookmarks', {
+            method: 'POST',
+            credentials: 'include',
+            body: formData
+        })
         .then(response => response.json())
         .then(data => {
-            console.log('Status update:', data);
-            
-            // If not complete, poll again
-            if (data.is_complete === false) {
-                setTimeout(() => directPollStatus(sessionId), 3000);
-            } else {
-                if (data.success) {
-                    alert('Rebuild completed successfully!');
-                } else {
-                    alert('Rebuild completed with errors: ' + (data.message || 'Unknown error'));
-                }
-            }
-        })
-        .catch(error => {
-            console.error('Polling error:', error);
-            alert('Error checking status: ' + error.message);
-        });
-    }
-
-    // Upload form handlers
-    document.addEventListener('DOMContentLoaded', function() {
-        // Define elements
-        const uploadForm = document.getElementById('uploadForm');
-        const uploadSubmitButton = document.getElementById('uploadSubmitButton');
-        const processRebuildOnlyButton = document.getElementById('processRebuildOnlyButton');
-        const directRebuildButton = document.getElementById('directRebuildButton');
-        const fileInput = document.getElementById('bookmarksFile');
-        const rebuildVectorsCheckbox = document.getElementById('rebuildVectors');
-        const uploadStatusSection = document.getElementById('uploadStatusSection');
-        const uploadProgressBar = document.getElementById('uploadProgressBar');
-        const uploadStatusMessage = document.getElementById('uploadStatusMessage');
-        const uploadErrorMsg = document.getElementById('uploadErrorMsg');
-        const uploadSuccessMsg = document.getElementById('uploadSuccessMsg');
-        
-        // Function to show status
-        function showStatus(message, progress = 0) {
-            uploadStatusSection.classList.remove('hidden');
-            uploadStatusMessage.textContent = message;
-            uploadProgressBar.style.width = `${progress}%`;
-        }
-        
-        // Function to show error
-        function showError(message) {
-            uploadErrorMsg.classList.remove('hidden');
-            uploadErrorMsg.textContent = message;
-            uploadStatusSection.classList.add('hidden');
-        }
-        
-        // Function to show success
-        function showSuccess(message) {
-            uploadSuccessMsg.classList.remove('hidden');
-            uploadSuccessMsg.textContent = message;
-            uploadStatusSection.classList.add('hidden');
-        }
-        
-        // Function to reset form
-        function resetForm() {
-            uploadStatusSection.classList.add('hidden');
-            uploadErrorMsg.classList.add('hidden');
-            uploadSuccessMsg.classList.add('hidden');
-            uploadProgressBar.style.width = '0%';
-        }
-        
-        // Function to check update status
-        function checkUpdateStatus(sessionId) {
-            let attempts = 0;
-            const maxAttempts = 60; // 5 minutes (checking every 5 seconds)
-            
-            const statusChecker = setInterval(() => {
-                fetch(`/update-status?session_id=${sessionId}`, {
-                    credentials: 'include'
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('Status update:', data);
-                        
-                        if (data.success) {
-                            const statusData = data.status;
-                            
-                            // Update progress bar based on status
-                            if (statusData.status === 'processing') {
-                                const progress = statusData.progress || {};
-                                const total = progress.total_processed || 0;
-                                const errors = progress.errors || 0;
-                                
-                                showStatus(`Processing: ${total} items processed, ${errors} errors`, 50);
-                            } else if (statusData.status === 'completed') {
-                                showSuccess(statusData.message || 'Processing completed successfully!');
-                                clearInterval(statusChecker);
-                            } else if (statusData.status === 'error') {
-                                showError(statusData.message || 'An error occurred during processing');
-                                clearInterval(statusChecker);
-                            }
-                        } else {
-                            attempts++;
-                            if (attempts >= maxAttempts) {
-                                showError('Timed out waiting for status updates. The process might still be running in the background.');
-                                clearInterval(statusChecker);
-                            }
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error checking status:', error);
-                        attempts++;
-                        if (attempts >= maxAttempts) {
-                            showError('Failed to get status updates after multiple attempts.');
-                            clearInterval(statusChecker);
-                        }
-                    });
-            }, 5000); // Check every 5 seconds
-        }
-        
-        // Function to upload file and process bookmarks
-        function uploadAndProcess() {
-            // Check if file is selected
-            if (!fileInput.files || fileInput.files.length === 0) {
-                showError('Please select a file to upload');
-                return;
-            }
-            
-            const file = fileInput.files[0];
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            // Set rebuild vectors flag
-            const rebuildVectors = rebuildVectorsCheckbox.checked;
-            
-            // Reset form
-            resetForm();
-            
-            // Show status
-            showStatus('Uploading file...', 10);
-            
-            // Upload file
-            fetch('/upload-bookmarks', {
-                method: 'POST',
-                credentials: 'include',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showStatus('File uploaded successfully. Starting processing...', 30);
-                    
-                    // Start processing
-                    return fetch('/api/update-database', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        credentials: 'include',
-                        body: JSON.stringify({
-                            rebuild: rebuildVectors  // Only rebuild if explicitly requested
-                        })
-                    });
-                } else {
-                    throw new Error(data.error || 'Failed to upload file');
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showStatus('Processing started...', 40);
-                    
-                    // Check status regularly
-                    if (data.session_id) {
-                        checkUpdateStatus(data.session_id);
-                    } else {
-                        showSuccess('Processing started. No session ID returned for tracking progress.');
-                    }
-                } else {
-                    throw new Error(data.error || 'Failed to start processing');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showError('Error: ' + error.message);
-            });
-        }
-        
-        // Function to process rebuild only
-        function processRebuildOnly() {
-            // Reset form
-            resetForm();
-            
-            // Show status
-            showStatus('Starting vector rebuild...', 10);
-            
-            console.log('Calling /api/update-database endpoint to rebuild vectors');
-            
-            // Call rebuild API
-            fetch('/api/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'include',
-                body: JSON.stringify({
-                    rebuild: true,
-                    direct_call: false
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Rebuild response:', data);
+            if (data.success) {
+                showStatus('File uploaded successfully. Starting processing...', 30);
                 
-                if (data.success) {
-                    showStatus('Vector rebuild started...', 30);
-                    
-                    // Check status regularly
-                    if (data.session_id) {
-                        checkUpdateStatus(data.session_id);
-                    } else {
-                        showSuccess('Vector rebuild started. No session ID returned for tracking progress.');
-                    }
-                } else {
-                    throw new Error(data.error || 'Failed to start vector rebuild');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showError('Error: ' + error.message);
-            });
-        }
-        
-        // Function for direct vector rebuild
-        async function directRebuildVectors() {
-            try {
-                // Display progress steps if the UI has them
-                if (document.getElementById('progress-steps')) {
-                    document.getElementById('progress-steps').style.display = 'block';
-                    updateStepStatus('step-vectors', 'processing');
-                }
-                
-                // Call the API to rebuild vectors
-                const response = await fetch('/api/update-database', {
+                // Start processing
+                return fetch('/api/update-database', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
+                    credentials: 'include',
                     body: JSON.stringify({
-                        rebuild_vectors: true,
-                        background: false
-                    }),
-                    credentials: 'include'
+                        rebuild: rebuildVectors  // Only rebuild if explicitly requested
+                    })
                 });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    // Handle success
-                    if (document.getElementById('step-vectors')) {
-                        updateStepStatus('step-vectors', 'done');
-                        
-                        // Create success message
-                        const successDiv = document.createElement('div');
-                        successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
-                        successDiv.textContent = data.message || 'Vector store rebuilt successfully!';
-                        document.getElementById('progress-steps').appendChild(successDiv);
-                    } else {
-                        alert('Vector store rebuilt successfully!');
-                    }
-                } else {
-                    // Handle error
-                    if (document.getElementById('step-vectors')) {
-                        updateStepStatus('step-vectors', 'error');
-                        
-                        // Create error message
-                        const errorDiv = document.createElement('div');
-                        errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-                        errorDiv.textContent = data.error || 'Failed to rebuild vector store';
-                        document.getElementById('progress-steps').appendChild(errorDiv);
-                    } else {
-                        alert('Error: ' + (data.error || 'Failed to rebuild vector store'));
-                    }
-                }
-            } catch (error) {
-                console.error('Vector rebuild error:', error);
-                
-                // Handle error in UI
-                if (document.getElementById('step-vectors')) {
-                    updateStepStatus('step-vectors', 'error');
-                    
-                    // Create error message
-                    const errorDiv = document.createElement('div');
-                    errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-                    errorDiv.textContent = 'Error: ' + error.message;
-                    document.getElementById('progress-steps').appendChild(errorDiv);
-                } else {
-                    alert('Error: ' + error.message);
-                }
-            }
-        }
-        
-        // Attach event listeners
-        if (uploadSubmitButton) {
-            uploadSubmitButton.addEventListener('click', uploadAndProcess);
-        }
-        
-        if (processRebuildOnlyButton) {
-            processRebuildOnlyButton.addEventListener('click', processRebuildOnly);
-        }
-        
-        if (directRebuildButton) {
-            directRebuildButton.addEventListener('click', directRebuildVectors);
-        }
-    });
-
-    // File upload and processing functions
-    function uploadBookmarks() {
-        // Clear previous status
-        // Function implementation will go here
-    }
-    
-    // Function to reset update progress
-    async function resetUpdateProgress() {
-        if (!confirm('Are you sure you want to reset update progress? This will clear any pending operations.')) {
-            return;
-        }
-        
-        try {
-            // Show progress steps
-            document.getElementById('progress-steps').style.display = 'block';
-            
-            // Update status
-            resetProgress();
-            updateStepStatus('step-sql', 'processing');
-            
-            const response = await fetch('/api/update-database', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ reset_progress: true })
-            });
-            
-            const result = await response.json();
-            
-            if (response.ok) {
-                updateStepStatus('step-sql', 'done');
-                
-                // Create success message element
-                const successDiv = document.createElement('div');
-                successDiv.className = 'mt-4 p-3 bg-green-900 text-white rounded-lg';
-                successDiv.textContent = 'Update progress has been reset successfully';
-                document.getElementById('progress-steps').appendChild(successDiv);
             } else {
-                updateStepStatus('step-sql', 'error');
-                
-                // Create error message element
-                const errorDiv = document.createElement('div');
-                errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-                errorDiv.textContent = result.error || 'Failed to reset update progress';
-                document.getElementById('progress-steps').appendChild(errorDiv);
+                throw new Error(data.error || 'Failed to upload file');
             }
-        } catch (error) {
-            console.error('Reset error:', error);
-            updateStepStatus('step-sql', 'error');
-            
-            // Create error message element
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-            errorDiv.textContent = 'Error connecting to server';
-            document.getElementById('progress-steps').appendChild(errorDiv);
-        }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showStatus('Processing started...', 40);
+                
+                // Check status regularly
+                if (data.session_id) {
+                    checkUpdateStatus(data.session_id);
+                    
+                    // If rebuild was requested, also track vector rebuild progress
+                    if (rebuildVectors && data.rebuild_session_id) {
+                        // Show rebuild progress container
+                        document.getElementById('rebuild-progress-container').style.display = 'block';
+                        
+                        // Initialize progress tracking
+                        window.progressTracker.initRebuildProgress(data.rebuild_session_id, false);
+                    }
+                } else {
+                    showSuccess('Processing started. No session ID returned for tracking progress.');
+                }
+            } else {
+                throw new Error(data.error || 'Failed to start processing');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showError('Error: ' + error.message);
+        });
     }
 
     // Document ready event

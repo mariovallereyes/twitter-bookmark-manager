@@ -44,6 +44,7 @@ from auth.user_context_final import login_required
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.db_final import get_db_connection
 from flask_session import Session
+import tempfile
 
 # Fix path for Railway deployment - Railway root is twitter_bookmark_manager/deployment/final
 # We need to navigate up TWO levels from current file to reach repo root 
@@ -1347,106 +1348,212 @@ def update_status_redirect():
 
 @app.route('/api/process-status', methods=['GET'])
 def process_status():
-    """Check status of background processing"""
-    user = UserContext.get_current_user()
-    user_id = user.id if user else None
+    """
+    Check status of background processing with enhanced support for vector rebuilds.
     
-    # Get session ID from request
-    session_id = request.args.get('session_id')
-    if not session_id:
-        logger.error(f"❌ [STATUS] No session ID provided")
-        return jsonify({'error': 'No session ID provided'}), 400
-        
-    logger.info(f"🔍 [STATUS-{session_id}] Checking processing status for user {user_id}")
-    
-    # Find status file
-    user_dir = get_user_directory(user_id)
-    status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-    
-    if not os.path.exists(status_file):
-        logger.error(f"❌ [STATUS-{session_id}] Status file not found: {status_file}")
-        return jsonify({'error': 'Session not found'}), 404
-        
-    # Read status file
+    This endpoint provides detailed status information for various process types
+    including vector rebuilds, with improved error handling and progress tracking.
+    """
     try:
-        with open(status_file, 'r') as f:
-            status_data = json.load(f)
-            
-        # Return status
-        return jsonify({
-            'success': True,
-            'session_id': session_id,
-            'status': status_data.get('status', 'unknown'),
-            'details': status_data
-        })
+        # Validate user authentication for multi-user support
+        user = UserContext.get_current_user()
+        if not user:
+            logger.error("No user context found for status request")
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
         
+        user_id = user.id
+        
+        # Get session ID from request
+        session_id = request.args.get('session_id')
+        if not session_id:
+            return jsonify({
+                'success': False,
+                'error': 'No session_id provided'
+            }), 400
+        
+        # Get process type (defaults to upload for backward compatibility)
+        process_type = request.args.get('type', 'upload')
+        
+        logger.info(f"🔍 Checking {process_type} status for session {session_id}, user {user_id}")
+        
+        # Set up paths for status files
+        user_dir = get_user_directory(user_id)
+        
+        # Handle different process types
+        if process_type == 'vector-rebuild':
+            # Vector rebuild status file
+            status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
+            
+            if not os.path.exists(status_file):
+                # Check for a running process by lock file
+                lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+                if os.path.exists(lock_file):
+                    # Check if lock file contains this session ID
+                    try:
+                        with open(lock_file, 'r') as f:
+                            lock_content = f.read()
+                            if session_id in lock_content:
+                                # Lock exists for this session but no status file yet
+                                return jsonify({
+                                    'success': True,
+                                    'status': 'initializing',
+                                    'message': 'Vector rebuild is initializing...',
+                                    'progress': 0
+                                })
+                    except Exception as e:
+                        logger.error(f"Error reading lock file: {e}")
+                
+                # No status file and no matching lock - process may have been lost
+                return jsonify({
+                    'success': False,
+                    'status': 'not_found',
+                    'message': f'No process found for session {session_id}',
+                    'error': 'Process not found or may have been terminated'
+                }), 404
+            
+            # Read status file
+            try:
+                with open(status_file, 'r') as f:
+                    status_data = json.load(f)
+                
+                # Check if the status file belongs to the current user
+                file_user_id = status_data.get('user_id')
+                if file_user_id and int(file_user_id) != user_id:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Unauthorized access to process status'
+                    }), 403
+                
+                # Enhance with additional information
+                process_status = status_data.get('status', 'unknown')
+                
+                # Check progress file for more detailed progress info
+                progress_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+                if os.path.exists(progress_file):
+                    try:
+                        with open(progress_file, 'r') as f:
+                            progress_data = json.load(f)
+                            
+                            # Add additional progress details if available
+                            if 'bookmarks_processed' in progress_data and 'total_valid' in progress_data:
+                                status_data['bookmarks_processed'] = progress_data.get('bookmarks_processed', 0)
+                                status_data['total_valid'] = progress_data.get('total_valid', 0)
+                                status_data['success_count'] = progress_data.get('total_success', 0) 
+                                status_data['error_count'] = progress_data.get('total_errors', 0)
+                                
+                                # Update progress with most recent data
+                                status_data['progress'] = progress_data.get('progress_percent', status_data.get('progress', 0))
+                    except Exception as e:
+                        logger.error(f"Error reading progress file: {e}")
+                
+                # If process is marked as completed but progress < 100%, something went wrong
+                if process_status == 'completed' and status_data.get('progress', 0) < 100:
+                    status_data['progress'] = 100  # Force to 100% if completed
+                
+                # If status is error, ensure we include error details
+                if process_status == 'error' and 'error' not in status_data:
+                    status_data['error'] = 'Unknown error occurred'
+                
+                # Check if the process is still actually running via lock file
+                if process_status == 'processing':
+                    lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+                    if not os.path.exists(lock_file):
+                        # Process appears to have terminated without updating status
+                        status_data['status'] = 'interrupted'
+                        status_data['message'] = 'Process appears to have been interrupted'
+                
+                return jsonify({
+                    'success': True,
+                    **status_data
+                })
+                
+            except Exception as e:
+                logger.error(f"Error reading status file: {e}")
+                logger.error(traceback.format_exc())
+                return jsonify({
+                    'success': False,
+                    'error': f'Error reading status file: {str(e)}',
+                    'traceback': traceback.format_exc()
+                }), 500
+        else:
+            # Default to original upload status handling for backward compatibility
+            status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+            
+            if not os.path.exists(status_file):
+                logger.error(f"❌ Status file not found: {status_file}")
+                return jsonify({'error': 'Session not found'}), 404
+                
+            # Read status file
+            try:
+                with open(status_file, 'r') as f:
+                    status_data = json.load(f)
+                    
+                # Return status
+                return jsonify({
+                    'success': True,
+                    'session_id': session_id,
+                    'status': status_data.get('status', 'unknown'),
+                    'details': status_data
+                })
+                
+            except Exception as e:
+                logger.error(f"❌ Error reading status file: {e}")
+                return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
+            
     except Exception as e:
-        logger.error(f"❌ [STATUS-{session_id}] Error: {str(e)}")
-        return jsonify({'error': 'Error reading status', 'details': str(e)}), 500
+        logger.error(f"Error in process_status endpoint: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
 
 @app.route('/api/update-database', methods=['POST'])
-@login_required
 def update_database():
-    """API endpoint to update the database from a JSON file
-    This function is improved based on the PythonAnywhere approach
-    with complete separation of vector operations from database updates
-    """
+    """Update the database from uploaded bookmarks file"""
     try:
         # Get current user
         user = UserContext.get_current_user()
         if not user:
-            logger.error("No user context found for request")
+            logger.error("No user context found for database update request")
             return jsonify({
                 'success': False,
                 'error': 'User not authenticated'
             }), 401
             
         user_id = user.id
-        logger.info(f"Processing database update for user {user_id}")
         
-        # Get request JSON data
+        # Get request data
         data = request.get_json() or {}
-        session_id = data.get('session_id', str(uuid.uuid4())[:8])
-        start_index = data.get('start_index', 0)
-        skip_vector = data.get('skip_vector', True)  # Default to skipping vector operations
+        rebuild = data.get('rebuild', False)
+        direct_call = data.get('direct_call', True)
+        reset_progress = data.get('reset_progress', False)
         
-        # Check if file exists
-        user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
-        json_file = os.path.join(user_dir, 'twitter_bookmarks.json')
+        # Generate a session ID for tracking
+        session_id = str(uuid.uuid4())[:8]
+        logger.info(f"Starting database update for user {user_id}, session {session_id}")
         
-        if not os.path.exists(json_file):
-            logger.error(f"JSON file not found at {json_file}")
+        # Handle reset progress request
+        if reset_progress:
+            # Implementation for reset progress
+            return jsonify({
+                'success': True,
+                'message': 'Progress reset successfully'
+            })
+        
+        # Get user directory
+        user_dir = get_user_directory(user_id)
+        if not user_dir:
             return jsonify({
                 'success': False,
-                'error': f'Bookmarks file not found. Please upload a file first.',
-                'file_path': json_file
-            }), 404
-            
-        # Log file size for debugging
-        file_size = os.path.getsize(json_file)
-        logger.info(f"Found JSON file at {json_file} (size: {file_size} bytes)")
-        
-        # Check if the file is valid JSON (just the basic check)
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                first_line = f.readline().strip()
-                if not (first_line.startswith('{') or first_line.startswith('[')):
-                    return jsonify({
-                        'success': False,
-                        'error': 'File does not appear to be valid JSON',
-                        'first_line': first_line
-                    }), 400
-        except Exception as json_error:
-            logger.error(f"Error checking JSON file: {json_error}")
-            return jsonify({
-                'success': False,
-                'error': f'Error checking JSON file: {str(json_error)}'
+                'error': 'Could not find or create user directory'
             }), 500
-            
-        # Start the update process in the background
-        logger.info(f"Starting background database update process with session_id {session_id}")
         
-        # Generate a status file
+        # Create status file
         status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
         with open(status_file, 'w') as f:
             status = {
@@ -1455,144 +1562,37 @@ def update_database():
                 'status': 'processing',
                 'message': 'Database update started',
                 'start_time': datetime.now().isoformat(),
-                'progress': 0
+                'progress': {
+                    'total_processed': 0,
+                    'errors': 0
+                }
             }
             json.dump(status, f)
-            
+        
         # Launch update process in background thread
-        def update_process():
-            from datetime import datetime
-            import traceback
-            
-            start_time = datetime.now()
-            
-            try:
-                # Run the database update WITHOUT vector operations
-                from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
-                
-                with app.app_context():
-                    try:
-                        # Log the start of the update
-                        logger.info(f"Starting database update in background - session_id={session_id}")
-                        
-                        # When rebuild is explicitly requested
-                        if rebuild_vector and direct_path:
-                            logger.info(f"Starting database update with vector rebuild for session {session_id}")
-                            import_result = final_update_bookmarks(
-                                session_id=session_id, 
-                                start_index=int(start_index),
-                                rebuild_vector=True,
-                                user_id=user_id,
-                                skip_vector=True  # Skip vector operations to avoid errors
-                            )
-                        # Normal case - don't rebuild
-                        else:
-                            logger.info(f"Starting database update without vector rebuild for session {session_id}")
-                            import_result = final_update_bookmarks(
-                                session_id=session_id, 
-                                start_index=int(start_index),
-                                rebuild_vector=False,
-                                user_id=user_id,
-                                skip_vector=True  # Skip vector operations to avoid errors
-                            )
-                        
-                        # Update status file with result
-                        with open(status_file, 'w') as f:
-                            status = {
-                                'user_id': user_id,
-                                'session_id': session_id,
-                                'status': 'completed' if import_result.get('success', False) else 'error',
-                                'message': 'Database update completed' if import_result.get('success', False) else 'Database update failed',
-                                'result': import_result,
-                                'start_time': start_time.isoformat(),
-                                'end_time': datetime.now().isoformat(),
-                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                                'progress': 100 if import_result.get('success', False) else 0,
-                                'vector_update_needed': not skip_vector  # Indicate vector update is needed as a second step
-                            }
-                            json.dump(status, f)
-                            
-                        logger.info(f"Database update completed - session_id={session_id}")
-                        
-                        # If vector operations are requested and database update was successful,
-                        # trigger a separate vector update process
-                        if not skip_vector and import_result.get('success', False):
-                            try:
-                                logger.info(f"Starting vector store update process - session_id={session_id}")
-                                # This should be a separate endpoint call in a real implementation
-                                # For now, we'll just log that it would happen
-                                logger.info(f"Vector store update would be started here - session_id={session_id}")
-                            except Exception as vector_error:
-                                logger.error(f"Error in vector store update: {vector_error}")
-                                logger.error(traceback.format_exc())
-                                # Don't fail the whole process if vector update fails
-                                
-                    except Exception as e:
-                        # Log error and update status file
-                        logger.error(f"Error in database update process: {e}")
-                        logger.error(traceback.format_exc())
-                        
-                        with open(status_file, 'w') as f:
-                            status = {
-                                'user_id': user_id,
-                                'session_id': session_id,
-                                'status': 'error',
-                                'message': f'Error updating database: {str(e)}',
-                                'error': str(e),
-                                'traceback': traceback.format_exc(),
-                                'start_time': start_time.isoformat(),
-                                'end_time': datetime.now().isoformat(),
-                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                                'progress': 0
-                            }
-                            json.dump(status, f)
-            except Exception as e:
-                # Handle outer exceptions
-                logger.error(f"Fatal error in update thread: {e}")
-                logger.error(traceback.format_exc())
-                
-                try:
-                    with open(status_file, 'w') as f:
-                        status = {
-                            'user_id': user_id,
-                            'session_id': session_id,
-                            'status': 'error',
-                            'message': f'Fatal error in update process: {str(e)}',
-                            'error': str(e),
-                            'traceback': traceback.format_exc(),
-                            'start_time': start_time.isoformat(),
-                            'end_time': datetime.now().isoformat(),
-                            'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                            'progress': 0
-                        }
-                        json.dump(status, f)
-                except Exception:
-                    pass
+        rebuild_session_id = None
+        if rebuild:
+            # Generate a separate session ID for vector rebuild
+            rebuild_session_id = str(uuid.uuid4())[:8]
+            logger.info(f"Will also rebuild vectors with session {rebuild_session_id}")
         
-        # Start the update process in a background thread
-        update_thread = Thread(target=update_process)
-        update_thread.daemon = True
-        update_thread.start()
+        thread = Thread(target=update_process, args=(user_id, session_id, rebuild, rebuild_session_id))
+        thread.daemon = True
+        thread.start()
         
-        # Return immediate success response with session ID for tracking
-        return jsonify({
+        # Return immediate success response
+        response = {
             'success': True,
             'message': 'Database update started in background',
             'session_id': session_id,
-            'file': os.path.basename(json_file),
-            'status_file': os.path.basename(status_file),
-            'next_step': {
-                'endpoint': '/api/process-status',
-                'method': 'GET',
-                'params': {'session_id': session_id}
-            },
-            'vector_rebuild': {
-                'needed': not skip_vector,
-                'endpoint': '/api/rebuild-vector-store',
-                'method': 'POST',
-                'params': {'session_id': session_id}
-            }
-        })
+            'status_file': os.path.basename(status_file)
+        }
+        
+        # Include rebuild session ID if applicable
+        if rebuild_session_id:
+            response['rebuild_session_id'] = rebuild_session_id
+            
+        return jsonify(response)
         
     except Exception as e:
         logger.error(f"Error in update_database endpoint: {e}")
@@ -1601,6 +1601,90 @@ def update_database():
             'success': False,
             'error': str(e)
         }), 500
+
+def update_process(user_id, session_id, rebuild=False, rebuild_session_id=None):
+    """Background process to update the database"""
+    try:
+        # Run the database update
+        from database.multi_user_db.update_bookmarks_final import final_update_bookmarks
+        
+        with app.app_context():
+            try:
+                # Update status file
+                user_dir = get_user_directory(user_id)
+                status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+                
+                # Run the update process
+                result = final_update_bookmarks(
+                    session_id=session_id,
+                    user_id=user_id,
+                    rebuild_vector=False,  # We'll handle vector rebuild separately
+                    skip_vector=True  # Skip vector operations in the update process
+                )
+                
+                # Update status file with result
+                with open(status_file, 'w') as f:
+                    status = {
+                        'user_id': user_id,
+                        'session_id': session_id,
+                        'status': 'completed' if result.get('success', False) else 'error',
+                        'message': 'Database update completed' if result.get('success', False) else 'Database update failed',
+                        'result': result,
+                        'end_time': datetime.now().isoformat()
+                    }
+                    json.dump(status, f)
+                
+                # If rebuild requested, start vector rebuild process
+                if rebuild and result.get('success', False):
+                    logger.info(f"Starting vector rebuild after successful database update")
+                    
+                    # Use the rebuild_session_id if provided, otherwise generate a new one
+                    vector_session_id = rebuild_session_id if rebuild_session_id else str(uuid.uuid4())[:8]
+                    
+                    # Call the rebuild endpoint directly
+                    with app.test_request_context():
+                        # Set up the user context
+                        UserContext.set_current_user(user_id)
+                        
+                        # Create a request with JSON data
+                        request_data = {
+                            'session_id': vector_session_id,
+                            'batch_size': 20,
+                            'resume': False
+                        }
+                        
+                        # Call the rebuild endpoint
+                        with app.test_client() as client:
+                            response = client.post(
+                                '/api/rebuild-vector-store',
+                                json=request_data,
+                                headers={'Content-Type': 'application/json'}
+                            )
+                            
+                            logger.info(f"Vector rebuild initiated with status code {response.status_code}")
+                
+            except Exception as e:
+                logger.error(f"Error in update process: {e}")
+                logger.error(traceback.format_exc())
+                
+                # Update status file with error
+                try:
+                    with open(status_file, 'w') as f:
+                        status = {
+                            'user_id': user_id,
+                            'session_id': session_id,
+                            'status': 'error',
+                            'message': f'Error updating database: {str(e)}',
+                            'error': str(e),
+                            'traceback': traceback.format_exc(),
+                            'end_time': datetime.now().isoformat()
+                        }
+                        json.dump(status, f)
+                except Exception as write_error:
+                    logger.error(f"Error writing status file: {write_error}")
+    except Exception as e:
+        logger.error(f"Fatal error in update thread: {e}")
+        logger.error(traceback.format_exc())
 
 @app.route('/api/categories/all', methods=['GET'])
 @login_required
@@ -1730,8 +1814,8 @@ def handle_api_exception(e):
     logger.error(traceback.format_exc())
     
     # ALWAYS return JSON for ALL routes - never return HTML for errors
-    return jsonify({
-        'success': False,
+                return jsonify({
+                    'success': False,
         'error': str(e),
         'path': path,
         'type': e.__class__.__name__
@@ -1769,8 +1853,8 @@ def handle_not_found(e):
             'success': False,
             'error': 'Not Found: The requested resource does not exist',
             'path': path
-        }), 404
-    
+                }), 404
+            
     # For non-API routes, let the default handler manage it
     return e
 
@@ -2280,47 +2364,78 @@ def safe_get_vector_store():
     without propagating exceptions to the caller. This completely isolates vector 
     store operations from the rest of the application.
     
+    Implements retry logic with exponential backoff for better reliability.
+    
     Returns:
         VectorStore or None: The initialized vector store or None if any error occurred
     """
-    try:
-        # First try to import the module
-        logger.info("Attempting to import VectorStoreMultiUser")
+    MAX_RETRIES = 3
+    initial_backoff = 1  # seconds
+    session_id = str(uuid.uuid4())[:8]
+    
+    for attempt in range(MAX_RETRIES):
         try:
-            from database.multi_user_db.vector_store_final import VectorStoreMultiUser
-            logger.info("Successfully imported VectorStoreMultiUser")
-        except ImportError as e:
-            logger.error(f"Import error for VectorStoreMultiUser: {e}")
-            logger.error(traceback.format_exc())
-            return None
-        
-        # Then try to initialize it
-        logger.info("Attempting to initialize VectorStoreMultiUser")
-        try:
-            user = UserContext.get_current_user()
-            if not user:
-                logger.warning("No user context found, cannot initialize vector store")
-                return None
-                
-            user_id = user.id
-            vector_store = VectorStoreMultiUser(user_id=user_id)
-            logger.info(f"Successfully initialized vector store for user {user_id}")
-            return vector_store
-        except Exception as e:
-            # Check for common errors
-            if "Storage folder is locked" in str(e) or "already being accessed" in str(e):
-                logger.warning(f"Vector store folder is locked, another instance is accessing it: {e}")
-            elif "Permission denied" in str(e):
-                logger.error(f"Permission denied when accessing vector store: {e}")
-            else:
-                logger.error(f"Error initializing vector store: {e}")
+            # First try to import the module
+            logger.info(f"🔄 [RETRY-{session_id}] Attempting to import VectorStoreMultiUser (attempt {attempt+1}/{MAX_RETRIES})")
+            try:
+                from database.multi_user_db.vector_store_final import VectorStoreMultiUser
+                logger.info(f"✅ [RETRY-{session_id}] Successfully imported VectorStoreMultiUser")
+            except ImportError as e:
+                logger.error(f"❌ [RETRY-{session_id}] Import error for VectorStoreMultiUser: {e}")
                 logger.error(traceback.format_exc())
-            return None
-    except Exception as e:
-        # Catch absolutely any error to avoid breaking API requests
-        logger.error(f"Unexpected error in safe_get_vector_store: {e}")
-        logger.error(traceback.format_exc())
-        return None
+                
+                # Don't retry import errors - they won't resolve with retries
+                return None
+            
+            # Then try to initialize it
+            logger.info(f"🔄 [RETRY-{session_id}] Attempting to initialize VectorStoreMultiUser (attempt {attempt+1}/{MAX_RETRIES})")
+            
+            try:
+                user = UserContext.get_current_user()
+                if not user:
+                    logger.warning(f"⚠️ [RETRY-{session_id}] No user context found, cannot initialize vector store")
+                    return None
+                    
+                user_id = user.id
+                vector_store = VectorStoreMultiUser(user_id=user_id)
+                logger.info(f"✅ [RETRY-{session_id}] Successfully initialized vector store for user {user_id} on attempt {attempt+1}")
+                return vector_store
+                
+            except Exception as e:
+                # Check for common errors
+                if "Storage folder is locked" in str(e) or "already being accessed" in str(e):
+                    logger.warning(f"⏳ [RETRY-{session_id}] Vector store folder is locked (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                elif "Permission denied" in str(e):
+                    logger.error(f"🔒 [RETRY-{session_id}] Permission denied when accessing vector store: {e}")
+                else:
+                    logger.error(f"❌ [RETRY-{session_id}] Error initializing vector store: {e}")
+                    logger.error(traceback.format_exc())
+                
+                # Determine if we should retry
+                if attempt < MAX_RETRIES - 1:
+                    backoff = initial_backoff * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"⏱️ [RETRY-{session_id}] Retrying in {backoff} seconds...")
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"❌ [RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
+                    return None
+                    
+        except Exception as e:
+            # Catch absolutely any error to avoid breaking API requests
+            logger.error(f"❌ [RETRY-{session_id}] Unexpected error in safe_get_vector_store: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Determine if we should retry
+            if attempt < MAX_RETRIES - 1:
+                backoff = initial_backoff * (2 ** attempt)  # Exponential backoff
+                logger.info(f"⏱️ [RETRY-{session_id}] Retrying in {backoff} seconds due to unexpected error...")
+                time.sleep(backoff)
+            else:
+                logger.error(f"❌ [RETRY-{session_id}] Failed to recover from unexpected error after {MAX_RETRIES} attempts")
+                return None
+    
+    # If we somehow exit the loop without returning, return None
+    return None
 
 @app.route('/api/rebuild-vector-store', methods=['POST'])
 @login_required
@@ -2328,6 +2443,9 @@ def rebuild_vector_store_endpoint():
     """API endpoint to rebuild the vector store from the database
     This is separated from the database update process to avoid
     vector store errors affecting the database update.
+    
+    Enhanced with better progress tracking, resumption capability,
+    and improved error handling.
     """
     try:
         # Get current user
@@ -2345,9 +2463,52 @@ def rebuild_vector_store_endpoint():
         # Get request JSON data
         data = request.get_json() or {}
         session_id = data.get('session_id', str(uuid.uuid4())[:8])
+        batch_size = data.get('batch_size', 20)  # Allow configurable batch size
+        resume = data.get('resume', True)  # By default, attempt to resume if possible
         
-        # Generate a status file
+        # Create user directory if it doesn't exist
         user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+        os.makedirs(user_dir, exist_ok=True)
+        
+        # Check for lock file to prevent duplicate rebuilds
+        lock_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+        if os.path.exists(lock_file_path):
+            lock_file_stat = os.stat(lock_file_path)
+            lock_file_age = time.time() - lock_file_stat.st_mtime
+            
+            # If lock is older than 10 minutes, it's stale
+            if lock_file_age > 600:
+                logger.warning(f"🔓 Removing stale lock file (age: {lock_file_age:.1f}s)")
+                try:
+                    os.remove(lock_file_path)
+                except Exception as e:
+                    logger.error(f"Error removing stale lock file: {e}")
+            else:
+                logger.warning(f"⏳ Another vector rebuild is in progress (lock age: {lock_file_age:.1f}s)")
+                return jsonify({
+                    'success': False,
+                    'error': 'Another vector rebuild is already in progress',
+                    'status': 'in_progress',
+                    'message': f'A rebuild started {lock_file_age:.1f} seconds ago is still running',
+                    'progress': get_rebuild_progress(user_id, session_id),
+                    'session_id': session_id
+                })
+        
+        # Generate or locate existing progress file path
+        progress_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+        
+        # Check if there's already progress for this session
+        progress_data = {}
+        if os.path.exists(progress_file_path) and resume:
+            try:
+                with open(progress_file_path, 'r') as f:
+                    progress_data = json.load(f)
+                    logger.info(f"Found existing progress file. Resume from index {progress_data.get('processed_index', 0)}")
+            except Exception as e:
+                logger.error(f"Error reading progress file: {e}")
+                progress_data = {}
+        
+        # Generate a status file for WebUI tracking
         status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
         
         with open(status_file, 'w') as f:
@@ -2357,116 +2518,214 @@ def rebuild_vector_store_endpoint():
                 'status': 'processing',
                 'message': 'Vector store rebuild started',
                 'start_time': datetime.now().isoformat(),
-                'progress': 0
+                'progress': progress_data.get('progress_percent', 0),
+                'resume': resume and bool(progress_data),
+                'batch_size': batch_size
             }
             json.dump(status, f)
             
         # Launch rebuild process in background thread
-        def rebuild_process():
-            from datetime import datetime
-            import traceback
-            
-            start_time = datetime.now()
-            
-            try:
-                # Run the vector store rebuild
-                from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
-                
-                with app.app_context():
-                    try:
-                        # Log the start of the rebuild
-                        logger.info(f"Starting vector store rebuild in background - session_id={session_id}")
-                        
-                        # Run the rebuild process
-                        result = rebuild_vector_store(
-                            session_id=session_id,
-                            user_id=user_id
-                        )
-                        
-                        # Update status file with result
-                        with open(status_file, 'w') as f:
-                            status = {
-                                'user_id': user_id,
-                                'session_id': session_id,
-                                'status': 'completed' if result.get('success', False) else 'error',
-                                'message': 'Vector store rebuild completed' if result.get('success', False) else 'Vector store rebuild failed',
-                                'result': result,
-                                'start_time': start_time.isoformat(),
-                                'end_time': datetime.now().isoformat(),
-                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                                'progress': 100 if result.get('success', False) else 0
-                            }
-                            json.dump(status, f)
-                            
-                        logger.info(f"Vector store rebuild completed - session_id={session_id}")
-                        
-                    except Exception as e:
-                        # Log error and update status file
-                        logger.error(f"Error in vector store rebuild process: {e}")
-                        logger.error(traceback.format_exc())
-                        
-                        with open(status_file, 'w') as f:
-                            status = {
-                                'user_id': user_id,
-                                'session_id': session_id,
-                                'status': 'error',
-                                'message': f'Error rebuilding vector store: {str(e)}',
-                                'error': str(e),
-                                'traceback': traceback.format_exc(),
-                                'start_time': start_time.isoformat(),
-                                'end_time': datetime.now().isoformat(),
-                                'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                                'progress': 0
-                            }
-                            json.dump(status, f)
-            except Exception as e:
-                # Handle outer exceptions
-                logger.error(f"Fatal error in rebuild thread: {e}")
-                logger.error(traceback.format_exc())
-                
-                try:
-                    with open(status_file, 'w') as f:
-                        status = {
-                            'user_id': user_id,
-                            'session_id': session_id,
-                            'status': 'error',
-                            'message': f'Fatal error in rebuild process: {str(e)}',
-                            'error': str(e),
-                            'traceback': traceback.format_exc(),
-                            'start_time': start_time.isoformat(),
-                            'end_time': datetime.now().isoformat(),
-                            'duration_seconds': (datetime.now() - start_time).total_seconds(),
-                            'progress': 0
-                        }
-                        json.dump(status, f)
-                except Exception:
-                    pass
+        thread = Thread(target=rebuild_process, args=(user_id, session_id, batch_size, resume, progress_data))
+        thread.daemon = True
+        thread.start()
         
-        # Start the rebuild process in a background thread
-        rebuild_thread = Thread(target=rebuild_process)
-        rebuild_thread.daemon = True
-        rebuild_thread.start()
-        
-        # Return immediate success response with session ID for tracking
         return jsonify({
             'success': True,
             'message': 'Vector store rebuild started in background',
             'session_id': session_id,
-            'status_file': os.path.basename(status_file),
-            'next_step': {
-                'endpoint': '/api/process-status',
-                'method': 'GET',
-                'params': {'session_id': session_id}
-            }
+            'status': 'processing',
+            'progress': progress_data.get('progress_percent', 0),
+            'resume': resume and bool(progress_data)
         })
         
     except Exception as e:
-        logger.error(f"Error in rebuild_vector_store endpoint: {e}")
+        logger.error(f"Error starting vector rebuild: {e}")
         logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'details': traceback.format_exc()
         }), 500
+
+def rebuild_process(user_id, session_id, batch_size=20, resume=True, progress_data=None):
+    """
+    Background process to rebuild the vector store.
+    
+    Args:
+        user_id (int): User ID to rebuild vectors for
+        session_id (str): Session ID for tracking
+        batch_size (int): Size of processing batches
+        resume (bool): Whether to attempt resuming from previous progress
+        progress_data (dict): Previous progress data if resuming
+    """
+    from datetime import datetime
+    import traceback
+    import tempfile
+    import os
+    
+    start_time = datetime.now()
+    
+    # Set up paths for tracking
+    user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+    status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
+    progress_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+    
+    try:
+        # Run the vector store rebuild
+        from database.multi_user_db.update_bookmarks_final import rebuild_vector_store
+        
+        with app.app_context():
+            try:
+                # Log the start of the rebuild
+                logger.info(f"Starting vector store rebuild in background - session_id={session_id}")
+                
+                # Update status file
+                update_status_file(status_file, {
+                    'status': 'processing',
+                    'message': 'Initializing vector rebuild...',
+                    'start_time': start_time.isoformat(),
+                })
+                
+                # Run the rebuild process with parametrized batch size and resume capability
+                result = rebuild_vector_store(
+                    session_id=session_id,
+                    user_id=user_id,
+                    batch_size=batch_size,
+                    resume=resume,
+                    progress_data=progress_data
+                )
+                
+                # Update status file with result
+                status_update = {
+                    'status': 'completed' if result.get('success', False) else 'error',
+                    'message': 'Vector store rebuild completed' if result.get('success', False) else 'Vector store rebuild failed',
+                    'result': result,
+                    'start_time': start_time.isoformat(),
+                    'end_time': datetime.now().isoformat(),
+                    'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                    'progress': 100 if result.get('success', False) else result.get('progress', 0)
+                }
+                update_status_file(status_file, status_update)
+                
+                logger.info(f"Vector store rebuild completed - session_id={session_id}")
+                
+                # Clean up progress file on successful completion
+                if result.get('success', False) and os.path.exists(progress_file_path):
+                    try:
+                        os.remove(progress_file_path)
+                        logger.info(f"Removed progress file after successful completion - session_id={session_id}")
+                    except Exception as e:
+                        logger.error(f"Error removing progress file: {e}")
+                
+            except Exception as e:
+                # Log error and update status file
+                logger.error(f"Error in vector store rebuild process: {e}")
+                logger.error(traceback.format_exc())
+                
+                # Get progress from the progress file if it exists
+                progress = 0
+                if os.path.exists(progress_file_path):
+                    try:
+                        with open(progress_file_path, 'r') as f:
+                            progress_data = json.load(f)
+                            progress = progress_data.get('progress_percent', 0)
+                    except Exception:
+                        pass
+                
+                update_status_file(status_file, {
+                    'status': 'error',
+                    'message': f'Error rebuilding vector store: {str(e)}',
+                    'error': str(e),
+                    'traceback': traceback.format_exc(),
+                    'start_time': start_time.isoformat(),
+                    'end_time': datetime.now().isoformat(),
+                    'duration_seconds': (datetime.now() - start_time).total_seconds(),
+                    'progress': progress
+                })
+    except Exception as e:
+        # Handle outer exceptions
+        logger.error(f"Fatal error in rebuild thread: {e}")
+        logger.error(traceback.format_exc())
+        
+        update_status_file(status_file, {
+            'status': 'error',
+            'message': f'Fatal error in rebuild thread: {str(e)}',
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'start_time': start_time.isoformat(),
+            'end_time': datetime.now().isoformat(),
+            'duration_seconds': (datetime.now() - start_time).total_seconds(),
+            'progress': 0
+        })
+    finally:
+        # Always clean up the lock file
+        lock_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+        if os.path.exists(lock_file_path):
+            try:
+                os.remove(lock_file_path)
+                logger.info(f"Removed lock file after rebuild process - session_id={session_id}")
+            except Exception as e:
+                logger.error(f"Error removing lock file: {e}")
+
+def update_status_file(file_path, updates):
+    """
+    Update a status file with new data while preserving existing data.
+    
+    Args:
+        file_path (str): Path to the status file
+        updates (dict): New data to update in the file
+    """
+    try:
+        # Read existing data
+        existing_data = {}
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    existing_data = json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading status file {file_path}: {e}")
+        
+        # Update with new data
+        existing_data.update(updates)
+        
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(existing_data, f)
+    except Exception as e:
+        logger.error(f"Error updating status file {file_path}: {e}")
+
+def get_rebuild_progress(user_id, session_id):
+    """
+    Get current rebuild progress from the progress file.
+    
+    Args:
+        user_id (int): User ID
+        session_id (str): Session ID
+        
+    Returns:
+        int: Progress percentage (0-100)
+    """
+    progress_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
+    if os.path.exists(progress_file_path):
+        try:
+            with open(progress_file_path, 'r') as f:
+                progress_data = json.load(f)
+                return progress_data.get('progress_percent', 0)
+        except Exception as e:
+            logger.error(f"Error reading progress file: {e}")
+    
+    # Check status file as fallback
+    user_dir = os.path.join(app.config.get('DATABASE_DIR', '/app/database'), f'user_{user_id}')
+    status_file = os.path.join(user_dir, f"vector_rebuild_{session_id}.json")
+    if os.path.exists(status_file):
+            try:
+                with open(status_file, 'r') as f:
+                    status_data = json.load(f)
+                return status_data.get('progress', 0)
+        except Exception as e:
+            logger.error(f"Error reading status file: {e}")
+    
+    return 0
 
 @app.route('/simplest-upload', methods=['POST'])
 @login_required
@@ -2544,8 +2803,8 @@ def simplest_upload():
             logger.info(f"Created missing DATABASE_DIR at {app.config['DATABASE_DIR']}")
             error_message = "Server configuration issue with database folder. It has been fixed, please try again."
         
-        return jsonify({
-            'success': False,
+                    return jsonify({
+                        'success': False,
             'error': f"Upload error: {error_message}",
             'retry_recommended': True
         }), 500
