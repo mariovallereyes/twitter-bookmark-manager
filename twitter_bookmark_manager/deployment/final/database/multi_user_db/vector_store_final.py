@@ -22,6 +22,7 @@ import random
 import string
 import threading
 import filelock
+import numpy as np
 
 # Import sentence transformers for embeddings
 from sentence_transformers import SentenceTransformer
@@ -44,6 +45,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('vector_store_final')
+
+# Constants
+BASE_DIR = os.environ.get('APP_BASE_DIR', '/app')
+DATABASE_DIR = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database'))
+VECTOR_STORE_PATH = os.path.join(BASE_DIR, "twitter_bookmark_manager", "data", "vector_store")
+
+# Ensure vector store directory exists
+os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
 
 class VectorStoreMultiUser:
     """
@@ -154,41 +163,73 @@ class VectorStore:
     """
     
     def __init__(self, collection_name="bookmarks"):
+        """Initialize the vector store with retries and proper cleanup."""
         self.collection_name = collection_name
-        self.vector_size = 384  # for all-MiniLM-L6-v2
-        self.model = None
         self.client = None
-        self._initialize_client()
+        self.max_retries = 3
+        self.retry_delay = 1
+        self._initialize_client_with_retry()
 
-    def _initialize_client(self):
-        if self.client is not None:
+    def _initialize_client_with_retry(self):
+        """Initialize Qdrant client with retry mechanism."""
+        import time
+        import random
+        from qdrant_client import QdrantClient
+        from qdrant_client.http import models
+        
+        attempt = 0
+        last_error = None
+        
+        while attempt < self.max_retries:
+            try:
+                # Clean up any existing connections first
+                if self.client:
+                    try:
+                        self.client.close()
+                    except:
+                        pass
+                    self.client = None
+                
+                # Try to remove lock file if it exists
+                lock_file = os.path.join(VECTOR_STORE_PATH, "qdrant.lock")
+                if os.path.exists(lock_file):
+                    try:
+                        os.remove(lock_file)
+                        logger.info("Removed existing lock file")
+                    except:
+                        pass
+                
+                # Initialize new client
+                self.client = QdrantClient(
+                    path=VECTOR_STORE_PATH,
+                    force_disable_server_version_check=True
+                )
+                
+                # Test the connection
+                self.client.get_collections()
+                logger.info("Successfully initialized vector store client")
+                return
+                
+            except Exception as e:
+                last_error = e
+                attempt += 1
+                if attempt < self.max_retries:
+                    wait_time = self.retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.1)
+                    logger.warning(f"Vector store initialization attempt {attempt} failed: {str(e)}. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    
+        # If we get here, all retries failed
+        logger.error(f"Failed to initialize vector store after {self.max_retries} attempts: {str(last_error)}")
+        raise RuntimeError(f"Could not initialize vector store: {str(last_error)}")
+
+    def __del__(self):
+        """Ensure proper cleanup on deletion."""
+        if self.client:
             try:
                 self.client.close()
             except:
                 pass
-        
-        # Use Railway's volume mount path for persistent storage
-        storage_path = "/app/twitter_bookmark_manager/data/vector_store"
-        
-        try:
-            # First try to connect to existing client
-            self.client = QdrantClient(
-                path=storage_path,
-                force_new_instance=True  # Force new instance to avoid conflicts
-            )
-            logging.info(f"Successfully initialized Qdrant client with storage at {storage_path}")
-        except Exception as e:
-            logging.error(f"Error initializing Qdrant client: {e}")
-            raise
-
-    def __del__(self):
-        """Cleanup when the instance is destroyed"""
-        if self.client is not None:
-            try:
-                self.client.close()
-                logging.info("Qdrant client closed successfully")
-            except Exception as e:
-                logging.error(f"Error closing Qdrant client: {e}")
+            self.client = None
 
     def _ensure_model_loaded(self):
         """Ensure the model is loaded before using it"""
@@ -408,7 +449,7 @@ class VectorStore:
         """Rebuild vectors for a user's bookmarks in batches"""
         try:
             # Re-initialize client to ensure clean state
-            self._initialize_client()
+            self._initialize_client_with_retry()
             
             collection_name = f"{self.collection_name}_{user_id}"
             logging.info(f"Starting vector rebuild for user {user_id} in collection {collection_name}")
