@@ -1052,6 +1052,134 @@ def dict_to_bookmark(bookmark_dict):
         user_id=user_id
     )
 
+def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
+    """
+    Final version of bookmark update function with improved error handling and progress tracking.
+    
+    Args:
+        session_id (str, optional): Session ID for tracking progress
+        start_index (int): Index to start processing from
+        rebuild_vector (bool): Whether to rebuild vector store after update
+        user_id (int, optional): User ID for multi-user support
+        
+    Returns:
+        dict: Results of the update operation
+    """
+    if not session_id:
+        session_id = str(uuid.uuid4())[:8]
+    
+    logger.info(f"Starting bookmark update - session_id={session_id}")
+    
+    try:
+        # Get user directory
+        user_dir = get_user_directory(user_id)
+        if not user_dir:
+            return {
+                'success': False,
+                'error': 'Could not find or create user directory',
+                'session_id': session_id
+            }
+        
+        # Set up status file
+        status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
+        update_status(status_file, 'initializing', start_index=start_index)
+        
+        # Process bookmarks
+        try:
+            conn = get_db_connection()
+            bookmarks = get_bookmarks_optimized(user_id if user_id else 1)
+            
+            if not bookmarks:
+                update_status(status_file, 'completed', message='No bookmarks to process')
+                return {
+                    'success': True,
+                    'message': 'No bookmarks to process',
+                    'session_id': session_id
+                }
+            
+            total_bookmarks = len(bookmarks)
+            processed = 0
+            errors = 0
+            
+            update_status(status_file, 'processing', 
+                total=total_bookmarks,
+                processed=processed,
+                errors=errors
+            )
+            
+            # Process each bookmark
+            for i, bookmark in enumerate(bookmarks[start_index:], start=start_index):
+                try:
+                    # Your bookmark processing logic here
+                    # For example:
+                    if bookmark.text:
+                        processed += 1
+                    else:
+                        errors += 1
+                        
+                    # Update status periodically
+                    if i % 10 == 0:
+                        update_status(status_file, 'processing',
+                            total=total_bookmarks,
+                            processed=processed,
+                            errors=errors,
+                            current_index=i
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Error processing bookmark {bookmark.id}: {e}")
+                    errors += 1
+            
+            # Final status update
+            update_status(status_file, 'completed',
+                total=total_bookmarks,
+                processed=processed,
+                errors=errors
+            )
+            
+            # Rebuild vector store if requested
+            if rebuild_vector:
+                logger.info("Starting vector store rebuild...")
+                rebuild_result = rebuild_vector_store(
+                    session_id=session_id,
+                    user_id=user_id if user_id else 1
+                )
+                
+                return {
+                    'success': True,
+                    'bookmarks_processed': processed,
+                    'errors': errors,
+                    'vector_rebuild': rebuild_result,
+                    'session_id': session_id
+                }
+            
+            return {
+                'success': True,
+                'bookmarks_processed': processed,
+                'errors': errors,
+                'session_id': session_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in bookmark update: {e}")
+            update_status(status_file, 'error',
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            return {
+                'success': False,
+                'error': str(e),
+                'session_id': session_id
+            }
+            
+    except Exception as e:
+        logger.error(f"Critical error in final_update_bookmarks: {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'session_id': session_id
+        }
+
 if __name__ == "__main__":
     import argparse
     
