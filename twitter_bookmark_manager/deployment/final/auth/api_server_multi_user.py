@@ -1210,8 +1210,8 @@ def get_categories():
             # Create search instance with user context
             searcher = BookmarkSearchMultiUser(conn, user.id)
             
-            # Get categories with counts
-            categories = searcher.get_categories(user_id=user.id)
+            # Get categories with counts - pass user.id directly
+            categories = searcher.get_categories(user.id)
             
             # Sort alphabetically by name
             categories.sort(key=lambda x: x['name'])

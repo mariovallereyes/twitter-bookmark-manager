@@ -227,8 +227,8 @@ def get_categories():
         # Create search instance
         searcher = BookmarkSearchMultiUser(conn, user_id)
         
-        # Get categories with counts
-        categories = searcher.get_categories(user_id=user_id)
+        # Get categories with counts - pass user_id directly
+        categories = searcher.get_categories(user_id)
         
         return jsonify(categories)
     except Exception as e:
