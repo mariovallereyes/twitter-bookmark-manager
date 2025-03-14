@@ -388,7 +388,7 @@ class VectorStore:
                     
                     # Get a chunk of bookmarks
                     stmt = sql_text("""
-                        SELECT id, text 
+                        SELECT bookmark_id, text 
                         FROM bookmarks 
                         WHERE user_id = :user_id 
                         ORDER BY created_at DESC 
@@ -409,9 +409,9 @@ class VectorStore:
                     valid_bookmarks = []
                     for row in result:
                         if row.text and row.text.strip():
-                            valid_bookmarks.append((row.id, row.text.strip()))
+                            valid_bookmarks.append((row.bookmark_id, row.text.strip()))
                         else:
-                            logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.id} due to empty text")
+                            logger.info(f"⚠️ [REBUILD-{rebuild_id}] Skipping bookmark {row.bookmark_id} due to empty text")
                     
                     logger.info(f"📊 [REBUILD-{rebuild_id}] Processing chunk {offset//CHUNK_SIZE + 1}: {len(valid_bookmarks)} valid bookmarks")
                     
