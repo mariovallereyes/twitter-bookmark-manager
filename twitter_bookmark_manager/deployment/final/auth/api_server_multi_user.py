@@ -184,6 +184,12 @@ app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_FILE_DIR'] = os.path.join(BASE_DIR, 'flask_session')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['SESSION_USE_SIGNER'] = True
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_NAME'] = 'twitter_bookmark_session'
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 # Initialize session
 try:
@@ -193,6 +199,63 @@ except Exception as e:
     logger.warning(f"Could not initialize Flask-Session: {e}")
     logger.info("Continuing with Flask's built-in session management")
     # Continue with Flask's built-in session
+
+# Add a before request handler to log session information
+@app.before_request
+def log_session_info():
+    if request.path.startswith('/static/'):
+        return  # Skip for static files
+    
+    user_id = session.get('user_id')
+    logger.info(f"Request: {request.path} - Session: {session.sid if hasattr(session, 'sid') else 'No SID'} - User ID: {user_id}")
+    
+    # Log when a session is created
+    if not hasattr(g, '_session_accessed'):
+        g._session_accessed = True
+        if not user_id:
+            logger.info(f"Session without user_id accessed: {request.path}")
+        else:
+            logger.info(f"Session with user_id={user_id} accessed: {request.path}")
+
+# Add a before request handler to verify authentication
+@app.before_request
+def check_user_authentication():
+    # Skip check for static files and auth routes
+    if (request.path.startswith('/static/') or 
+        request.path.startswith('/auth/') or 
+        request.path == '/login' or 
+        request.path.startswith('/oauth/callback/')):
+        return
+    
+    # Get user from context or session
+    user_id = session.get('user_id')
+    user = None
+    
+    if user_id:
+        # Try to get user from database
+        try:
+            conn = get_db_connection()
+            from database.multi_user_db.user_model_final import get_user_by_id
+            user = get_user_by_id(conn, user_id)
+            
+            # If user not found but user_id exists in session, clear session
+            if not user:
+                logger.warning(f"User ID {user_id} from session not found in database")
+                session.pop('user_id', None)
+                
+                # Check if this is an AJAX request
+                if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    return jsonify({
+                        'success': False,
+                        'authenticated': False,
+                        'error': 'User not authenticated. Please log out and log in again.'
+                    }), 401
+        except Exception as e:
+            logger.error(f"Error checking user authentication: {e}")
+    
+    # Store user in g for this request
+    g.user = user
+    g.authenticated = user is not None
 
 # Global session status tracking
 session_status: Dict[str, Dict[str, Any]] = {}

@@ -130,12 +130,20 @@ def oauth_callback(provider):
             # Update last login time
             user = update_last_login(conn, user.id)
             
-        # Set user in session
+        # Clear any existing session and set new user
+        session.clear()
+        
+        # Regenerate session to prevent session fixation
+        if hasattr(session, 'regenerate'):
+            session.regenerate()
+            
+        # Set user in session with permanent flag
         session['user_id'] = user.id
         session.permanent = True
+        session.modified = True
         
         # Log the success
-        logger.info(f"User '{user.username}' logged in via {provider}")
+        logger.info(f"User '{user.username}' logged in via {provider} - Session ID: {session.sid if hasattr(session, 'sid') else 'No SID'}")
         
         # Redirect to next URL or home
         next_url = session.pop('next', None)
@@ -157,10 +165,20 @@ def logout():
     user = UserContext.get_current_user()
     if user:
         logger.info(f"User '{user.username}' logged out")
-        
-    # Clear session
+    
+    # Clear all session data
+    user_id = session.get('user_id')
     session.pop('user_id', None)
     session.clear()
+    
+    # Regenerate session to prevent session fixation
+    if hasattr(session, 'regenerate'):
+        session.regenerate()
+    
+    logger.info(f"Session cleared for user_id: {user_id}")
+    
+    # Set a flash message for feedback
+    flash("You have been successfully logged out.", "success")
     
     # Redirect to home
     return redirect(url_for('index'))

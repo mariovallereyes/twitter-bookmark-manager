@@ -16,7 +16,24 @@ class UserContext:
         if not hasattr(g, 'user'):
             user_id = session.get('user_id')
             if user_id:
-                g.user = get_user_by_id(current_app.config['get_db_connection'](), user_id)
+                try:
+                    db_conn = current_app.config.get('get_db_connection')
+                    if not db_conn:
+                        current_app.logger.error("Database connection function not found in app config")
+                        g.user = None
+                        return None
+                        
+                    conn = db_conn()
+                    g.user = get_user_by_id(conn, user_id)
+                    
+                    # If user not found, clear the session
+                    if not g.user:
+                        current_app.logger.warning(f"User ID {user_id} from session not found in database")
+                        session.pop('user_id', None)
+                except Exception as e:
+                    current_app.logger.error(f"Error getting user from database: {e}")
+                    # Don't clear session here - might be a temporary DB issue
+                    g.user = None
             else:
                 g.user = None
         return g.user
@@ -27,8 +44,12 @@ class UserContext:
         g.user = user
         if user:
             session['user_id'] = user.id
+            session.modified = True
+            current_app.logger.info(f"Set user in session: {user.id}")
         else:
             session.pop('user_id', None)
+            session.modified = True
+            current_app.logger.info("Cleared user from session")
             
     @staticmethod
     def is_authenticated():
