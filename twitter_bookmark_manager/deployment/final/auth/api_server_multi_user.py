@@ -42,7 +42,7 @@ from threading import Thread
 from flask_session import Session
 
 # === Local Module Imports ===
-from database.multi_user_db.vector_store_final import get_multi_user_vector_store, VectorStore
+from database.multi_user_db.vector_store_final import get_multi_user_vector_store, VectorStore, cleanup_vector_store
 from auth.user_context import get_current_user
 from auth.user_context_final import login_required, UserContext, UserContextMiddleware, with_user_context
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
@@ -254,6 +254,11 @@ def shutdown_cleanup(exception=None):
     """Clean up resources when the app shuts down."""
     logger.info("Application context tearing down, cleaning up resources")
     cleanup_db_connections()
+    try:
+        cleanup_vector_store()
+        logger.info("Vector store cleaned up during shutdown")
+    except Exception as e:
+        logger.error(f"Error cleaning up vector store: {str(e)}")
 
 # === Request Handlers and Middleware ===
 @app.before_request
