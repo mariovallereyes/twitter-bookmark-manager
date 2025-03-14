@@ -533,312 +533,340 @@ init_app_debug()
 @app.route('/')
 def index():
     """Home page with multiple database connection fallbacks"""
-    logger.info("Home page requested")
-    user = UserContext.get_current_user()
-    
-    # DEBUG: Log user information
-    if user:
-        logger.info(f"USER DEBUG - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
-    else:
-        logger.info("USER DEBUG - No authenticated user")
-    
-    # Choose template based on authentication
-    if user:
-        template = 'index_final.html'
-    else:
-        # Show login page for unauthenticated users
-        logger.info("User not authenticated, redirecting to login")
-        return redirect(url_for('auth.login'))
-    
-    # Track if we've tried all database connection methods
-    all_methods_tried = False
-    categories = []
-    latest_tweets = []  # Initialize latest_tweets
-    error_message = None
-    
-    # Method 1: Direct psycopg2 connection
     try:
-        logger.info("Trying direct psycopg2 connection")
-        db_url = get_db_url()
+        logger.info("Home page requested")
         
-        # Parse the connection string to get connection parameters
-        if 'postgresql://' in db_url:
-            # Extract connection params from sqlalchemy URL
-            conn_parts = db_url.replace('postgresql://', '').split('@')
-            user_pass = conn_parts[0].split(':')
-            host_port_db = conn_parts[1].split('/')
-            host_port = host_port_db[0].split(':')
-            
-            db_user = user_pass[0]
-            db_password = user_pass[1]
-            db_host = host_port[0]
-            db_port = host_port[1] if len(host_port) > 1 else '5432'
-            db_name = host_port_db[1]
-            
-            logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
-            
-            # Connect directly with psycopg2
-            direct_conn = psycopg2.connect(
-                user=db_user,
-                password=db_password,
-                host=db_host,
-                port=db_port,
-                dbname=db_name,
-                connect_timeout=3,
-                application_name='twitter_bookmark_manager_direct'
-            )
-            
-            # Set autocommit to avoid transaction issues
-            direct_conn.autocommit = True
-            
-            # Execute a simple query to get categories
-            cursor = direct_conn.cursor()
-            try:
-                # First try with description column
-                cursor.execute(f"""
-                    SELECT id, name, description 
-                    FROM categories 
-                    WHERE user_id = %s 
-                    ORDER BY name
-                """, (user.id,))
-            except Exception as e:
-                logger.warning(f"Error querying categories with description: {e}")
-                # Fallback query without description
-                cursor.execute(f"""
-                    SELECT id, name, '' as description
-                    FROM categories 
-                    WHERE user_id = %s 
-                    ORDER BY name
-                """, (user.id,))
-            
-            # Fetch categories directly
-            categories = []
-            for row in cursor.fetchall():
-                categories.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'description': row[2]
-                })
-            
-            # Get recent bookmarks
-            try:
-                cursor.execute("""
-                    SELECT 
-                        bookmark_id,
-                        text,
-                        author_name,
-                        author_username,
-                        created_at
-                    FROM bookmarks 
-                    WHERE user_id = %s
-                    ORDER BY created_at DESC 
-                    LIMIT 5
-                """, (user.id,))
-                
-                for row in cursor.fetchall():
-                    tweet = {
-                        'id': row[0],  # Using bookmark_id as id
-                        'text': row[1],
-                        'author': row[2],
-                        'author_username': row[3],
-                        'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                        'categories': []  # Initialize empty categories
-                    }
-                    latest_tweets.append(tweet)
-                
-                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
-            except Exception as e:
-                logger.warning(f"Error getting recent bookmarks: {e}")
-            
-            cursor.close()
-            direct_conn.close()
-            
-            logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
-        else:
-            # Non-PostgreSQL DB, skip to method 2
-            raise Exception("Not a PostgreSQL database, trying SQLAlchemy")
-    except Exception as e:
-        logger.warning(f"Direct psycopg2 connection failed: {e}")
-        error_message = str(e)
-    
-    # Method 2: SQLAlchemy connection if Method 1 failed
-    if not categories:
+        # DEBUG: Check if modules are properly loaded
+        logger.info("DEBUG - Checking module availability")
+        
+        # Initialize variables with safe defaults
+        categories = []
+        latest_tweets = []
+        error_message = None
+        
         try:
-            logger.info("Trying SQLAlchemy connection")
-            # Force reconnect the engine first
-            from database.multi_user_db.db_final import setup_database
-            setup_database(force_reconnect=True)
-            
-            # Get a new connection
-            conn = get_db_connection()
+            # Get current user with proper error handling
+            user = None
             try:
-                searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
-                latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                user = UserContext.get_current_user()
                 
-                # FALLBACK: If no bookmarks found for this user, try getting system bookmarks
-                if len(latest_tweets) == 0 and user and user.id != 1:
-                    logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
-                    
-                    # Try with user_id = 1 (system user)
-                    searcher = BookmarkSearchMultiUser(conn, 1)
-                    latest_tweets = searcher.get_recent_bookmarks(limit=5)
-                    logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
-                    
-                    # If still no results, try with a direct query for ANY bookmarks
-                    if len(latest_tweets) == 0:
-                        logger.warning("No system bookmarks found, trying direct query for any bookmarks")
-                        
-                        # Direct query for any bookmarks
-                        query = """
-                        SELECT id, bookmark_id, text, author, created_at, author_id
-                        FROM bookmarks
-                        ORDER BY created_at DESC
-                        LIMIT 5
-                        """
-                        
-                        if isinstance(conn, sqlalchemy.engine.Connection):
-                            result = conn.execute(text(query))
-                            rows = result.fetchall()
-                        else:
-                            cursor = conn.cursor()
-                            cursor.execute(query)
-                            rows = cursor.fetchall()
-                            
-                        # Format the direct query results
-                        for row in rows:
-                            bookmark = {
-                                'id': row[0],
-                                'bookmark_id': row[1],
-                                'text': row[2],
-                                'author': row[3],
-                                'author_username': row[3].replace('@', '') if row[3] else '',
-                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
-                                'author_id': row[5]
-                            }
-                            latest_tweets.append(bookmark)
-                            
-                        logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"SQLAlchemy connection failed: {e}")
-            if not error_message:
-                error_message = str(e)
-    
-    # Method 3: Direct SQL connection with different parameters if Method 2 failed
-    if not categories:
-        try:
-            logger.info("Trying alternative direct connection")
-            db_url = get_db_url()
+                # DEBUG: Log user information
+                if user:
+                    logger.info(f"USER DEBUG - Authenticated user: ID={user.id}, Name={getattr(user, 'username', 'unknown')}")
+                else:
+                    logger.info("USER DEBUG - No authenticated user")
+            except Exception as user_error:
+                logger.error(f"Error getting current user: {str(user_error)}")
+                logger.error(traceback.format_exc())
+                # Continue without user - we'll handle authentication below
             
-            if 'postgresql://' in db_url:
-                # Extract connection params from sqlalchemy URL (same as Method 1)
-                conn_parts = db_url.replace('postgresql://', '').split('@')
-                user_pass = conn_parts[0].split(':')
-                host_port_db = conn_parts[1].split('/')
-                host_port = host_port_db[0].split(':')
-                
-                db_user = user_pass[0]
-                db_password = user_pass[1]
-                db_host = host_port[0]
-                db_port = host_port[1] if len(host_port) > 1 else '5432'
-                db_name = host_port_db[1]
-                
-                logger.info(f"Trying alternative connection to PostgreSQL")
-                
-                # Try different connection parameters
-                direct_conn = psycopg2.connect(
-                    user=db_user,
-                    password=db_password,
-                    host=db_host,
-                    port=db_port,
-                    dbname=db_name,
-                    connect_timeout=5,  # Longer timeout
-                    application_name='twitter_bookmark_manager_last_resort',
-                    keepalives=1,
-                    keepalives_idle=10,
-                    keepalives_interval=2,
-                    keepalives_count=3
-                )
-                
-                # Important: Set isolation level to avoid transaction issues
-                direct_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-                
-                # Execute a simple query to get categories
-                cursor = direct_conn.cursor()
-                try:
-                    # First try with description column
-                    cursor.execute(f"""
-                        SELECT id, name, description 
-                        FROM categories 
-                        WHERE user_id = %s 
-                        ORDER BY name
-                    """, (user.id,))
-                except Exception as e:
-                    logger.warning(f"Error querying categories with description: {e}")
-                    # Fallback query without description
-                    cursor.execute(f"""
-                        SELECT id, name, '' as description
-                        FROM categories 
-                        WHERE user_id = %s 
-                        ORDER BY name
-                    """, (user.id,))
-                
-                # Fetch categories directly
-                categories = []
-                for row in cursor.fetchall():
-                    categories.append({
-                        'id': row[0],
-                        'name': row[1],
-                        'description': row[2]
-                    })
-                
-                cursor.close()
-                direct_conn.close()
-                
-                logger.info(f"Successfully loaded {len(categories)} categories via alternative connection")
+            # Choose template based on authentication
+            if user:
+                template = 'index_final.html'
             else:
-                # Skip for non-PostgreSQL
-                all_methods_tried = True
-        except Exception as e:
-            logger.warning(f"Alternative direct connection failed: {e}")
-            if not error_message:
+                # Show login page for unauthenticated users
+                logger.info("User not authenticated, redirecting to login")
+                try:
+                    return redirect(url_for('auth.login'))
+                except Exception as redirect_error:
+                    logger.error(f"Error redirecting to login: {str(redirect_error)}")
+                    # Fallback with basic auth page if redirect fails
+                    return render_template('login_final.html', error="Please login to continue")
+            
+            # Track if we've tried all database connection methods
+            all_methods_tried = False
+            
+            # Method 1: Direct psycopg2 connection
+            try:
+                logger.info("Trying direct psycopg2 connection")
+                db_url = get_db_url()
+                
+                # Parse the connection string to get connection parameters
+                if 'postgresql://' in db_url:
+                    # Extract connection params from sqlalchemy URL
+                    conn_parts = db_url.replace('postgresql://', '').split('@')
+                    user_pass = conn_parts[0].split(':')
+                    host_port_db = conn_parts[1].split('/')
+                    host_port = host_port_db[0].split(':')
+                    
+                    db_user = user_pass[0]
+                    db_password = user_pass[1]
+                    db_host = host_port[0]
+                    db_port = host_port[1] if len(host_port) > 1 else '5432'
+                    db_name = host_port_db[1]
+                    
+                    logger.info(f"Connecting directly to PostgreSQL at {db_host}:{db_port}/{db_name}")
+                    
+                    # Connect directly with psycopg2
+                    direct_conn = psycopg2.connect(
+                        user=db_user,
+                        password=db_password,
+                        host=db_host,
+                        port=db_port,
+                        dbname=db_name,
+                        connect_timeout=3,
+                        application_name='twitter_bookmark_manager_direct'
+                    )
+                    
+                    # Set autocommit to avoid transaction issues
+                    direct_conn.autocommit = True
+                    
+                    # Execute a simple query to get categories
+                    cursor = direct_conn.cursor()
+                    try:
+                        # First try with description column
+                        cursor.execute(f"""
+                            SELECT id, name, description 
+                            FROM categories 
+                            WHERE user_id = %s 
+                            ORDER BY name
+                        """, (user.id,))
+                    except Exception as e:
+                        logger.warning(f"Error querying categories with description: {e}")
+                        # Fallback query without description
+                        cursor.execute(f"""
+                            SELECT id, name, '' as description
+                            FROM categories 
+                            WHERE user_id = %s 
+                            ORDER BY name
+                        """, (user.id,))
+                    
+                    # Fetch categories directly
+                    categories = []
+                    for row in cursor.fetchall():
+                        categories.append({
+                            'id': row[0],
+                            'name': row[1],
+                            'description': row[2]
+                        })
+                    
+                    # Get recent bookmarks
+                    try:
+                        cursor.execute("""
+                            SELECT 
+                                bookmark_id,
+                                text,
+                                author_name,
+                                author_username,
+                                created_at
+                            FROM bookmarks 
+                            WHERE user_id = %s
+                            ORDER BY created_at DESC 
+                            LIMIT 5
+                        """, (user.id,))
+                        
+                        for row in cursor.fetchall():
+                            tweet = {
+                                'id': row[0],  # Using bookmark_id as id
+                                'text': row[1],
+                                'author': row[2],
+                                'author_username': row[3],
+                                'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                'categories': []  # Initialize empty categories
+                            }
+                            latest_tweets.append(tweet)
+                        
+                        logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                    except Exception as e:
+                        logger.warning(f"Error getting recent bookmarks: {e}")
+                    
+                    cursor.close()
+                    direct_conn.close()
+                    
+                    logger.info(f"Successfully loaded {len(categories)} categories directly for user {user.id}")
+                else:
+                    # Non-PostgreSQL DB, skip to method 2
+                    raise Exception("Not a PostgreSQL database, trying SQLAlchemy")
+            except Exception as e:
+                logger.warning(f"Direct psycopg2 connection failed: {e}")
                 error_message = str(e)
-            all_methods_tried = True
-    
-    # At this point, we've tried all database methods
-    if not categories:
-        all_methods_tried = True
-    
-    # Check if user is admin
-    is_admin = getattr(user, 'is_admin', False)
-    
-    # If all database methods failed, show a simplified interface with error message
-    if all_methods_tried and error_message and not categories:
-        logger.error(f"All database connection methods failed. Last error: {error_message}")
-        
-        # Return a simplified interface
-        return render_template(
-            template, 
-            categories=[],  # Empty categories
-            user=user, 
-            is_admin=is_admin,
-            db_error=True,
-            error_message="Database connection issues. Some features may be unavailable."
-        )
-    
-    # Return normal template if we have successfully connected, even if no categories
-    return render_template(
-        template, 
-        categories=categories or [], 
-        user=user, 
-        is_admin=is_admin,
-        db_error=False,
-        latest_tweets=latest_tweets,
-        showing_results=len(latest_tweets),
-        total_results=len(latest_tweets)
-    )
+            
+            # Method 2: SQLAlchemy connection if Method 1 failed
+            if not categories:
+                try:
+                    logger.info("Trying SQLAlchemy connection")
+                    # Force reconnect the engine first
+                    from database.multi_user_db.db_final import setup_database
+                    setup_database(force_reconnect=True)
+                    
+                    # Get a new connection
+                    conn = get_db_connection()
+                    try:
+                        searcher = BookmarkSearchMultiUser(conn, user.id if user else 1)
+                        latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                        logger.info(f"Successfully retrieved {len(latest_tweets)} latest bookmarks")
+                        
+                        # FALLBACK: If no bookmarks found for this user, try getting system bookmarks
+                        if len(latest_tweets) == 0 and user and user.id != 1:
+                            logger.warning(f"No bookmarks found for user {user.id}, falling back to system bookmarks")
+                            
+                            # Try with user_id = 1 (system user)
+                            searcher = BookmarkSearchMultiUser(conn, 1)
+                            latest_tweets = searcher.get_recent_bookmarks(limit=5)
+                            logger.info(f"Retrieved {len(latest_tweets)} system bookmarks as fallback")
+                            
+                            # If still no results, try with a direct query for ANY bookmarks
+                            if len(latest_tweets) == 0:
+                                logger.warning("No system bookmarks found, trying direct query for any bookmarks")
+                                
+                                # Direct query for any bookmarks
+                                query = """
+                                SELECT id, bookmark_id, text, author, created_at, author_id
+                                FROM bookmarks
+                                ORDER BY created_at DESC
+                                LIMIT 5
+                                """
+                                
+                                if isinstance(conn, sqlalchemy.engine.Connection):
+                                    result = conn.execute(text(query))
+                                    rows = result.fetchall()
+                                else:
+                                    cursor = conn.cursor()
+                                    cursor.execute(query)
+                                    rows = cursor.fetchall()
+                                    
+                                # Format the direct query results
+                                for row in rows:
+                                    bookmark = {
+                                        'id': row[0],
+                                        'bookmark_id': row[1],
+                                        'text': row[2],
+                                        'author': row[3],
+                                        'author_username': row[3].replace('@', '') if row[3] else '',
+                                        'created_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if hasattr(row[4], 'strftime') else row[4],
+                                        'author_id': row[5]
+                                    }
+                                    latest_tweets.append(bookmark)
+                                    
+                                logger.info(f"Direct query found {len(latest_tweets)} bookmarks")
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    logger.warning(f"SQLAlchemy connection failed: {e}")
+                    if not error_message:
+                        error_message = str(e)
+            
+            # Method 3: Direct SQL connection with different parameters if Method 2 failed
+            if not categories:
+                try:
+                    logger.info("Trying alternative direct connection")
+                    db_url = get_db_url()
+                    
+                    if 'postgresql://' in db_url:
+                        # Extract connection params from sqlalchemy URL (same as Method 1)
+                        conn_parts = db_url.replace('postgresql://', '').split('@')
+                        user_pass = conn_parts[0].split(':')
+                        host_port_db = conn_parts[1].split('/')
+                        host_port = host_port_db[0].split(':')
+                        
+                        db_user = user_pass[0]
+                        db_password = user_pass[1]
+                        db_host = host_port[0]
+                        db_port = host_port[1] if len(host_port) > 1 else '5432'
+                        db_name = host_port_db[1]
+                        
+                        logger.info(f"Trying alternative connection to PostgreSQL")
+                        
+                        # Try different connection parameters
+                        direct_conn = psycopg2.connect(
+                            user=db_user,
+                            password=db_password,
+                            host=db_host,
+                            port=db_port,
+                            dbname=db_name,
+                            connect_timeout=5,  # Longer timeout
+                            application_name='twitter_bookmark_manager_last_resort',
+                            keepalives=1,
+                            keepalives_idle=10,
+                            keepalives_interval=2,
+                            keepalives_count=3
+                        )
+                        
+                        # Important: Set isolation level to avoid transaction issues
+                        direct_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                        
+                        # Execute a simple query to get categories
+                        cursor = direct_conn.cursor()
+                        try:
+                            # First try with description column
+                            cursor.execute(f"""
+                                SELECT id, name, description 
+                                FROM categories 
+                                WHERE user_id = %s 
+                                ORDER BY name
+                            """, (user.id,))
+                        except Exception as e:
+                            logger.warning(f"Error querying categories with description: {e}")
+                            # Fallback query without description
+                            cursor.execute(f"""
+                                SELECT id, name, '' as description
+                                FROM categories 
+                                WHERE user_id = %s 
+                                ORDER BY name
+                            """, (user.id,))
+                        
+                        # Fetch categories directly
+                        categories = []
+                        for row in cursor.fetchall():
+                            categories.append({
+                                'id': row[0],
+                                'name': row[1],
+                                'description': row[2]
+                            })
+                        
+                        cursor.close()
+                        direct_conn.close()
+                        
+                        logger.info(f"Successfully loaded {len(categories)} categories via alternative connection")
+                    else:
+                        # Skip for non-PostgreSQL
+                        all_methods_tried = True
+                except Exception as e:
+                    logger.warning(f"Alternative direct connection failed: {e}")
+                    if not error_message:
+                        error_message = str(e)
+                    all_methods_tried = True
+            
+            # At this point, we've tried all database methods
+            if not categories:
+                all_methods_tried = True
+            
+            # Check if user is admin
+            is_admin = getattr(user, 'is_admin', False)
+            
+            # If all database methods failed, show a simplified interface with error message
+            if all_methods_tried and error_message and not categories:
+                logger.error(f"All database connection methods failed. Last error: {error_message}")
+                
+                # Return a simplified interface
+                return render_template(
+                    template, 
+                    categories=[],  # Empty categories
+                    user=user, 
+                    is_admin=is_admin,
+                    db_error=True,
+                    error_message="Database connection issues. Some features may be unavailable."
+                )
+            
+            # Return normal template if we have successfully connected, even if no categories
+            return render_template(
+                template, 
+                categories=categories or [], 
+                user=user, 
+                is_admin=is_admin,
+                db_error=False,
+                latest_tweets=latest_tweets,
+                showing_results=len(latest_tweets),
+                total_results=len(latest_tweets)
+            )
+        except Exception as e:
+            logger.error(f"Error in index: {str(e)}")
+            logger.error(traceback.format_exc())
+            return render_template('error_final.html', error=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in index: {str(e)}")
+        logger.error(traceback.format_exc())
+        return render_template('error_final.html', error=str(e))
 
 def safe_vector_operation(func):
     """
@@ -1798,20 +1826,54 @@ def check_tweet_content_column():
 # Add a catch-all error handler for API routes to ensure they return JSON, not HTML
 @app.errorhandler(Exception)
 def handle_api_exception(e):
-    """Global exception handler that ensures all API errors return JSON responses"""
+    """Global exception handler that ensures API errors return JSON and non-API errors return HTML"""
     path = request.path if request else ""
     
     # Log the error with traceback
     logger.error(f"GLOBAL ERROR HANDLER: {path}: {str(e)}")
     logger.error(traceback.format_exc())
     
-    # ALWAYS return JSON for ALL routes - never return HTML for errors
-    return jsonify({
-        'success': False,
-        'error': str(e),
-        'path': path,
-        'type': e.__class__.__name__
-    }), 500
+    # Check if this is an API route - if so, return JSON
+    if path.startswith('/api/') or request.headers.get('Accept', '').find('application/json') != -1:
+        # For API routes, return JSON response
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'path': path,
+            'type': e.__class__.__name__
+        }), 500
+    else:
+        # For web routes, return HTML using error template
+        try:
+            # Try to get user for the error page
+            user = None
+            try:
+                from auth.user_context_final import UserContext
+                user = UserContext.get_current_user()
+            except:
+                # Continue without user if there's an error
+                pass
+                
+            # Render the error template
+            return render_template('error_final.html', 
+                error=str(e), 
+                error_type=e.__class__.__name__,
+                user=user,
+                is_admin=getattr(user, 'is_admin', False) if user else False
+            ), 500
+        except Exception as template_error:
+            # If template rendering fails, return a basic HTML error
+            logger.error(f"Error rendering error template: {str(template_error)}")
+            return f"""
+            <html>
+                <head><title>Application Error</title></head>
+                <body>
+                    <h1>Application Error</h1>
+                    <p>{str(e)}</p>
+                    <p><a href="/">Return to Home</a></p>
+                </body>
+            </html>
+            """, 500
 
 # Add specific error handlers for various HTTP errors
 @app.errorhandler(400)
