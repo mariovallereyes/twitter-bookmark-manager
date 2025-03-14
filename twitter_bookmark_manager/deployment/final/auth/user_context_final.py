@@ -93,21 +93,51 @@ def login_required(f):
     """Decorator to require login for a route"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not UserContext.is_authenticated():
-            # Check if this is an API request
-            is_api_request = (
+        user_id = session.get('user_id')
+        
+        # Log session details for debugging
+        current_app.logger.debug(f"login_required check - Path: {request.path} - Session ID: {session.sid if hasattr(session, 'sid') else 'No SID'} - User ID: {user_id}")
+        
+        # Check for user_id in session first to avoid unnecessary database operations
+        if not user_id:
+            current_app.logger.warning(f"No user_id in session for path: {request.path}")
+            # Check if this is an API or AJAX request
+            is_ajax_or_api = (
                 request.path.startswith('/api/') or 
                 request.headers.get('Accept') == 'application/json' or
-                request.headers.get('Content-Type') == 'application/json'
+                request.headers.get('Content-Type') == 'application/json' or
+                request.headers.get('X-Requested-With') == 'XMLHttpRequest'
             )
             
-            if is_api_request:
+            if is_ajax_or_api:
                 return jsonify({
                     'success': False,
                     'authenticated': False,
-                    'error': 'User not authenticated'
+                    'error': 'User not authenticated. Please log out and log in again.',
+                    'status': 'session_missing'
                 }), 401
             return redirect(url_for('auth.login', next=request.url))
+            
+        # Only check the database if there's a user_id in the session
+        if not UserContext.is_authenticated():
+            current_app.logger.warning(f"User ID {user_id} from session not found in database for path: {request.path}")
+            # Check if this is an API or AJAX request
+            is_ajax_or_api = (
+                request.path.startswith('/api/') or 
+                request.headers.get('Accept') == 'application/json' or
+                request.headers.get('Content-Type') == 'application/json' or
+                request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+            )
+            
+            if is_ajax_or_api:
+                return jsonify({
+                    'success': False,
+                    'authenticated': False,
+                    'error': 'User not authenticated. Please log out and log in again.',
+                    'status': 'user_not_found'
+                }), 401
+            return redirect(url_for('auth.login', next=request.url))
+            
         return f(*args, **kwargs)
     return decorated_function
 

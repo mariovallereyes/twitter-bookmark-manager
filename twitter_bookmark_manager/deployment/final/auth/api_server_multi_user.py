@@ -436,10 +436,24 @@ def check_db_health():
         logger.error(f"Error in health check routine: {e}")
         # Continue processing the request even if health check fails
 
-# Set session to be permanent by default
 @app.before_request
 def make_session_permanent():
+    """Make session permanent and refresh it with each request"""
+    # Skip for static files
+    if request.path.startswith('/static/'):
+        return
+        
+    # Make session permanent
     session.permanent = True
+    
+    # Ensure session modified is set for any user with user_id
+    # This helps ensure session data persists across requests
+    if 'user_id' in session:
+        session.modified = True
+        # Add a timestamp to help track session activity
+        session['last_activity'] = time.time()
+        # Log minimal session info for debugging
+        logger.debug(f"Session refreshed - Path: {request.path} - User ID: {session.get('user_id')}")
 
 # Register authentication blueprints
 app.register_blueprint(auth_bp)
@@ -2454,3 +2468,32 @@ def handle_bad_request(e):
         'error': 'Bad request',
         'path': request.path
     }), 400
+
+# Add a route for checking authentication status
+@app.route('/check-auth', methods=['GET'])
+def check_auth():
+    """Simple endpoint to check authentication status without database operations"""
+    user_id = session.get('user_id')
+    # Log session information for debugging
+    logger.info(f"Auth check - Session: {session.sid if hasattr(session, 'sid') else 'No SID'} - User ID: {user_id}")
+    
+    # Check if user_id exists in session
+    if user_id:
+        # Don't do database lookup to avoid potential errors
+        # Just return success based on session information
+        logger.info(f"Auth check success - user_id found in session: {user_id}")
+        return jsonify({
+            'success': True,
+            'authenticated': True,
+            'message': 'User is authenticated via session',
+            'user_id': user_id
+        })
+    else:
+        logger.warning("Auth check failed - No user_id in session")
+        return jsonify({
+            'success': False,
+            'authenticated': False,
+            'error': 'User not authenticated. Please log out and log in again.'
+        }), 401
+
+# Global session status tracking

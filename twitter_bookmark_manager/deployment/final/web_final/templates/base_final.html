@@ -694,11 +694,11 @@
             
             const authResult = await authCheck.json();
             
-            if (!authResult.authenticated) {
+            if (!authResult.authenticated && !authResult.success) {
                 updateStepStatus('step-upload', 'error');
                 const errorDiv = document.createElement('div');
                 errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-                errorDiv.textContent = 'User not authenticated. Please log out and log in again.';
+                errorDiv.innerHTML = 'User not authenticated. Please <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
                 document.getElementById('progress-steps').appendChild(errorDiv);
                 return;
             }
@@ -712,7 +712,7 @@
             // Show detailed error message
             const errorDiv = document.createElement('div');
             errorDiv.className = 'mt-4 p-3 bg-red-900 text-white rounded-lg';
-            errorDiv.textContent = 'Upload failed: ' + error.message;
+            errorDiv.innerHTML = 'Upload failed: ' + error.message + '. You may need to <a href="/auth/logout" class="text-blue-400 hover:underline">log out</a> and log in again.';
             document.getElementById('progress-steps').appendChild(errorDiv);
         }
     }
@@ -1620,14 +1620,14 @@
         statusDisplay.className = 'mt-2 text-xs text-blue-400';
         
         try {
-            // Use the correct API endpoint path
-            const response = await fetch('/api/user/profile', {
+            // Use the dedicated check-auth endpoint
+            const response = await fetch('/check-auth', {
                 method: 'GET',
                 credentials: 'include'
             }).catch((err) => {
-                console.log('First endpoint failed:', err);
-                // If that fails, try a different endpoint as a fallback
-                return fetch('/api/user/stats', {
+                console.log('Authentication check endpoint failed:', err);
+                // If that fails, try user profile as a fallback
+                return fetch('/api/user/profile', {
                     method: 'GET',
                     credentials: 'include'
                 }).catch(() => null);
@@ -1636,25 +1636,31 @@
             if (!response) {
                 // If neither endpoint is available, just check session cookie existence
                 const hasCookies = document.cookie.length > 0;
-                statusDisplay.innerHTML = hasCookies 
+                const message = hasCookies 
                     ? 'You appear to have session cookies, but no auth endpoint was found to verify.'
                     : 'No session cookies found. You may need to log in again.';
+                statusDisplay.innerHTML = message + '<br><a href="/auth/logout" class="text-blue-400 hover:underline">Log out and try again</a>';
                 statusDisplay.className = hasCookies 
                     ? 'mt-2 text-xs text-yellow-400' 
                     : 'mt-2 text-xs text-red-400';
                 return;
             }
             
-            if (response.ok) {
+            const data = await response.json().catch(() => ({}));
+            
+            if (response.ok && (data.authenticated || data.success)) {
                 statusDisplay.innerHTML = 'You are authenticated. Session appears to be valid.';
                 statusDisplay.className = 'mt-2 text-xs text-green-400';
             } else {
-                statusDisplay.innerHTML = 'Authentication check failed. Status: ' + response.status + '. You may need to log out and log in again.';
+                // Provide a helpful message with a direct logout link
+                statusDisplay.innerHTML = 'Authentication check failed: ' + (data.error || 'Unknown error') + 
+                    '<br><a href="/auth/logout" class="text-blue-400 hover:underline">Log out and try again</a>';
                 statusDisplay.className = 'mt-2 text-xs text-red-400';
             }
         } catch (error) {
             console.error('Error checking authentication:', error);
-            statusDisplay.innerHTML = 'Error checking authentication: ' + error.message;
+            statusDisplay.innerHTML = 'Error checking authentication: ' + error.message + 
+                '<br><a href="/auth/logout" class="text-blue-400 hover:underline">Log out and try again</a>';
             statusDisplay.className = 'mt-2 text-xs text-red-400';
         }
     }
