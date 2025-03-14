@@ -39,8 +39,8 @@ from flask_cors import CORS
 from multiprocessing import Process
 from threading import Thread
 from database.multi_user_db.vector_store_final import get_multi_user_vector_store
-from auth.user_context import get_current_user, UserContext
-from auth.user_context_final import login_required
+from auth.user_context import get_current_user
+from auth.user_context_final import login_required, UserContext
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 from database.multi_user_db.db_final import get_db_connection
 from flask_session import Session
@@ -1609,6 +1609,7 @@ def update_process(user_id, session_id, rebuild=False, rebuild_session_id=None):
         from datetime import datetime
         import traceback
         import os
+        import uuid
         
         with app.app_context():
             try:
@@ -1646,27 +1647,20 @@ def update_process(user_id, session_id, rebuild=False, rebuild_session_id=None):
                     # Use the rebuild_session_id if provided, otherwise generate a new one
                     vector_session_id = rebuild_session_id if rebuild_session_id else str(uuid.uuid4())[:8]
                     
-                    # Call the rebuild endpoint directly
-                    with app.test_request_context():
-                        # Set up the user context
-                        UserContext.set_current_user(user_id)
+                    # Start the rebuild process using the rebuild_process function
+                    try:
+                        # Start the rebuild process in a separate thread
+                        rebuild_thread = Thread(
+                            target=rebuild_process,
+                            args=(user_id, vector_session_id),
+                            kwargs={'batch_size': 20, 'resume': False}
+                        )
+                        rebuild_thread.daemon = True
+                        rebuild_thread.start()
                         
-                        # Create a request with JSON data
-                        request_data = {
-                            'session_id': vector_session_id,
-                            'batch_size': 20,
-                            'resume': False
-                        }
-                        
-                        # Call the rebuild endpoint
-                        with app.test_client() as client:
-                            response = client.post(
-                                '/api/rebuild-vector-store',
-                                json=request_data,
-                                headers={'Content-Type': 'application/json'}
-                            )
-                            
-                            logger.info(f"Vector rebuild initiated with status code {response.status_code}")
+                        logger.info(f"Vector rebuild thread started for session {vector_session_id}")
+                    except Exception as rebuild_error:
+                        logger.error(f"Failed to start vector rebuild: {rebuild_error}")
                 
             except Exception as e:
                 logger.error(f"Error in update process: {e}")
