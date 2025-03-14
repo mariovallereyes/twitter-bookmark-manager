@@ -76,7 +76,7 @@ class VectorStore:
         instance_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         self.collection_name = f"bookmark_embeddings_{instance_id}"
         
-        self.vector_size = 768  # Default for all-mpnet-base-v2
+        self.vector_size = 384  # Default for all-MiniLM-L6-v2 (changed from 768)
         
         # Initialize Qdrant client with persistent storage
         try:
@@ -121,7 +121,7 @@ class VectorStore:
             self._load_model()
             
     def _load_model(self):
-        """Load the model optimized for performance with 32GB memory"""
+        """Load the model optimized for low memory usage"""
         try:
             memory_before = self.get_memory_usage()
             logger.info(f"Memory before model loading: {memory_before:.2f}MB")
@@ -134,9 +134,9 @@ class VectorStore:
             gc.collect()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
-            # Use the better model since we have memory
-            self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', 
-                                           device='cpu')  # Still use CPU for stability
+            # Use the smaller model to reduce memory usage
+            self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', 
+                                           device='cpu')  # Use CPU for stability
             
             # Verify vector size matches what we expect
             model_vector_size = self.model.get_sentence_embedding_dimension()
