@@ -118,10 +118,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger('api_server_multi_user')
 
-# Create Flask application
+# Set template folder path to the correct location
+template_dir = os.path.join(Path(__file__).parent.parent, 'web_final', 'templates')
+static_dir = os.path.join(Path(__file__).parent.parent, 'web_final', 'static')
+
+# Create Flask app with custom template folder
 app = Flask(__name__, 
-            template_folder='../web_final/templates',
-            static_folder='../web_final/static')
+            template_folder=template_dir,
+            static_folder=static_dir)
 
 # Configure application
 app.config.update(
