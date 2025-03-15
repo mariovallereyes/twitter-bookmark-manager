@@ -6,7 +6,7 @@ Provides endpoints for user-specific data and actions.
 import logging
 from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, current_app, request
-from auth.user_context import UserContext, login_required
+from auth.user_context_final import UserContext, login_required
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 import traceback
 

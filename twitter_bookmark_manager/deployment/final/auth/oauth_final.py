@@ -46,16 +46,20 @@ class TwitterOAuth(OAuthProvider):
     
     def __init__(self, config):
         super().__init__(config)
-        self.consumer_key = config.get('TWITTER_CONSUMER_KEY')
-        self.consumer_secret = config.get('TWITTER_CONSUMER_SECRET')
-        self.callback_url = config.get('TWITTER_CALLBACK_URL')
+        # Use client_id and client_secret from Twitter section in config
+        twitter_config = config.get('twitter', {})
+        self.consumer_key = twitter_config.get('client_id')
+        self.consumer_secret = twitter_config.get('client_secret')
+        self.callback_url = twitter_config.get('callback_url')
+        
+        # Log credentials for debugging
+        logger.info(f"TwitterOAuth initialized:")
+        logger.info(f"  - consumer_key is {'present' if self.consumer_key else 'MISSING'}")
+        logger.info(f"  - consumer_secret is {'present' if self.consumer_secret else 'MISSING'}")
+        logger.info(f"  - callback_url is {'present' if self.callback_url else 'MISSING'}")
         
     def get_authorize_url(self):
         """Get the Twitter authorization URL"""
-        # Log credentials availability (not the actual values)
-        logger.info(f"TwitterOAuth: consumer_key is {'present' if self.consumer_key else 'MISSING'}")
-        logger.info(f"TwitterOAuth: consumer_secret is {'present' if self.consumer_secret else 'MISSING'}")
-        logger.info(f"TwitterOAuth: callback_url is {'present' if self.callback_url else 'MISSING'}")
         # Log the exact callback URL being used (for debugging)
         logger.info(f"TwitterOAuth: actual callback_url value: {self.callback_url}")
         
@@ -95,26 +99,14 @@ class TwitterOAuth(OAuthProvider):
     
     def get_user_info(self, callback_data):
         """Get user info from Twitter callback data"""
-        # Reconstruct OAuth session
-        oauth_state = session.pop('oauth_state', None)
-        if not oauth_state:
-            logger.error("Missing OAuth state in session")
+        # Extract oauth_token and oauth_verifier from callback_data
+        oauth_token = callback_data.get('oauth_token')
+        oauth_verifier = callback_data.get('oauth_verifier')
+        
+        if not oauth_token or not oauth_verifier:
+            logger.error(f"Missing OAuth token or verifier: token={oauth_token}, verifier={oauth_verifier}")
             return None
             
-        oauth = OAuth1Session(
-            client_key=self.consumer_key,
-            client_secret=self.consumer_secret,
-            resource_owner_key=oauth_state.get('resource_owner_key'),
-            resource_owner_secret=oauth_state.get('resource_owner_secret'),
-            verifier=oauth_state.get('verifier'),
-            callback_uri=oauth_state.get('callback_uri')
-        )
-        
-        # Get access token
-        oauth_response = oauth.parse_authorization_response(callback_data)
-        oauth_token = oauth_response.get('oauth_token')
-        oauth_verifier = oauth_response.get('oauth_verifier')
-        
         # Get access token
         try:
             oauth = OAuth1Session(
@@ -140,12 +132,11 @@ class TwitterOAuth(OAuthProvider):
             user_info = response.json()
             
             return {
-                'provider': 'twitter',
-                'provider_user_id': str(user_info['id']),
+                'id': str(user_info['id']),
                 'username': user_info['screen_name'],
-                'email': user_info.get('email'),
-                'display_name': user_info['name'],
-                'profile_image_url': user_info['profile_image_url_https'].replace('_normal', '')
+                'name': user_info['name'],
+                'profile_image_url': user_info['profile_image_url_https'].replace('_normal', ''),
+                'oauth_token_secret': tokens['oauth_token_secret']
             }
             
         except Exception as e:

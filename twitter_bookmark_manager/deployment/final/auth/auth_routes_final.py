@@ -10,7 +10,7 @@ from urllib.parse import urlparse, urljoin
 
 # Import custom modules
 from auth.oauth_final import OAuthManager
-from auth.user_context import UserContext
+from auth.user_context_final import UserContext
 from database.multi_user_db.user_model_final import (
     get_user_by_provider_id, 
     create_user, 
@@ -39,15 +39,23 @@ def get_oauth_manager():
     twitter_callback_url = url_for('auth.oauth_callback', provider='twitter', _external=True)
     
     # Get configuration from the application
+    twitter_client_id = os.environ.get('TWITTER_CLIENT_ID', '')
+    twitter_client_secret = os.environ.get('TWITTER_CLIENT_SECRET', '')
+    
+    # Log credential presence (without exposing actual values)
+    logger.info(f"Twitter OAuth configuration:")
+    logger.info(f"  - Client ID present: {bool(twitter_client_id)}")
+    logger.info(f"  - Client Secret present: {bool(twitter_client_secret)}")
+    logger.info(f"  - Callback URL: {twitter_callback_url}")
+    
     config = {
         'twitter': {
-            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
-            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'client_id': twitter_client_id,
+            'client_secret': twitter_client_secret,
             'callback_url': twitter_callback_url
         }
     }
     
-    logger.info(f"OAuth callback URL: {twitter_callback_url}")
     return OAuthManager(config)
 
 def ensure_string_session():
