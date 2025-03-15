@@ -1362,5 +1362,66 @@ if not hasattr(sys, '_vector_store_disabled'):
     
     logger.info("Registered dummy modules to prevent import errors")
 
+# Check authentication status endpoint
+@app.route('/check-auth')
+def check_auth():
+    """Check if the user is authenticated and return user info"""
+    try:
+        user_id = session.get('user_id')
+        
+        # Convert from bytes to string if needed
+        if isinstance(user_id, bytes):
+            try:
+                user_id = user_id.decode('utf-8')
+                # Update session
+                session['user_id'] = user_id
+            except Exception as e:
+                logger.error(f"Error decoding user_id from bytes: {e}")
+                user_id = None
+        
+        if user_id:
+            # Get user info from database
+            db = get_db_connection()
+            from database.multi_user_db.user_model_final import get_user_by_id
+            user = get_user_by_id(db, user_id)
+            
+            if user:
+                return jsonify({
+                    'authenticated': True,
+                    'user': {
+                        'id': user.id,
+                        'username': user.username,
+                        'name': user.name,
+                        'avatar_url': user.avatar_url
+                    }
+                })
+        
+        # If no user_id in session or user not found
+        return jsonify({
+            'authenticated': False,
+            'message': 'User not authenticated'
+        })
+    except Exception as e:
+        logger.error(f"Error in check_auth: {e}")
+        return jsonify({
+            'authenticated': False,
+            'error': str(e)
+        }), 500
+
+# API categories endpoint - map to the user API endpoint
+@app.route('/api/categories', methods=['GET'])
+@login_required
+def api_categories():
+    """Get categories - proxy to user API endpoint"""
+    try:
+        from auth.user_api_final import get_categories
+        return get_categories()
+    except Exception as e:
+        logger.error(f"Error in api_categories proxy: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error retrieving categories: {str(e)}'
+        }), 500
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
