@@ -15,6 +15,20 @@ class UserContext:
         """Get the current user from the context"""
         if not hasattr(g, 'user'):
             user_id = session.get('user_id')
+            
+            # Convert bytes to string if needed
+            if isinstance(user_id, bytes):
+                try:
+                    user_id = user_id.decode('utf-8')
+                    # Update session with string value
+                    session['user_id'] = user_id
+                    session.modified = True
+                    current_app.logger.info(f"Converted user_id from bytes to string: {user_id}")
+                except Exception as e:
+                    current_app.logger.error(f"Error converting user_id from bytes: {e}")
+                    user_id = None
+                    session.pop('user_id', None)
+            
             if user_id:
                 try:
                     db_conn = current_app.config.get('get_db_connection')
@@ -43,13 +57,21 @@ class UserContext:
         """Set the current user in the context"""
         g.user = user
         if user:
-            session['user_id'] = user.id
+            # Ensure we store a string ID, not bytes
+            user_id = user.id
+            if isinstance(user_id, bytes):
+                try:
+                    user_id = user_id.decode('utf-8')
+                    current_app.logger.info(f"Converted user.id from bytes to string: {user_id}")
+                except Exception as e:
+                    current_app.logger.error(f"Error converting user.id from bytes: {e}")
+            
+            # Store as string
+            session['user_id'] = str(user_id)
             session.modified = True
-            current_app.logger.info(f"Set user in session: {user.id}")
+            current_app.logger.info(f"Set user in session: {user_id}")
         else:
             session.pop('user_id', None)
-            session.modified = True
-            current_app.logger.info("Cleared user from session")
             
     @staticmethod
     def is_authenticated():

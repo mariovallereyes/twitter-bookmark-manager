@@ -39,7 +39,11 @@ import requests
 from flask_cors import CORS
 from multiprocessing import Process
 from threading import Thread
-from flask_session import Session
+try:
+    from flask_session import Session
+except ImportError:
+    logger.warning("flask_session not available, using built-in Flask session")
+    Session = None
 
 # === Local Module Imports ===
 from database.multi_user_db.vector_store_final import get_multi_user_vector_store, VectorStore, cleanup_vector_store
@@ -144,12 +148,54 @@ os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
 logger.info(f"Upload folder configured at: {app.config['UPLOAD_FOLDER']}")
 logger.info(f"Database directory configured at: {app.config['DATABASE_DIR']}")
 
+# === Custom Session Interface to Handle Bytes Session IDs ===
+class CustomSessionInterface(SecureCookieSessionInterface):
+    """Custom session interface to handle bytes-like session IDs"""
+    def save_session(self, app, session, response):
+        domain = self.get_cookie_domain(app)
+        path = self.get_cookie_path(app)
+        
+        # Don't save if session is empty and was not modified
+        if not session and not session.modified:
+            return
+            
+        # Get expiration
+        httponly = self.get_cookie_httponly(app)
+        secure = self.get_cookie_secure(app)
+        samesite = self.get_cookie_samesite(app)
+        expires = self.get_expiration_time(app, session)
+        
+        # Get session ID, ensuring it's a string not bytes
+        session_id = session.sid if hasattr(session, 'sid') else None
+        if session_id and isinstance(session_id, bytes):
+            session_id = session_id.decode('utf-8')
+            
+        # Set the cookie with the string session ID
+        if session_id:
+            response.set_cookie(
+                app.config['SESSION_COOKIE_NAME'],
+                session_id,
+                expires=expires,
+                httponly=httponly,
+                domain=domain,
+                path=path,
+                secure=secure,
+                samesite=samesite
+            )
+
 try:
-    Session(app)
-    logger.info("Flask session initialized with Flask-Session")
+    if Session:
+        sess = Session(app)
+        logger.info("Flask session initialized with Flask-Session")
+        # Replace the default session interface with our custom one
+        app.session_interface = CustomSessionInterface()
+        logger.info("Using custom session interface to handle bytes session IDs")
 except Exception as e:
     logger.warning(f"Could not initialize Flask-Session: {e}")
     logger.info("Continuing with Flask's built-in session management")
+    # Still use our custom interface for built-in sessions
+    app.session_interface = CustomSessionInterface()
+    logger.info("Using custom session interface with built-in session")
 
 # === Session Status and SQLite DB for Sessions ===
 session_status: Dict[str, Dict[str, Any]] = {}

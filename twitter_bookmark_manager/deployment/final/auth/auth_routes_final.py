@@ -38,36 +38,46 @@ def get_oauth_manager():
     # Construct the callback URL
     twitter_callback_url = url_for('auth.oauth_callback', provider='twitter', _external=True)
     
-    # Ensure the URL uses HTTPS
-    if twitter_callback_url.startswith('http://'):
-        twitter_callback_url = twitter_callback_url.replace('http://', 'https://', 1)
-    
-    # Log the constructed URL for debugging
-    logger.info(f"Constructed Twitter callback URL: {twitter_callback_url}")
-    
+    # Get configuration from the application
     config = {
-        'TWITTER_CONSUMER_KEY': os.environ.get('TWITTER_API_KEY'),
-        'TWITTER_CONSUMER_SECRET': os.environ.get('TWITTER_API_SECRET', os.environ.get('TWITTER_CLIENT_SECRET')),
-        'TWITTER_CALLBACK_URL': twitter_callback_url,
-        'GOOGLE_CLIENT_ID': os.environ.get('GOOGLE_CLIENT_ID'),
-        'GOOGLE_CLIENT_SECRET': os.environ.get('GOOGLE_CLIENT_SECRET'),
-        'GOOGLE_REDIRECT_URI': url_for('auth.oauth_callback', provider='google', _external=True)
+        'twitter': {
+            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'callback_url': twitter_callback_url
+        }
     }
+    
+    logger.info(f"OAuth callback URL: {twitter_callback_url}")
     return OAuthManager(config)
 
-# Login page
+def ensure_string_session():
+    """Ensure all session values are strings, not bytes"""
+    for key in list(session.keys()):
+        if isinstance(session[key], bytes):
+            try:
+                session[key] = session[key].decode('utf-8')
+                logger.info(f"Converted session[{key}] from bytes to string")
+            except Exception as e:
+                logger.warning(f"Could not convert session[{key}] to string: {e}")
+                # If conversion fails, remove the problematic key
+                session.pop(key, None)
+
 @auth_bp.route('/login')
 def login():
-    """Login page"""
-    # Already logged in, redirect to home
-    if UserContext.is_authenticated():
-        return redirect(url_for('index'))
+    """Display login page"""
+    # Ensure session values are strings
+    ensure_string_session()
+    
+    next_url = request.args.get('next', '/') 
+    
+    # Store the next URL in the session
+    if next_url and is_safe_url(next_url):
+        session['next'] = next_url
+    
+    # Clear any existing auth related session data
+    for key in ['oauth_token', 'oauth_verifier', 'provider', 'user_id']:
+        session.pop(key, None)
         
-    # Store next parameter for redirect after login
-    if request.args.get('next'):
-        session['next'] = request.args.get('next')
-        
-    # Render login template
     return render_template('login_final.html')
 
 # OAuth login initiator
@@ -93,95 +103,121 @@ def oauth_login(provider):
 @auth_bp.route('/oauth/callback/<provider>')
 def oauth_callback(provider):
     """Handle OAuth callback"""
-    if provider not in ['twitter', 'google']:
-        flash(f"Unsupported authentication provider: {provider}", "error")
-        return redirect(url_for('auth.login'))
-        
-    # Get user info from OAuth provider
-    oauth_manager = get_oauth_manager()
-    user_info = oauth_manager.get_user_info(provider, request.url)
+    # Ensure session values are strings
+    ensure_string_session()
     
-    if not user_info:
-        flash(f"Failed to get user info from {provider}", "error")
-        return redirect(url_for('auth.login'))
+    logger.info(f"OAuth callback received for provider: {provider}")
+    
+    # Extract OAuth data based on provider
+    oauth_data = {}
+    if provider == 'twitter':
+        # Twitter OAuth data
+        oauth_token = request.args.get('oauth_token')
+        oauth_verifier = request.args.get('oauth_verifier')
         
-    # Check if user exists in database
-    conn = get_db_connection()
-    try:
-        # Look up user by provider and provider_user_id
-        user = get_user_by_provider_id(
-            conn, 
-            user_info['provider'], 
-            user_info['provider_user_id']
-        )
+        if not oauth_token or not oauth_verifier:
+            flash('Authentication failed. Please try again.', 'error')
+            logger.error(f"Missing OAuth parameters: token={oauth_token}, verifier={oauth_verifier}")
+            return redirect(url_for('auth.login'))
         
-        # Create user if not found
-        if not user:
-            user = create_user(
-                conn,
-                username=user_info['username'],
-                email=user_info.get('email'),
-                auth_provider=user_info['provider'],
-                provider_user_id=user_info['provider_user_id'],
-                display_name=user_info.get('display_name'),
-                profile_image_url=user_info.get('profile_image_url')
-            )
-        else:
-            # Update last login time
-            user = update_last_login(conn, user.id)
+        # Store in session as strings
+        session['oauth_token'] = str(oauth_token)
+        session['oauth_verifier'] = str(oauth_verifier)
+        session['provider'] = 'twitter'
+        
+        # Get access token
+        try:
+            oauth_manager = get_oauth_manager()
+            user_info = oauth_manager.get_user_info('twitter', {
+                'oauth_token': session['oauth_token'],
+                'oauth_verifier': session['oauth_verifier']
+            })
             
-        # Clear any existing session and set new user
-        session.clear()
-        
-        # Regenerate session to prevent session fixation
-        if hasattr(session, 'regenerate'):
-            session.regenerate()
+            if not user_info or 'id' not in user_info:
+                flash('Failed to get user information from Twitter. Please try again.', 'error')
+                logger.error(f"Failed to get user info: {user_info}")
+                return redirect(url_for('auth.login'))
+                
+            # Process user information
+            provider_id = str(user_info.get('id'))
+            username = user_info.get('username', '')
+            name = user_info.get('name', '')
+            avatar_url = user_info.get('profile_image_url', '').replace('_normal', '')
             
-        # Set user in session with permanent flag
-        session['user_id'] = user.id
-        session.permanent = True
-        session.modified = True
-        
-        # Log the success
-        logger.info(f"User '{user.username}' logged in via {provider} - Session ID: {session.sid if hasattr(session, 'sid') else 'No SID'}")
-        
-        # Redirect to next URL or home
-        next_url = session.pop('next', None)
-        if next_url and is_safe_url(next_url):
+            # Find or create user
+            db = get_db_connection()
+            user = get_user_by_provider_id(db, 'twitter', provider_id)
+            
+            if not user:
+                # Create new user
+                user = create_user(
+                    db, 
+                    username=username,
+                    email=f"{username}@twitter.placeholder",
+                    name=name,
+                    provider='twitter',
+                    provider_id=provider_id,
+                    avatar_url=avatar_url,
+                    oauth_token=session.get('oauth_token', ''),
+                    oauth_token_secret=user_info.get('oauth_token_secret', '')
+                )
+                logger.info(f"Created new user: {username} (ID: {user.id})")
+            else:
+                # Update last login
+                update_last_login(db, user.id)
+                logger.info(f"Logged in existing user: {username} (ID: {user.id})")
+            
+            # Store user ID in session as string
+            session['user_id'] = str(user.id)
+            
+            # Clean up OAuth session data
+            session.pop('oauth_token', None)
+            session.pop('oauth_verifier', None)
+            session.pop('provider', None)
+            
+            # Redirect to next_url or home
+            next_url = session.pop('next', '/')
+            if not is_safe_url(next_url):
+                next_url = '/'
+                
+            logger.info(f"Redirecting to: {next_url}")
             return redirect(next_url)
-        return redirect(url_for('index'))
             
-    except Exception as e:
-        logger.error(f"Error in OAuth callback: {e}")
-        flash("An error occurred during authentication. Please try again.", "error")
+        except Exception as e:
+            flash('Authentication failed. Please try again.', 'error')
+            logger.error(f"OAuth error: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return redirect(url_for('auth.login'))
+    else:
+        # Unsupported provider
+        flash(f'Login with {provider} is not supported.', 'error')
         return redirect(url_for('auth.login'))
-    finally:
-        conn.close()
 
 # Logout
 @auth_bp.route('/logout')
 def logout():
-    """Log out the current user"""
-    user = UserContext.get_current_user()
-    if user:
-        logger.info(f"User '{user.username}' logged out")
+    """Log out the current user by clearing the session"""
+    # Ensure session values are strings first
+    ensure_string_session()
     
-    # Clear all session data
-    user_id = session.get('user_id')
-    session.pop('user_id', None)
-    session.clear()
-    
-    # Regenerate session to prevent session fixation
-    if hasattr(session, 'regenerate'):
-        session.regenerate()
-    
-    logger.info(f"Session cleared for user_id: {user_id}")
-    
-    # Set a flash message for feedback
-    flash("You have been successfully logged out.", "success")
-    
-    # Redirect to home
-    return redirect(url_for('index'))
+    try:
+        # Get the current user to log the logout action
+        user = UserContext.get_current_user()
+        if user:
+            logger.info(f"Logging out user: {getattr(user, 'username', 'unknown')} (ID: {user.id})")
+        
+        # Clear all session data
+        session.clear()
+        
+        # Flash logout message
+        flash("You have been logged out successfully.", "success")
+    except Exception as e:
+        # Log the error but continue with logout
+        logger.error(f"Error during logout: {str(e)}")
+        
+    # Redirect to login page
+    return redirect(url_for('auth.login'))
 
 # Profile page
 @auth_bp.route('/profile')
