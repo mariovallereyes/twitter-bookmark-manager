@@ -336,12 +336,6 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
                     'session_id': session_id,
                     'user_id': user_id
                 }
-            else:
-                logger.warning(f"Removing stale lock file (age: {lock_file_age:.1f}s) - session_id={session_id}")
-                try:
-                    os.remove(lock_file_path)
-                except Exception as e:
-                    logger.error(f"Error removing stale lock file: {e} - session_id={session_id}")
         except Exception as e:
             logger.error(f"Error checking lock file: {e} - session_id={session_id}")
     
@@ -350,7 +344,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         with open(lock_file_path, 'w') as f:
             f.write(f"vector_rebuild_session_{session_id}_{datetime.now().isoformat()}")
         logger.info(f"Created lock file at {lock_file_path} - session_id={session_id}")
-            except Exception as e:
+    except Exception as e:
         logger.error(f"Error creating lock file: {e} - session_id={session_id}")
         # Continue anyway
     
@@ -394,7 +388,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         # Get bookmarks with optimized query
         try:
             bookmarks = get_bookmarks_optimized(user_id)
-                except Exception as e:
+        except Exception as e:
             logger.error(f"Error retrieving bookmarks: {e} - session_id={session_id}")
             return {
                 'success': False,
@@ -426,7 +420,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         
         if start_index >= total_valid:
             logger.warning(f"Start index {start_index} is beyond the end of valid bookmarks ({total_valid}) - session_id={session_id}")
-        return {
+            return {
                 'success': True,
                 'message': "All bookmarks already processed",
                 'total': total_bookmarks,
@@ -489,7 +483,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
                 # Update progress file regularly
                 if i % max(1, min(5, batch_size // 5)) == 0 or i == len(batch) - 1:
                     try:
-        with open(progress_file, 'w') as f:
+                        with open(progress_file, 'w') as f:
                             json.dump({
                                 'processed_index': absolute_index + 1,  # +1 to start from next bookmark on resume
                                 'bookmarks_processed': bookmarks_processed,
@@ -522,7 +516,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         except Exception as e:
             logger.warning(f"Could not remove progress file: {e} - session_id={session_id}")
         
-            return {
+        return {
             'success': True,
             'message': "Vector store rebuild completed successfully",
             'total': total_bookmarks,
@@ -532,10 +526,10 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
             'error_count': total_errors,
             'duration_seconds': duration,
             'progress': 100,
-                'session_id': session_id,
-                'user_id': user_id
-            }
-                    except Exception as e:
+            'session_id': session_id,
+            'user_id': user_id
+        }
+    except Exception as e:
         logger.error(f"Critical error in vector rebuild: {e} - session_id={session_id}")
         logger.error(traceback.format_exc())
         
@@ -549,21 +543,21 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         except Exception as progress_error:
             logger.error(f"Error reading progress file: {progress_error} - session_id={session_id}")
             
-            return {
-                'success': False,
+        return {
+            'success': False,
             'error': str(e),
             'message': "Critical error during vector rebuild",
             'progress': progress_percent,
-                'session_id': session_id,
-                'user_id': user_id
-            }
+            'session_id': session_id,
+            'user_id': user_id
+        }
     finally:
         # Always clean up lock file
         try:
             if os.path.exists(lock_file_path):
                 os.remove(lock_file_path)
                 logger.info(f"Removed lock file - session_id={session_id}")
-                except Exception as e:
+        except Exception as e:
             logger.error(f"Error removing lock file: {e} - session_id={session_id}")
             # Not much we can do at this point
 
@@ -703,7 +697,7 @@ def add_bookmark_with_retry(vector_store, bookmark, session_id, max_retries=2, i
                 'message': f'Bookmark added to vector store - attempt={attempt+1}',
                 'bookmark_id': bookmark.get('id', 'unknown')
             }
-            except Exception as e:
+        except Exception as e:
             logger.error(f"Error adding bookmark to vector store: {e} - session_id={session_id}")
             
             if attempt < max_retries:
@@ -776,7 +770,7 @@ def get_bookmarks_optimized(user_id):
             bookmarks.append(bookmark)
             
         return bookmarks
-                            except Exception as e:
+    except Exception as e:
         logger.error(f"Error in get_bookmarks_optimized: {e}")
         raise
 
@@ -791,9 +785,9 @@ def update_progress_file(file_path, data):
     try:
         with open(file_path, 'w') as f:
             json.dump(data, f)
-                        except Exception as e:
-                            logger.error(f"Error updating progress file: {e}")
-                        
+    except Exception as e:
+        logger.error(f"Error updating progress file: {e}")
+
 def calculate_progress(progress_file, total_valid=0):
     """
     Calculate progress percentage from progress file
@@ -810,7 +804,7 @@ def calculate_progress(progress_file, total_valid=0):
             with open(progress_file, 'r') as f:
                 progress_data = json.load(f)
                 return progress_data.get('progress_percent', 0)
-                except Exception as e:
+        except Exception as e:
             logger.error(f"Error reading progress file: {e}")
     
     # Fallback if progress file doesn't exist or can't be read
