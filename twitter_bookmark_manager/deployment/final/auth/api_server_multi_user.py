@@ -1280,8 +1280,8 @@ def request_entity_too_large(e):
     return render_template('upload.html', error="The file you tried to upload is too large. Maximum size is 50MB."), 413
 
 # Add health check endpoint
-@app.route('/health')
-def health_check():
+@app.route('/api/health')
+def api_health_check():
     """Simple health check endpoint"""
     try:
         # Check if we can get a database connection
