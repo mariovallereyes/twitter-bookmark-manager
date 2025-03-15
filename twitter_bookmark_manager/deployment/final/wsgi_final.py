@@ -143,18 +143,6 @@ if 'healthy' not in db_status:
 if 'message' not in db_status:
     db_status['message'] = "Status information not available"
 
-# Try to import critical shared modules first to avoid circular imports
-try:
-    logger.info("Pre-loading critical modules to avoid circular imports...")
-    
-    # Import login_required from user_context_final
-    from auth.user_context_final import UserContext, login_required
-    logger.info("✅ Successfully imported UserContext and login_required")
-    
-except Exception as preload_error:
-    logger.error(f"❌ Failed to preload critical modules: {preload_error}")
-    logger.error(traceback.format_exc())
-
 # Store application loading errors
 application_error = None
 error_details = None
@@ -178,63 +166,142 @@ try:
         # Make flask_session available with mock
         sys.modules['flask_session'] = type('mock_flask_session', (), {'Session': MockSession})
     
-    # First import the entire app - this way login_required will be defined before any routes use it
-    logger.info("Attempting to import app from auth.api_server_multi_user...")
-    from auth.api_server_multi_user import app as flask_app
-    
-    # Now get CustomSessionInterface from the same module
-    from auth.api_server_multi_user import CustomSessionInterface
-    
-    app = flask_app
-    # Set application for later use
-    application = app
-    logger.info("✅ Successfully loaded app from auth.api_server_multi_user")
-    
-    # Make sure the custom session interface is set
-    try:
-        application.session_interface = CustomSessionInterface()
-        logger.info("✅ Custom session interface has been set")
-    except Exception as session_interface_error:
-        logger.error(f"❌ Error setting custom session interface: {session_interface_error}")
-    
-    # Skip fallback mode - force using the loaded application
-    logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
-    
-    # Set flags to indicate we're NOT in fallback mode
-    application.config['FALLBACK_MODE'] = False
-    application.config['FULL_APP_LOADED'] = True
-    
-    # Set template path explicitly
-    if hasattr(app, 'template_folder'):
-        logger.info(f"Template folder is: {app.template_folder}")
-        if not os.path.exists(app.template_folder):
-            logger.warning(f"Template folder does not exist: {app.template_folder}")
-            # Try to find the correct path
-            possible_template_paths = [
-                os.path.join(os.environ.get('APP_BASE_DIR', '/app'), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
-                os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
-                os.path.join(os.getcwd(), 'web_final/templates')
-            ]
-            for path in possible_template_paths:
-                if os.path.exists(path):
-                    logger.info(f"Found template folder at: {path}")
-                    app.template_folder = path
-                    logger.info(f"Updated template folder to: {path}")
-                    break
-    
-    # Add DB status info for frontend templates
-    if not db_status.get('healthy', False):
-        logger.warning(f"⚠️ Database issues detected, but still loading full application: {db_status.get('message', 'Unknown issue')}")
-        # Inject DB status into application config for templates
-        application.config['DB_ERROR'] = True
-        application.config['DB_ERROR_MESSAGE'] = db_status.get('message', 'Database connection issues')
-        # IMPORTANT: Do not redirect API calls to fallback mode, let them try to reconnect
-        application.config['ALLOW_API_RETRY'] = True
-    else:
-        logger.info("Full application is active with healthy database")
-        application.config['DB_ERROR'] = False
-        application.config['ALLOW_API_RETRY'] = True
-    
+    # Try to import with additional safeguards
+    max_import_attempts = 3
+    current_import_attempt = 1
+    app = None
+    application = None
+
+    while current_import_attempt <= max_import_attempts and not app:
+        try:
+            logger.info(f"Import attempt {current_import_attempt}/{max_import_attempts} for app from auth.api_server_multi_user...")
+            
+            # Create a fallback login_required in case of circular imports
+            from functools import wraps
+            def fallback_login_required(f):
+                @wraps(f)
+                def decorated_function(*args, **kwargs):
+                    from flask import session, redirect, url_for, request, jsonify
+                    user_id = session.get('user_id')
+                    if not user_id:
+                        if request.path.startswith('/api/'):
+                            return jsonify({'error': 'Authentication required'}), 401
+                        return redirect(url_for('auth.login'))
+                    return f(*args, **kwargs)
+                return decorated_function
+            
+            # Try to import with a timeout to prevent long hangs
+            import sys
+            import importlib
+            import time
+            
+            # First try to import just the app
+            start_time = time.time()
+            module_spec = importlib.util.find_spec('auth.api_server_multi_user')
+            if not module_spec:
+                raise ImportError("Could not find auth.api_server_multi_user module")
+            
+            # Now try to import the app
+            from auth.api_server_multi_user import app as flask_app
+            
+            # Only if successful, import the CustomSessionInterface
+            from auth.api_server_multi_user import CustomSessionInterface
+            
+            # If we got here, the import was successful
+            app = flask_app
+            # Set application for later use
+            application = app
+            logger.info(f"✅ Successfully loaded app from auth.api_server_multi_user in {time.time() - start_time:.2f} seconds")
+            
+            # Make sure the custom session interface is set
+            try:
+                application.session_interface = CustomSessionInterface()
+                logger.info("✅ Custom session interface has been set")
+            except Exception as session_interface_error:
+                logger.error(f"❌ Error setting custom session interface: {session_interface_error}")
+            
+            # Skip fallback mode - force using the loaded application
+            logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
+            
+            # Set flags to indicate we're NOT in fallback mode
+            application.config['FALLBACK_MODE'] = False
+            application.config['FULL_APP_LOADED'] = True
+            
+            # Set template path explicitly
+            if hasattr(app, 'template_folder'):
+                logger.info(f"Template folder is: {app.template_folder}")
+                if not os.path.exists(app.template_folder):
+                    logger.warning(f"Template folder does not exist: {app.template_folder}")
+                    # Try to find the correct path
+                    possible_template_paths = [
+                        os.path.join(os.environ.get('APP_BASE_DIR', '/app'), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+                        os.path.join(os.getcwd(), 'twitter_bookmark_manager/deployment/final/web_final/templates'),
+                        os.path.join(os.getcwd(), 'web_final/templates')
+                    ]
+                    for path in possible_template_paths:
+                        if os.path.exists(path):
+                            logger.info(f"Found template folder at: {path}")
+                            app.template_folder = path
+                            logger.info(f"Updated template folder to: {path}")
+                            break
+            
+            # Add DB status info for frontend templates
+            if not db_status.get('healthy', False):
+                logger.warning(f"⚠️ Database issues detected, but still loading full application: {db_status.get('message', 'Unknown issue')}")
+                # Inject DB status into application config for templates
+                application.config['DB_ERROR'] = True
+                application.config['DB_ERROR_MESSAGE'] = db_status.get('message', 'Database connection issues')
+                # IMPORTANT: Do not redirect API calls to fallback mode, let them try to reconnect
+                application.config['ALLOW_API_RETRY'] = True
+            else:
+                logger.info("Full application is active with healthy database")
+                application.config['DB_ERROR'] = False
+                application.config['ALLOW_API_RETRY'] = True
+            
+        except Exception as import_error:
+            logger.error(f"❌ Import attempt {current_import_attempt}/{max_import_attempts} failed: {import_error}")
+            logger.error(traceback.format_exc())
+            current_import_attempt += 1
+            time.sleep(1)  # Wait 1 second before trying again
+        
+    if not app:
+        logger.critical("❌ All import attempts failed. Creating emergency application.")
+        # Create an emergency application that shows an error message
+        from flask import Flask, jsonify, render_template_string
+        app = Flask(__name__)
+        application = app
+        
+        @app.route('/')
+        def emergency_index():
+            return render_template_string("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Twitter Bookmark Manager - Error</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; line-height: 1.6; }
+                    .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+                    .error { background: #ffeeee; border-left: 4px solid #ff0000; padding: 10px; margin-bottom: 20px; }
+                    h1 { color: #333; }
+                    pre { background: #f5f5f5; padding: 10px; overflow: auto; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>Twitter Bookmark Manager</h1>
+                    <div class="error">
+                        <h2>Application Error</h2>
+                        <p>There was an error loading the application. Please try again later or contact support.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """), 500
+        
+        @app.route('/health')
+        def emergency_health():
+            return jsonify({"status": "error", "message": "Emergency application loaded due to import failures"}), 500
+
 except Exception as e:
     error_details = traceback.format_exc()
     application_error = str(e)

@@ -61,8 +61,26 @@ from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# Custom imports
-from auth.user_context_final import UserContext, login_required
+# Custom imports - separate imports to avoid circular references
+from auth.user_context_final import UserContext
+# login_required is now imported separately to avoid circular dependencies
+try:
+    from auth.user_context_final import login_required
+except ImportError as e:
+    # Fallback implementation if circular imports cause issues
+    from functools import wraps
+    def login_required(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            user_id = session.get('user_id')
+            if not user_id:
+                if request.path.startswith('/api/'):
+                    return jsonify({'error': 'Authentication required'}), 401
+                return redirect(url_for('auth.login'))
+            return f(*args, **kwargs)
+        return decorated_function
+    print(f"Created fallback login_required due to import error: {e}")
+
 # Import database utilities
 from database.multi_user_db.db_final import (
     get_db_connection,
@@ -1260,6 +1278,53 @@ def request_entity_too_large(e):
         }), 413
         
     return render_template('upload.html', error="The file you tried to upload is too large. Maximum size is 50MB."), 413
+
+# Add health check endpoint
+@app.route('/health')
+def health_check():
+    """Simple health check endpoint"""
+    try:
+        # Check if we can get a database connection
+        from database.multi_user_db.db_final import get_db_connection, check_database_status
+        
+        # Check database status
+        db_status = check_database_status()
+        
+        # Check vector store status if not disabled
+        vector_store_status = {"status": "disabled"}
+        if not ENV_VARS['DISABLE_VECTOR_STORE']:
+            try:
+                from database.multi_user_db.vector_store_final import get_vector_store
+                vs = get_vector_store(allow_dummy=True)
+                collection_info = vs.get_collection_info() if vs else None
+                vector_store_status = {
+                    "status": "healthy" if vs and not getattr(vs, 'is_dummy', False) else "fallback",
+                    "info": collection_info
+                }
+            except Exception as vs_error:
+                vector_store_status = {
+                    "status": "error",
+                    "message": str(vs_error)
+                }
+        
+        return jsonify({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "database": db_status,
+            "vector_store": vector_store_status,
+            "environment": {
+                "debug": ENV_VARS['DEBUG'],
+                "testing": ENV_VARS['TESTING'],
+                "disable_vector_store": ENV_VARS['DISABLE_VECTOR_STORE']
+            }
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
