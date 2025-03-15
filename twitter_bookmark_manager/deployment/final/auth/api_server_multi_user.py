@@ -63,6 +63,8 @@ from werkzeug.utils import secure_filename
 
 # Custom imports
 from auth.user_context_final import UserContext
+# Import login_required from decorators to avoid circular imports
+from auth.decorators import login_required
 # Import database utilities
 from database.multi_user_db.db_final import (
     get_db_connection,
@@ -498,19 +500,6 @@ def safe_get_vector_store():
                 return None
     
     return None
-
-# Login required decorator - moved before routes that use it
-def login_required(func):
-    """Decorator to ensure user is logged in"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        user = UserContext.get_current_user()
-        if not user:
-            if request.path.startswith('/api/'):
-                return jsonify({'success': False, 'error': 'Authentication required'}), 401
-            return redirect(url_for('auth.login'))
-        return func(*args, **kwargs)
-    return wrapper
 
 # Routes
 @app.route('/')

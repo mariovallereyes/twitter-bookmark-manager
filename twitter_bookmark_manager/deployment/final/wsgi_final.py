@@ -143,6 +143,22 @@ if 'healthy' not in db_status:
 if 'message' not in db_status:
     db_status['message'] = "Status information not available"
 
+# Try to import critical shared modules first to avoid circular imports
+try:
+    logger.info("Pre-loading critical modules to avoid circular imports...")
+    
+    # Import decorators module first
+    from auth.decorators import login_required
+    logger.info("✅ Successfully imported login_required decorator")
+    
+    # Import user context
+    from auth.user_context_final import UserContext
+    logger.info("✅ Successfully imported UserContext")
+    
+except Exception as preload_error:
+    logger.error(f"❌ Failed to preload critical modules: {preload_error}")
+    logger.error(traceback.format_exc())
+
 # Store application loading errors
 application_error = None
 error_details = None
