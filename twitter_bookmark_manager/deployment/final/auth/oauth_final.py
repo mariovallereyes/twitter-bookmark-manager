@@ -48,8 +48,17 @@ class TwitterOAuth(OAuthProvider):
         super().__init__(config)
         # Use client_id and client_secret from Twitter section in config
         twitter_config = config.get('twitter', {})
+        
+        # Try OAuth 2.0 credentials first (client_id/client_secret)
         self.consumer_key = twitter_config.get('client_id')
         self.consumer_secret = twitter_config.get('client_secret')
+        
+        # If OAuth 2.0 credentials are missing, fall back to OAuth 1.0a credentials
+        if not self.consumer_key or not self.consumer_secret:
+            logger.info("Falling back to OAuth 1.0a credentials (API key/secret)")
+            self.consumer_key = os.environ.get('TWITTER_API_KEY')
+            self.consumer_secret = os.environ.get('TWITTER_API_SECRET')
+            
         self.callback_url = twitter_config.get('callback_url')
         
         # Log credentials for debugging

@@ -96,7 +96,7 @@ except ImportError as e:
 
 # Import database utilities
 from database.multi_user_db.db_final import (
-    get_db_connection,
+    get_db_connection, 
     init_database,
     cleanup_db_connections,
     check_database_status
@@ -120,8 +120,8 @@ logger = logging.getLogger('api_server_multi_user')
 
 # Create Flask application
 app = Flask(__name__, 
-           template_folder='../web_final/templates',
-           static_folder='../web_final/static')
+            template_folder='../web_final/templates',
+            static_folder='../web_final/static')
 
 # Configure application
 app.config.update(
@@ -276,7 +276,7 @@ def get_session_status(session_id):
                         session_status_db[session_id] = status
                 except Exception as e:
                     logger.error(f"Error reading status file: {e}")
-                    return None
+            return None
         return status
     except Exception as e:
         logger.error(f"Error getting session status: {e}")
@@ -349,8 +349,8 @@ def check_user_authentication():
         
         # Check if the path matches any public path prefix
         if any(request.path.startswith(path) for path in public_paths):
-            return
-            
+                    return
+                    
         # Get current user
         user = UserContext.get_current_user()
         
@@ -362,7 +362,7 @@ def check_user_authentication():
         if not user and not request.path == '/':
             logger.info(f"Unauthenticated access attempt to {request.path}, redirecting to login")
             return redirect(url_for('auth.login'))
-    except Exception as e:
+                except Exception as e:
         logger.error(f"Error checking authentication: {e}")
 
 @app.before_request
@@ -378,7 +378,7 @@ def check_db_health():
             logger.error("Database connection function not configured")
             if request.path.startswith('/api/'):
                 return jsonify({'success': False, 'error': 'Database not configured'}), 500
-            else:
+                    else:
                 flash("Database connection not available", "error")
                 return render_template('error.html', error="Database connection not available")
     
@@ -390,7 +390,7 @@ def check_db_health():
 def make_session_permanent():
     """Make the session permanent to avoid frequent re-logins"""
     try:
-        session.permanent = True
+    session.permanent = True
     except Exception as e:
         logger.error(f"Error making session permanent: {e}")
 
@@ -517,7 +517,7 @@ def safe_get_vector_store():
             else:
                 logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
                 return None
-        except Exception as e:
+            except Exception as e:
             logger.error(f"[RETRY-{session_id}] Unexpected error: {e}")
             logger.error(traceback.format_exc())
             if attempt < MAX_RETRIES - 1:
@@ -594,7 +594,7 @@ def recent():
     logger.info("Recent bookmarks page requested")
     try:
         return render_template('recent_final.html')
-    except Exception as e:
+        except Exception as e:
         logger.error(f"Error rendering recent page: {e}")
         logger.error(traceback.format_exc())
         return render_template('error.html', error=str(e))
@@ -670,7 +670,7 @@ def api_chat():
                 'error': str(search_error),
                 'response': 'I encountered an error while searching your bookmarks.'
             }), 500
-    except Exception as e:
+        except Exception as e:
         logger.error(f"Error in chat API: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -732,7 +732,7 @@ def api_search():
                     })
             
             return jsonify({
-                'success': True,
+                'success': True, 
                 'results': formatted_results,
                 'count': len(formatted_results)
             })
@@ -756,7 +756,7 @@ def api_recent():
         user = UserContext.get_current_user()
         if not user:
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
-            
+        
         user_id = user.id
         limit = int(request.args.get('limit', 10))
         logger.info(f"Recent bookmarks request from user {user_id}, limit {limit}")
@@ -965,7 +965,7 @@ def api_statistics():
                 'user_id': user_id
             }
         })
-    except Exception as e:
+                        except Exception as e:
         logger.error(f"Error getting statistics: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1064,14 +1064,14 @@ def upload_bookmarks():
 def process_status():
     """Check status of background processing."""
     try:
-        user = UserContext.get_current_user()
+    user = UserContext.get_current_user()
         if not user:
             logger.error("No user context found for status request")
             return jsonify({'success': False, 'error': 'User not authenticated'}), 401
-            
+    
         user_id = user.id
-        session_id = request.args.get('session_id')
-        if not session_id:
+    session_id = request.args.get('session_id')
+    if not session_id:
             return jsonify({'success': False, 'error': 'No session_id provided'}), 400
             
         process_type = request.args.get('type', 'upload')
@@ -1156,15 +1156,15 @@ def app_status():
         if user:
             auth_status['user_id'] = user.id
             auth_status['username'] = getattr(user, 'username', 'unknown')
-        
-        return jsonify({
+                
+                return jsonify({
             'status': 'healthy',
             'database': db_status,
             'auth': auth_status,
             'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
             'timestamp': datetime.now().isoformat()
         })
-    except Exception as e:
+                except Exception as e:
         logger.error(f"Error in status endpoint: {e}")
         return jsonify({
             'status': 'unhealthy',
@@ -1175,7 +1175,7 @@ def app_status():
 @app.route('/-/health')
 def health_check():
     """Simple health check for container orchestration"""
-    return jsonify({
+                return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat()
     })
@@ -1338,7 +1338,7 @@ def api_health_check():
             "message": str(e),
             "timestamp": datetime.now().isoformat()
         }), 500
-
+    
 # Force disable vector store
 os.environ['DISABLE_VECTOR_STORE'] = 'true'
 
@@ -1375,7 +1375,7 @@ def check_auth():
                 user_id = user_id.decode('utf-8')
                 # Update session
                 session['user_id'] = user_id
-            except Exception as e:
+        except Exception as e:
                 logger.error(f"Error decoding user_id from bytes: {e}")
                 user_id = None
         
@@ -1421,6 +1421,22 @@ def api_categories():
         return jsonify({
             'status': 'error',
             'message': f'Error retrieving categories: {str(e)}'
+        }), 500
+
+# Route to handle Twitter OAuth callback at the root level
+@app.route('/oauth/callback/twitter')
+def twitter_oauth_callback():
+    """Route to handle Twitter OAuth callback at the root level"""
+    logger.info("Twitter OAuth callback received at root level")
+    # Import auth blueprint's oauth_callback function
+    try:
+        from auth.auth_routes_final import oauth_callback
+        return oauth_callback('twitter')
+    except Exception as e:
+        logger.error(f"Error in twitter_oauth_callback: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error in Twitter OAuth callback: {str(e)}'
         }), 500
 
 if __name__ == '__main__':

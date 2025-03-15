@@ -35,8 +35,9 @@ def get_db_connection():
 
 def get_oauth_manager():
     """Get the OAuth manager with configuration from the app"""
-    # Construct the callback URL
-    twitter_callback_url = url_for('auth.oauth_callback', provider='twitter', _external=True)
+    # Use the registered callback URL from environment variables
+    twitter_callback_url = os.environ.get('TWITTER_REDIRECT_URI', 
+                          'https://twitter-bookmark-manager-production.up.railway.app/oauth/callback/twitter')
     
     # Get configuration from the application
     twitter_client_id = os.environ.get('TWITTER_CLIENT_ID', '')
@@ -201,6 +202,13 @@ def oauth_callback(provider):
         # Unsupported provider
         flash(f'Login with {provider} is not supported.', 'error')
         return redirect(url_for('auth.login'))
+
+# Add a top-level callback route to match the registered redirect URI path without the auth blueprint prefix
+@auth_bp.route('/callback/<provider>')
+def callback_alt(provider):
+    """Alternative OAuth callback route to match the registered redirect URI"""
+    logger.info(f"Alternative OAuth callback received for provider: {provider}")
+    return oauth_callback(provider)
 
 # Logout
 @auth_bp.route('/logout')
