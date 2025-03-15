@@ -24,14 +24,26 @@ import threading
 import filelock
 import numpy as np
 
-# Import sentence transformers for embeddings
-from sentence_transformers import SentenceTransformer
+# Configure logging
+logger = logging.getLogger('vector_store_final')
 
-# Import Qdrant for vector storage
-from qdrant_client import QdrantClient, models
-from qdrant_client.http import models as rest
-from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
+# Import sentence transformers for embeddings
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    logger.error("Cannot import SentenceTransformer - embedding functionality will not be available")
+    SentenceTransformer = None
+
+# Import Qdrant for vector storage with proper error handling
+try:
+    from qdrant_client import QdrantClient, models
+    from qdrant_client.http import exceptions as qdrant_exceptions
+    QDRANT_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"Cannot import Qdrant client: {e}")
+    QDRANT_AVAILABLE = False
+    QdrantClient = None
+    models = None
 
 # Import database utilities
 from sqlalchemy import text as sql_text
@@ -39,19 +51,23 @@ from database.multi_user_db.db_final import get_db_connection
 from sqlalchemy.sql import bindparam
 from sqlalchemy import Integer
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('vector_store_final')
-
 # Constants
 BASE_DIR = os.environ.get('APP_BASE_DIR', '/app')
 DATABASE_DIR = os.environ.get('DATABASE_DIR', os.path.join(BASE_DIR, 'database'))
 VECTOR_STORE_PATH = os.path.join(BASE_DIR, "twitter_bookmark_manager", "data", "vector_store")
 QDRANT_HOST = os.environ.get('QDRANT_HOST', 'localhost')
 QDRANT_PORT = int(os.environ.get('QDRANT_PORT', '6333'))
+
+# Check if vector store is disabled via environment variable
+DISABLE_VECTOR_STORE = os.environ.get('DISABLE_VECTOR_STORE', 'false').lower() == 'true'
+PREFER_LOCAL_VECTOR = os.environ.get('PREFER_LOCAL_VECTOR', 'true').lower() == 'true'
+SHORT_TIMEOUT = float(os.environ.get('QDRANT_TIMEOUT', '2.0'))  # Short timeout to prevent hanging
+
+# Log vector store configuration
+logger.info(f"Vector store configuration: DISABLE_VECTOR_STORE={DISABLE_VECTOR_STORE}, "
+            f"PREFER_LOCAL_VECTOR={PREFER_LOCAL_VECTOR}, "
+            f"QDRANT_HOST={QDRANT_HOST}, QDRANT_PORT={QDRANT_PORT}, "
+            f"TIMEOUT={SHORT_TIMEOUT}s")
 
 # Ensure vector store directory exists
 os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
@@ -189,16 +205,19 @@ class VectorStore:
 
             if self.server_mode:
                 # Server mode - use REST API
+                logger.info(f"Initializing Qdrant client in server mode with timeout={SHORT_TIMEOUT}s")
                 self.client = QdrantClient(
                     host=QDRANT_HOST,
-                    port=QDRANT_PORT
+                    port=QDRANT_PORT,
+                    timeout=SHORT_TIMEOUT  # Short timeout to fail fast
                 )
             else:
                 # Local mode - use file system
+                logger.info(f"Initializing Qdrant client in local mode")
                 self.client = QdrantClient(
                     path=VECTOR_STORE_PATH,
                     prefer_grpc=False,
-                    timeout=60
+                    force_disable_multiple_clients_check=True  # Allow multiple workers
                 )
 
             # Ensure collection exists
@@ -749,6 +768,11 @@ def get_vector_store(collection_name="bookmarks"):
     """
     global _vector_store_instance, _disable_server_mode
     
+    # First check if vector store is disabled by environment variable
+    if DISABLE_VECTOR_STORE:
+        logger.warning("Vector store is disabled by environment variable")
+        return DummyVectorStore("Vector store disabled by environment variable")
+    
     # First check without lock
     if _vector_store_instance is None:
         with _vector_store_lock:
@@ -757,8 +781,9 @@ def get_vector_store(collection_name="bookmarks"):
                 try:
                     logger.info(f"Initializing vector store with collection {collection_name}")
                     
-                    # If server mode is disabled from previous failures, skip trying it
-                    if not _disable_server_mode:
+                    # Try server mode first unless local mode is preferred
+                    server_error = None
+                    if not PREFER_LOCAL_VECTOR and not _disable_server_mode:
                         try:
                             logger.info(f"Attempting to initialize in server mode with host={QDRANT_HOST}, port={QDRANT_PORT}")
                             _vector_store_instance = VectorStore(
@@ -767,10 +792,13 @@ def get_vector_store(collection_name="bookmarks"):
                             )
                             logger.info("Successfully initialized vector store in server mode")
                             return _vector_store_instance
-                        except Exception as server_error:
-                            logger.warning(f"Server mode failed: {str(server_error)}, falling back to local mode")
+                        except Exception as e:
+                            server_error = e
+                            logger.warning(f"Server mode failed: {str(e)}, falling back to local mode")
                             # Mark server mode as disabled for future calls
                             _disable_server_mode = True
+                    elif PREFER_LOCAL_VECTOR:
+                        logger.info("Local vector mode preferred by configuration")
                     else:
                         logger.info("Server mode is disabled from previous failures, trying local mode directly")
                         
@@ -785,14 +813,17 @@ def get_vector_store(collection_name="bookmarks"):
                         return _vector_store_instance
                     except Exception as local_error:
                         logger.error(f"Local mode failed: {str(local_error)}")
-                        logger.error(traceback.format_exc())
-                        logger.warning("Both server and local modes failed, using dummy vector store")
-                        return DummyVectorStore(f"Server mode error: {str(server_error) if not _disable_server_mode else 'Disabled'}, Local mode error: {str(local_error)}")
                         
+                        # Create detailed error message
+                        error_details = f"Server error: {str(server_error) if server_error else 'Not attempted'}\n" + \
+                                       f"Local error: {str(local_error)}"
+                        
+                        # Return dummy store when all modes fail
+                        _vector_store_instance = DummyVectorStore(error_details)
+                
                 except Exception as e:
-                    logger.error(f"Failed to initialize vector store: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    return DummyVectorStore(str(e))
+                    logger.error(f"Unexpected error initializing vector store: {str(e)}")
+                    _vector_store_instance = DummyVectorStore(str(e))
     
     return _vector_store_instance
 
@@ -818,56 +849,109 @@ class DummyVectorStore:
         self.collection_name = "bookmarks"  # Default collection name
         self.client = None
         self.model = None
-        logger.error(f"Using dummy vector store due to initialization error: {error_message}")
+        self.is_dummy = True  # Flag to identify this as a dummy store
+        logger.warning(f"Using dummy vector store due to initialization error: {error_message}")
     
     def __getattr__(self, name):
         def dummy_method(*args, **kwargs):
-            logger.error(f"Vector store operation '{name}' failed - store is in dummy mode due to: {self.error_message}")
+            logger.warning(f"Vector store operation '{name}' called in dummy mode: {self.error_message}")
             
             # Return appropriate values for specific methods
             if name == 'find_similar':
                 return []  # Return empty list for search results
-            elif name == 'add_bookmark':
-                return False  # Return False for add operations
+            elif name == 'add_bookmark' or name == 'add_text':
+                return {"success": False, "message": "Using dummy vector store"}  # Return failure dict
             elif name == 'delete_bookmark':
-                return False  # Return False for delete operations
+                return {"success": False, "message": "Using dummy vector store"}  # Return failure dict
             elif name == 'get_collection_info':
-                return {"status": "error", "error": self.error_message}  # Return error info
+                return {"status": "dummy", "message": self.error_message}  # Return status info
             elif name == 'rebuild_user_vectors':
-                return {"status": "error", "message": f"Vector store unavailable: {self.error_message}"}
+                return {"success": False, "message": f"Vector store unavailable: {self.error_message}"}
             
             return None
         return dummy_method
         
     # Explicitly implement critical methods
-    def add_bookmark(self, bookmark_id: int, text: str, user_id: int, metadata=None):
-        logger.warning(f"Cannot add bookmark to vector store - using dummy mode due to: {self.error_message}")
-        return False
+    def add_text(self, text, metadata=None):
+        """Add text to the vector store (dummy implementation)."""
+        logger.warning(f"Cannot add text to vector store - using dummy mode: {self.error_message}")
+        return {"success": False, "message": "Using dummy vector store"}
         
-    def find_similar(self, query: str, user_id: int, limit: int = 5):
-        logger.warning(f"Cannot search vector store - using dummy mode due to: {self.error_message}")
+    def add_bookmark(self, bookmark_id, text=None, user_id=None, metadata=None):
+        """Add bookmark to the vector store (dummy implementation)."""
+        logger.warning(f"Cannot add bookmark to vector store - using dummy mode: {self.error_message}")
+        return {"success": False, "message": "Using dummy vector store"}
+        
+    def find_similar(self, query, user_id=None, limit=5):
+        """Find similar bookmarks (dummy implementation)."""
+        logger.warning(f"Cannot search vector store - using dummy mode: {self.error_message}")
         return []
         
-    def delete_bookmark(self, bookmark_id: int, user_id: int = None):
-        logger.warning(f"Cannot delete from vector store - using dummy mode due to: {self.error_message}")
-        return False
+    def delete_bookmark(self, bookmark_id, user_id=None):
+        """Delete bookmark from vector store (dummy implementation)."""
+        logger.warning(f"Cannot delete from vector store - using dummy mode: {self.error_message}")
+        return {"success": False, "message": "Using dummy vector store"}
         
-    def rebuild_user_vectors(self, user_id, bookmarks):
-        logger.warning(f"Cannot rebuild vectors - using dummy mode due to: {self.error_message}")
-        return {"status": "error", "message": f"Vector store unavailable: {self.error_message}"}
+    def rebuild_user_vectors(self, user_id, batch_size=20, session_id=None):
+        """Rebuild user vectors (dummy implementation)."""
+        logger.warning(f"Cannot rebuild vectors - using dummy mode: {self.error_message}")
+        return {"success": False, "message": f"Vector store unavailable: {self.error_message}"}
+        
+    def clear(self):
+        """Clear vector store (dummy implementation)."""
+        logger.warning(f"Cannot clear vector store - using dummy mode: {self.error_message}")
+        return {"success": False, "message": "Using dummy vector store"}
 
 def get_multi_user_vector_store(collection_name="bookmarks"):
     """
-    Get a vector store instance for the multi-user environment.
-    This is a wrapper around get_vector_store for compatibility.
-    
-    Args:
-        collection_name: Name of the collection to use
-        
-    Returns:
-        VectorStore instance
+    Get a vector store instance with multi-user support.
+    This is a wrapper for compatibility with the multi-user environment.
     """
-    return get_vector_store(collection_name=collection_name)
+    # Check if vector store is disabled
+    if DISABLE_VECTOR_STORE:
+        logger.warning("Multi-user vector store is disabled by environment variable")
+        return DummyVectorStore("Vector store disabled by environment variable")
+    
+    # Check if dependencies are available
+    if not QDRANT_AVAILABLE or not SentenceTransformer:
+        logger.error("Required dependencies for vector store are not available")
+        return DummyVectorStore("Required dependencies not available")
+    
+    try:
+        # Get user ID from context if available
+        try:
+            from auth.user_context_final import UserContext
+            user = UserContext.get_current_user()
+            user_id = user.id if user else None
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"Could not get user context: {e}, using default user ID")
+            user_id = None
+        
+        # If no user is found, return dummy store
+        if not user_id:
+            logger.warning("No user ID available for vector store, using dummy store")
+            return DummyVectorStore("No user ID available")
+        
+        # Try to get a VectorStoreMultiUser instance
+        try:
+            vector_store = VectorStoreMultiUser(user_id=user_id)
+            logger.info(f"Successfully initialized multi-user vector store for user {user_id}")
+            return vector_store
+        except Exception as e:
+            logger.error(f"Error initializing multi-user vector store: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Fall back to the singleton vector store
+            try:
+                logger.info("Falling back to singleton vector store")
+                return get_vector_store(collection_name=collection_name)
+            except Exception as fallback_error:
+                logger.error(f"Fallback to singleton vector store failed: {fallback_error}")
+                return DummyVectorStore(f"Multi-user error: {e}, Fallback error: {fallback_error}")
+    except Exception as e:
+        logger.error(f"Unexpected error in get_multi_user_vector_store: {e}")
+        logger.error(traceback.format_exc())
+        return DummyVectorStore(str(e))
 
 def get_memory_usage():
     """Get current memory usage in MB as a float"""
