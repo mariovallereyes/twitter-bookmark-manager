@@ -1156,21 +1156,21 @@ def app_status():
         if user:
             auth_status['user_id'] = user.id
             auth_status['username'] = getattr(user, 'username', 'unknown')
-                
-            return jsonify({
-                'status': 'healthy',
-                'database': db_status,
-                'auth': auth_status,
-                'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
-                'timestamp': datetime.now().isoformat()
-            })
-        except Exception as e:
-            logger.error(f"Error in status endpoint: {e}")
-            return jsonify({
-                'status': 'unhealthy',
-                'error': str(e),
-                'timestamp': datetime.now().isoformat()
-            }), 500
+        
+        return jsonify({
+            'status': 'healthy',
+            'database': db_status,
+            'auth': auth_status,
+            'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Error in status endpoint: {e}")
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/-/health')
 def health_check():
