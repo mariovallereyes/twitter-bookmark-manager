@@ -32,5 +32,5 @@ ENV FLASK_DEBUG=false
 # Expose port
 EXPOSE 8000
 
-# Run the application
-CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8000", "--timeout", "300", "--workers", "1", "--threads", "3", "--worker-class", "gthread", "--max-requests", "1000", "--max-requests-jitter", "100", "wsgi_final:application"] 
+# Run the bare minimum application
+CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8000", "--timeout", "30", "--workers", "1", "--threads", "1", "--log-level", "debug", "wsgi_final:application"] 
