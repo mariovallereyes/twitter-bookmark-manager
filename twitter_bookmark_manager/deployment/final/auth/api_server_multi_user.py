@@ -147,9 +147,9 @@ try:
     from auth.auth_routes_final import auth_bp
     app.register_blueprint(auth_bp, url_prefix='/auth')
     logger.info("Registered auth blueprint")
-except Exception as e:
+    except Exception as e:
     logger.error(f"Failed to register auth blueprint: {str(e)}")
-    logger.error(traceback.format_exc())
+        logger.error(traceback.format_exc())
 
 # Enable CORS
 CORS(app)
@@ -185,7 +185,7 @@ class CustomSessionInterface(SecureCookieSessionInterface):
             try:
                 session_id = session_id.decode('utf-8')
                 logger.info(f"Converted session ID from bytes to string: {session_id[:5]}...")
-            except Exception as e:
+    except Exception as e:
                 logger.error(f"Error decoding session ID: {str(e)}")
                 # Don't set cookie if we can't decode the session ID
                 return
@@ -1158,12 +1158,12 @@ def app_status():
             auth_status['username'] = getattr(user, 'username', 'unknown')
                 
                 return jsonify({
-            'status': 'healthy',
-            'database': db_status,
-            'auth': auth_status,
-            'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
-            'timestamp': datetime.now().isoformat()
-        })
+                'status': 'healthy',
+                'database': db_status,
+                'auth': auth_status,
+                'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'unknown'),
+                'timestamp': datetime.now().isoformat()
+            })
                 except Exception as e:
         logger.error(f"Error in status endpoint: {e}")
         return jsonify({
