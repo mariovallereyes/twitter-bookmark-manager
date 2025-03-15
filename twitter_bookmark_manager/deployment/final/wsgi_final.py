@@ -20,9 +20,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger('wsgi_final')
 
-# Disable vector store and other potentially problematic features
-os.environ['DISABLE_VECTOR_STORE'] = 'true'
-os.environ['FLASK_DEBUG'] = 'false'
+# Load environment variables if dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.info("Loaded environment from .env file")
+except ImportError:
+    logger.warning("python-dotenv not installed, using environment variables as is")
+
+# Log Twitter authentication variables (securely)
+logger.info("Twitter authentication configuration:")
+logger.info(f"TWITTER_CLIENT_ID present: {bool(os.environ.get('TWITTER_CLIENT_ID'))}")
+logger.info(f"TWITTER_CLIENT_SECRET present: {bool(os.environ.get('TWITTER_CLIENT_SECRET'))}")
+logger.info(f"TWITTER_REDIRECT_URI: {os.environ.get('TWITTER_REDIRECT_URI', 'Not set')}")
 
 # Create the emergency application first so it's available if needed
 emergency_app = Flask(__name__)
@@ -82,12 +92,56 @@ try:
                 self.app = app
         sys.modules['flask_session'] = type('mock_module', (), {'Session': MockSession})
     
-    # Try to import database module first to initialize it
+    # Check auth modules first to make sure they're available
     try:
-        from database.multi_user_db.db_final import init_database
+        logger.info("Checking auth modules...")
+        
+        # Check auth_routes_final
+        try:
+            from auth.auth_routes_final import auth_bp
+            logger.info("auth_routes_final module loaded successfully")
+        except Exception as auth_routes_error:
+            logger.error(f"Error loading auth_routes_final: {auth_routes_error}")
+            logger.error(traceback.format_exc())
+        
+        # Check user_context_final
+        try:
+            from auth.user_context_final import UserContext, login_required, UserContextMiddleware
+            logger.info("user_context_final module loaded successfully")
+        except Exception as user_context_error:
+            logger.error(f"Error loading user_context_final: {user_context_error}")
+            logger.error(traceback.format_exc())
+        
+        # Check oauth_final
+        try:
+            from auth.oauth_final import OAuthManager
+            logger.info("oauth_final module loaded successfully")
+        except Exception as oauth_error:
+            logger.error(f"Error loading oauth_final: {oauth_error}")
+            logger.error(traceback.format_exc())
+            
+    except Exception as auth_module_error:
+        logger.error(f"Error checking auth modules: {auth_module_error}")
+        logger.error(traceback.format_exc())
+        # Continue anyway - we'll try to load the main app
+    
+    # Try to import database module to initialize it
+    try:
+        from database.multi_user_db.db_final import init_database, get_db_connection
         # Initialize database
         init_database()
         logger.info("Database initialized successfully")
+        
+        # Check user tables
+        try:
+            from database.multi_user_db.user_model_final import create_user_table
+            conn = get_db_connection()
+            create_user_table(conn)
+            logger.info("User tables initialized successfully")
+        except Exception as user_error:
+            logger.error(f"Error initializing user tables: {user_error}")
+            logger.error(traceback.format_exc())
+            
     except Exception as db_error:
         logger.error(f"Database initialization error: {db_error}")
         logger.error(traceback.format_exc())

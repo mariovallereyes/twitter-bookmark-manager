@@ -48,6 +48,9 @@ ENV_VARS = {
     'DB_PASSWORD': os.environ.get('DB_PASSWORD', ''),
     'APPLICATION_ROOT': os.environ.get('APPLICATION_ROOT', '/'),
     'UPLOAD_FOLDER': os.environ.get('UPLOAD_FOLDER', 'uploads'),
+    'TWITTER_CLIENT_ID': os.environ.get('TWITTER_CLIENT_ID', ''),
+    'TWITTER_CLIENT_SECRET': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+    'TWITTER_REDIRECT_URI': os.environ.get('TWITTER_REDIRECT_URI', 'https://twitter-bookmark-manager-production.up.railway.app/oauth/callback/twitter'),
 }
 
 # Ensure any required env vars are set in os.environ for other modules
@@ -61,46 +64,14 @@ from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# Custom imports - separate imports to avoid circular references
-try:
-    from auth.user_context_final import UserContext
-except ImportError as e:
-    # Fallback UserContext
-    class UserContext:
-        @staticmethod
-        def get_user_id():
-            return None
-        
-        @staticmethod
-        def is_authenticated():
-            return False
-    print(f"Created fallback UserContext due to import error: {e}")
-
-# login_required is now imported separately to avoid circular dependencies
-try:
-    from auth.user_context_final import login_required
-except ImportError as e:
-    # Fallback implementation if circular imports cause issues
-    from functools import wraps
-    def login_required(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            user_id = session.get('user_id')
-            if not user_id:
-                if request.path.startswith('/api/'):
-                    return jsonify({'error': 'Authentication required'}), 401
-                return redirect(url_for('auth.login'))
-            return f(*args, **kwargs)
-        return decorated_function
-    print(f"Created fallback login_required due to import error: {e}")
-
-# Import database utilities
+# Import database utilities first to avoid circular imports
 from database.multi_user_db.db_final import (
     get_db_connection, 
     init_database,
     cleanup_db_connections,
     check_database_status
 )
+
 # Import update functionality
 from database.multi_user_db.update_bookmarks_final import (
     final_update_bookmarks
@@ -140,19 +111,34 @@ app.config.update(
     DEBUG=ENV_VARS['DEBUG'],
     TESTING=ENV_VARS['TESTING'],
     APPLICATION_ROOT=ENV_VARS['APPLICATION_ROOT'],
-    DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE']
+    DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE'],
+    SESSION_COOKIE_SECURE=not ENV_VARS['DEBUG'],  # Secure cookies in production
+    SESSION_COOKIE_HTTPONLY=True
 )
 
 # Add database connection function to app config
 app.config['get_db_connection'] = get_db_connection
 
-# Register blueprints
+# Import auth modules after database to avoid circular imports
 try:
+    # Import auth components
+    from auth.user_context_final import UserContext, login_required, UserContextMiddleware
     from auth.auth_routes_final import auth_bp
+    from auth.user_api_final import user_api_bp
+    
+    # Register blueprints
     app.register_blueprint(auth_bp, url_prefix='/auth')
     logger.info("Registered auth blueprint")
+    
+    app.register_blueprint(user_api_bp, url_prefix='/api/user')
+    logger.info("Registered user API blueprint")
+    
+    # Set up user context middleware
+    from database.multi_user_db.user_model_final import get_user_by_id
+    user_middleware = UserContextMiddleware(app, get_user_by_id)
+    logger.info("User context middleware initialized")
 except Exception as e:
-    logger.error(f"Failed to register auth blueprint: {str(e)}")
+    logger.error(f"Failed to set up authentication: {str(e)}")
     logger.error(traceback.format_exc())
 
 # Enable CORS
@@ -1409,12 +1395,13 @@ if not hasattr(sys, '_vector_store_disabled'):
     
     logger.info("Registered dummy modules to prevent import errors")
 
-# Check authentication status endpoint
+# Check authentication status endpoint with improved error handling
 @app.route('/check-auth')
 def check_auth():
     """Check if the user is authenticated and return user info"""
     try:
         user_id = session.get('user_id')
+        logger.info(f"Checking authentication for user_id: {user_id}")
         
         # Convert from bytes to string if needed
         if isinstance(user_id, bytes):
@@ -1422,6 +1409,7 @@ def check_auth():
                 user_id = user_id.decode('utf-8')
                 # Update session
                 session['user_id'] = user_id
+                logger.info(f"Converted user_id from bytes to string: {user_id}")
             except Exception as e:
                 logger.error(f"Error decoding user_id from bytes: {e}")
                 user_id = None
@@ -1433,23 +1421,28 @@ def check_auth():
             user = get_user_by_id(db, user_id)
             
             if user:
+                logger.info(f"User authenticated: {user.username}")
                 return jsonify({
                     'authenticated': True,
                     'user': {
                         'id': user.id,
                         'username': user.username,
-                        'name': user.name,
-                        'avatar_url': user.avatar_url
+                        'name': getattr(user, 'display_name', user.username),
+                        'avatar_url': getattr(user, 'profile_image_url', None)
                     }
                 })
+            else:
+                logger.warning(f"User ID {user_id} not found in database")
         
         # If no user_id in session or user not found
+        logger.info("User not authenticated")
         return jsonify({
             'authenticated': False,
             'message': 'User not authenticated'
         })
     except Exception as e:
         logger.error(f"Error in check_auth: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({
             'authenticated': False,
             'error': str(e)
@@ -1478,13 +1471,82 @@ def twitter_oauth_callback():
     # Import auth blueprint's oauth_callback function
     try:
         from auth.auth_routes_final import oauth_callback
+        logger.info("Successfully imported oauth_callback")
         return oauth_callback('twitter')
     except Exception as e:
         logger.error(f"Error in twitter_oauth_callback: {e}")
+        logger.error(traceback.format_exc())  # Log full traceback
         return jsonify({
             'status': 'error',
             'message': f'Error in Twitter OAuth callback: {str(e)}'
         }), 500
+
+# Debug endpoint to check Twitter auth configuration
+@app.route('/debug/auth-config')
+def debug_auth_config():
+    """Debugging endpoint to check Twitter auth configuration"""
+    # Only allow in debug mode
+    if not ENV_VARS['DEBUG']:
+        return jsonify({'error': 'Debug mode not enabled'}), 403
+        
+    try:
+        # Check for Twitter credentials
+        twitter_client_id = os.environ.get('TWITTER_CLIENT_ID', '')
+        twitter_client_secret = os.environ.get('TWITTER_CLIENT_SECRET', '')
+        twitter_redirect_uri = os.environ.get('TWITTER_REDIRECT_URI', '')
+        
+        # Check if auth blueprint is registered
+        blueprints = [bp.name for bp in app.blueprints.values()]
+        
+        # Check if auth components are loaded
+        auth_components = {}
+        try:
+            from auth.auth_routes_final import auth_bp
+            auth_components['auth_routes'] = True
+        except Exception as e:
+            auth_components['auth_routes'] = False
+            auth_components['auth_routes_error'] = str(e)
+            
+        try:
+            from auth.user_context_final import UserContext
+            auth_components['user_context'] = True
+        except Exception as e:
+            auth_components['user_context'] = False
+            auth_components['user_context_error'] = str(e)
+            
+        try:
+            from auth.oauth_final import OAuthManager
+            oauth_manager = OAuthManager({
+                'twitter': {
+                    'client_id': 'REDACTED',
+                    'client_secret': 'REDACTED',
+                    'callback_url': twitter_redirect_uri
+                }
+            })
+            auth_components['oauth_manager'] = True
+        except Exception as e:
+            auth_components['oauth_manager'] = False
+            auth_components['oauth_manager_error'] = str(e)
+        
+        return jsonify({
+            'twitter_auth': {
+                'client_id_present': bool(twitter_client_id),
+                'client_secret_present': bool(twitter_client_secret),
+                'redirect_uri': twitter_redirect_uri
+            },
+            'blueprints': blueprints,
+            'auth_components': auth_components,
+            'app_config': {
+                'secret_key_present': bool(app.config.get('SECRET_KEY')),
+                'session_type': app.config.get('SESSION_TYPE'),
+                'template_folder': app.template_folder,
+                'debug': app.config.get('DEBUG')
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error in debug_auth_config: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
