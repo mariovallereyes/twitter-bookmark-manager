@@ -84,7 +84,7 @@ def login():
         session['next'] = next_url
     
     # Clear any existing auth related session data
-    for key in ['oauth_token', 'oauth_verifier', 'provider', 'user_id']:
+    for key in ['oauth_token', 'oauth_verifier', 'provider', 'user_id', 'twitter_code_verifier', 'twitter_oauth_state']:
         session.pop(key, None)
         
     return render_template('login_final.html')
@@ -120,27 +120,26 @@ def oauth_callback(provider):
     # Extract OAuth data based on provider
     oauth_data = {}
     if provider == 'twitter':
-        # Twitter OAuth data
-        oauth_token = request.args.get('oauth_token')
-        oauth_verifier = request.args.get('oauth_verifier')
+        # Twitter OAuth 2.0 data
+        code = request.args.get('code')
+        state = request.args.get('state')
         
-        if not oauth_token or not oauth_verifier:
-            flash('Authentication failed. Please try again.', 'error')
-            logger.error(f"Missing OAuth parameters: token={oauth_token}, verifier={oauth_verifier}")
+        if not code:
+            flash('Authentication failed: No authorization code received. Please try again.', 'error')
+            logger.error(f"Missing authorization code from Twitter callback")
             return redirect(url_for('auth.login'))
         
-        # Store in session as strings
-        session['oauth_token'] = str(oauth_token)
-        session['oauth_verifier'] = str(oauth_verifier)
-        session['provider'] = 'twitter'
+        # Store OAuth data
+        oauth_data = {
+            'code': code,
+            'state': state
+        }
         
-        # Get access token
+        # Get user info
         try:
             oauth_manager = get_oauth_manager()
-            user_info = oauth_manager.get_user_info('twitter', {
-                'oauth_token': session['oauth_token'],
-                'oauth_verifier': session['oauth_verifier']
-            })
+            logger.info("Getting user info from Twitter")
+            user_info = oauth_manager.get_user_info('twitter', oauth_data)
             
             if not user_info or 'id' not in user_info:
                 flash('Failed to get user information from Twitter. Please try again.', 'error')
@@ -151,7 +150,9 @@ def oauth_callback(provider):
             provider_id = str(user_info.get('id'))
             username = user_info.get('username', '')
             name = user_info.get('name', '')
-            avatar_url = user_info.get('profile_image_url', '').replace('_normal', '')
+            avatar_url = user_info.get('profile_image_url', '')
+            
+            logger.info(f"Received Twitter user info: id={provider_id}, username={username}")
             
             # Find or create user
             db = get_db_connection()
@@ -163,12 +164,10 @@ def oauth_callback(provider):
                     db, 
                     username=username,
                     email=f"{username}@twitter.placeholder",
-                    name=name,
-                    provider='twitter',
+                    auth_provider='twitter',
                     provider_id=provider_id,
-                    avatar_url=avatar_url,
-                    oauth_token=session.get('oauth_token', ''),
-                    oauth_token_secret=user_info.get('oauth_token_secret', '')
+                    display_name=name,
+                    profile_image_url=avatar_url
                 )
                 logger.info(f"Created new user: {username} (ID: {user.id})")
             else:
@@ -178,11 +177,6 @@ def oauth_callback(provider):
             
             # Store user ID in session as string
             session['user_id'] = str(user.id)
-            
-            # Clean up OAuth session data
-            session.pop('oauth_token', None)
-            session.pop('oauth_verifier', None)
-            session.pop('provider', None)
             
             # Redirect to next_url or home
             next_url = session.pop('next', '/')
