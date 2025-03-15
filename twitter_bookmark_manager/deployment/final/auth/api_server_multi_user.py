@@ -967,7 +967,8 @@ def process_bookmarks():
                                 session_id=session_id,
                                 start_index=0,
                                 rebuild_vector=True,
-                                user_id=user_id
+                                user_id=user_id,
+                                skip_vector=True
                             )
                             logger.info(f"Background processing completed for session {session_id}: {result}")
                         except RuntimeError as re:
@@ -1194,23 +1195,34 @@ def update_process(user_id, session_id, rebuild=False, rebuild_session_id=None):
             try:
                 user_dir = get_user_directory(user_id)
                 status_file = os.path.join(user_dir, f"upload_status_{session_id}.json")
-                result = {
-                    'success': True,
-                    'message': 'Database update simulated - vector rebuild will proceed',
-                    'session_id': session_id,
-                    'user_id': user_id
-                }
+                
+                logger.info(f"Starting database update for session {session_id}, user {user_id}")
+                if rebuild:
+                    logger.info(f"Database update will be followed by vector rebuild (session {rebuild_session_id})")
+                
+                # Run the actual database update with skip_vector=True to avoid vector store issues
+                import_result = final_update_bookmarks(
+                    session_id=session_id,
+                    start_index=0,
+                    rebuild_vector=False,  # Don't rebuild vector here
+                    user_id=user_id,
+                    skip_vector=True  # Skip vector store operations
+                )
+                
+                # Update status file with result
                 with open(status_file, 'w') as f:
                     status = {
                         'user_id': user_id,
                         'session_id': session_id,
-                        'status': 'completed',
-                        'message': 'Database update completed',
-                        'result': result,
+                        'status': 'completed' if import_result.get('success', False) else 'error',
+                        'message': import_result.get('message', 'Database update completed'),
+                        'result': import_result,
                         'end_time': datetime.now().isoformat()
                     }
                     json.dump(status, f)
-                logger.info(f"Database update simulated for session {session_id}")
+                
+                logger.info(f"Database update completed for session {session_id}: {import_result.get('status', 'completed')}")
+                
                 if rebuild:
                     logger.info("Starting vector rebuild after database update")
                     vector_session_id = rebuild_session_id if rebuild_session_id else str(uuid.uuid4())[:8]

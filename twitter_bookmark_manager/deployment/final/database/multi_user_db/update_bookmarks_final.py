@@ -310,73 +310,70 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
     Returns:
         dict: Results of the rebuild operation
     """
-    import os
-    import time
-    import json
-    import random
-    import traceback
-    import tempfile
-    from datetime import datetime
+    # Check if vector store is disabled
+    if os.environ.get('DISABLE_VECTOR_STORE', 'false').lower() == 'true':
+        logger.warning(f"Vector store is disabled by environment variable - session_id={session_id}")
+        return {
+            'success': True,
+            'message': 'Vector store is disabled by environment variable',
+            'session_id': session_id,
+            'user_id': user_id,
+            'skipped': True
+        }
+    
+    # Create lock file path
+    lock_file_path = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+    
+    # Check if another rebuild is in progress
+    if os.path.exists(lock_file_path):
+        try:
+            lock_file_age = time.time() - os.path.getmtime(lock_file_path)
+            if lock_file_age < 600:  # 10 minutes
+                logger.warning(f"Another vector rebuild is in progress (lock age: {lock_file_age:.1f}s) - session_id={session_id}")
+                return {
+                    'success': False,
+                    'message': f'Another vector rebuild is already in progress (started {lock_file_age:.1f} seconds ago)',
+                    'session_id': session_id,
+                    'user_id': user_id
+                }
+            else:
+                logger.warning(f"Removing stale lock file (age: {lock_file_age:.1f}s) - session_id={session_id}")
+                try:
+                    os.remove(lock_file_path)
+                except Exception as e:
+                    logger.error(f"Error removing stale lock file: {e} - session_id={session_id}")
+        except Exception as e:
+            logger.error(f"Error checking lock file: {e} - session_id={session_id}")
+    
+    # Create new lock file
+    try:
+        with open(lock_file_path, 'w') as f:
+            f.write(f"vector_rebuild_session_{session_id}_{datetime.now().isoformat()}")
+        logger.info(f"Created lock file at {lock_file_path} - session_id={session_id}")
+    except Exception as e:
+        logger.error(f"Error creating lock file: {e} - session_id={session_id}")
+        # Continue anyway
     
     # Start timing
     start_time = datetime.now()
     
-    # Create user-specific lock file to prevent concurrent rebuilds for the same user
-    # (but still allow different users to rebuild simultaneously)
-    lock_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_lock_{user_id}.lock")
+    # Set up progress tracking
     progress_file = os.path.join(tempfile.gettempdir(), f"vector_rebuild_progress_{user_id}_{session_id}.json")
     
-    # Check if lock already exists
-    if os.path.exists(lock_file):
-        lock_file_stat = os.stat(lock_file)
-        lock_file_age = time.time() - lock_file_stat.st_mtime
-        
-        # If lock is older than 30 minutes, it's stale, remove it
-        if lock_file_age > 1800:
-            try:
-                os.remove(lock_file)
-                logger.warning(f"🔓 Removed stale lock file (age: {lock_file_age:.1f}s) - session_id={session_id}")
-            except Exception as e:
-                logger.error(f"Error removing stale lock file: {e} - session_id={session_id}")
-                return {
-                    'success': False,
-                    'error': f"Cannot remove stale lock file: {str(e)}",
-                    'message': "Another vector rebuild may be in progress"
-                }
-        else:
-            logger.warning(f"⚠️ Lock file exists, another rebuild may be in progress - session_id={session_id}")
-            return {
-                'success': False,
-                'error': "Another vector rebuild is already in progress",
-                'message': f"A rebuild started {lock_file_age:.1f} seconds ago is still running"
-            }
-    
-    # Create lock file
-    try:
-        with open(lock_file, 'w') as f:
-            f.write(f"{session_id}:{datetime.now().isoformat()}")
-        logger.info(f"🔒 Created vector rebuild lock file - session_id={session_id}")
-    except Exception as e:
-        logger.error(f"Error creating lock file: {e} - session_id={session_id}")
-        return {
-            'success': False,
-            'error': f"Cannot create lock file: {str(e)}",
-            'message': "Failed to start vector rebuild"
-        }
-    
-    # Calculate progress if resuming from previous run
+    # Initialize progress values
     start_index = 0
     bookmarks_processed = 0
     total_errors = 0
     total_success = 0
     
+    # Calculate progress if resuming from previous run
     if resume and progress_data:
         try:
             start_index = progress_data.get('processed_index', 0)
             bookmarks_processed = progress_data.get('bookmarks_processed', 0)
             total_errors = progress_data.get('total_errors', 0)
             total_success = progress_data.get('total_success', 0)
-            logger.info(f"📋 Resuming from index {start_index} (processed: {bookmarks_processed}) - session_id={session_id}")
+            logger.info(f"Resuming from index {start_index} (processed: {bookmarks_processed}) - session_id={session_id}")
         except Exception as e:
             logger.error(f"Error parsing progress data: {e} - session_id={session_id}")
             start_index = 0
@@ -385,44 +382,50 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         # Initialize vector store with retry logic
         vector_store = get_vector_store_with_retry(user_id, session_id)
         if not vector_store:
-            logger.error(f"❌ Failed to initialize vector store after retries - session_id={session_id}")
+            logger.error(f"Failed to initialize vector store after retries - session_id={session_id}")
             return {
                 'success': False,
                 'error': "Failed to initialize vector store after multiple attempts",
-                'message': "Vector store initialization failed"
+                'message': "Vector store initialization failed",
+                'session_id': session_id,
+                'user_id': user_id
             }
         
         # Get bookmarks with optimized query
         try:
             bookmarks = get_bookmarks_optimized(user_id)
         except Exception as e:
-            logger.error(f"❌ Error retrieving bookmarks: {e} - session_id={session_id}")
+            logger.error(f"Error retrieving bookmarks: {e} - session_id={session_id}")
             return {
                 'success': False,
                 'error': f"Error retrieving bookmarks: {str(e)}",
-                'message': "Failed to retrieve bookmarks from database"
+                'message': "Failed to retrieve bookmarks from database",
+                'session_id': session_id,
+                'user_id': user_id
             }
         
         total_bookmarks = len(bookmarks)
         if total_bookmarks == 0:
-            logger.warning(f"⚠️ No bookmarks found for user {user_id} - session_id={session_id}")
+            logger.warning(f"No bookmarks found for user {user_id} - session_id={session_id}")
             return {
                 'success': True,
                 'message': "No bookmarks found, nothing to rebuild",
                 'total': 0,
                 'processed': 0,
                 'success_count': 0,
-                'error_count': 0
+                'error_count': 0,
+                'session_id': session_id,
+                'user_id': user_id
             }
         
         # Skip previously processed bookmarks if resuming
-        valid_bookmarks = [b for b in bookmarks if b.text and b.text.strip()]
+        valid_bookmarks = [b for b in bookmarks if getattr(b, 'text', None) and getattr(b, 'text', '').strip()]
         total_valid = len(valid_bookmarks)
         
-        logger.info(f"📚 Processing {total_valid} valid bookmarks out of {total_bookmarks} total - session_id={session_id}")
+        logger.info(f"Processing {total_valid} valid bookmarks out of {total_bookmarks} total - session_id={session_id}")
         
         if start_index >= total_valid:
-            logger.warning(f"⚠️ Start index {start_index} is beyond the end of valid bookmarks ({total_valid}) - session_id={session_id}")
+            logger.warning(f"Start index {start_index} is beyond the end of valid bookmarks ({total_valid}) - session_id={session_id}")
             return {
                 'success': True,
                 'message': "All bookmarks already processed",
@@ -430,7 +433,9 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
                 'valid': total_valid,
                 'processed': total_valid,
                 'success_count': total_success,
-                'error_count': total_errors
+                'error_count': total_errors,
+                'session_id': session_id,
+                'user_id': user_id
             }
         
         # Process bookmarks in batches
@@ -441,17 +446,20 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         # Clear the entire collection first if starting fresh (not resuming)
         if not resume or start_index == 0:
             try:
-                logger.info(f"🧹 Clearing existing vector store - session_id={session_id}")
-                vector_store.clear()
+                logger.info(f"Clearing existing vector store - session_id={session_id}")
+                if hasattr(vector_store, 'clear'):
+                    vector_store.clear()
+                else:
+                    logger.warning(f"Vector store does not have a clear method - session_id={session_id}")
             except Exception as e:
-                logger.error(f"❌ Error clearing vector store: {e} - session_id={session_id}")
+                logger.error(f"Error clearing vector store: {e} - session_id={session_id}")
                 # Continue anyway, as we'll attempt to add/update vectors
         
         while current_index < total_valid:
             batch_end = min(current_index + batch_size, total_valid)
             batch = valid_bookmarks[current_index:batch_end]
             
-            logger.info(f"📦 Processing batch {current_index}-{batch_end-1} of {total_valid} bookmarks - session_id={session_id}")
+            logger.info(f"Processing batch {current_index}-{batch_end-1} of {total_valid} bookmarks - session_id={session_id}")
             
             batch_errors = 0
             batch_success = 0
@@ -468,11 +476,11 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
                     else:
                         batch_errors += 1
                         total_errors += 1
-                        logger.warning(f"⚠️ Failed to add bookmark {bookmark.id}: {result.get('error')} - session_id={session_id}")
+                        logger.warning(f"Failed to add bookmark {getattr(bookmark, 'id', 'unknown')}: {result.get('error')} - session_id={session_id}")
                 except Exception as e:
                     batch_errors += 1
                     total_errors += 1
-                    logger.error(f"❌ Unexpected error adding bookmark {bookmark.id}: {e} - session_id={session_id}")
+                    logger.error(f"Unexpected error adding bookmark {getattr(bookmark, 'id', 'unknown')}: {e} - session_id={session_id}")
                 
                 # Update progress after each bookmark
                 bookmarks_processed += 1
@@ -480,25 +488,29 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
                 
                 # Update progress file regularly
                 if i % max(1, min(5, batch_size // 5)) == 0 or i == len(batch) - 1:
-                    update_progress_file(progress_file, {
-                        'processed_index': absolute_index + 1,  # +1 to start from next bookmark on resume
-                        'bookmarks_processed': bookmarks_processed,
-                        'total_valid': total_valid,
-                        'total_bookmarks': total_bookmarks,
-                        'progress_percent': progress_percent,
-                        'total_success': total_success,
-                        'total_errors': total_errors,
-                        'last_update': datetime.now().isoformat()
-                    })
+                    try:
+                        with open(progress_file, 'w') as f:
+                            json.dump({
+                                'processed_index': absolute_index + 1,  # +1 to start from next bookmark on resume
+                                'bookmarks_processed': bookmarks_processed,
+                                'total_valid': total_valid,
+                                'total_bookmarks': total_bookmarks,
+                                'progress_percent': progress_percent,
+                                'total_success': total_success,
+                                'total_errors': total_errors,
+                                'last_update': datetime.now().isoformat()
+                            }, f)
+                    except Exception as e:
+                        logger.error(f"Error updating progress file: {e} - session_id={session_id}")
             
-            logger.info(f"✅ Batch complete - Success: {batch_success}, Errors: {batch_errors} - session_id={session_id}")
+            logger.info(f"Batch complete - Success: {batch_success}, Errors: {batch_errors} - session_id={session_id}")
             
             # Move to next batch
             current_index = batch_end
         
         # Final verification
-        logger.info(f"🏁 Vector rebuild complete - session_id={session_id}")
-        logger.info(f"📊 Stats: Original: {total_bookmarks}, Valid: {total_valid}, Processed: {bookmarks_processed}, Success: {total_success}, Errors: {total_errors}")
+        logger.info(f"Vector rebuild complete - session_id={session_id}")
+        logger.info(f"Stats: Original: {total_bookmarks}, Valid: {total_valid}, Processed: {bookmarks_processed}, Success: {total_success}, Errors: {total_errors}")
         
         duration = (datetime.now() - start_time).total_seconds()
         
@@ -506,7 +518,7 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
         try:
             if os.path.exists(progress_file):
                 os.remove(progress_file)
-                logger.info(f"🧹 Removed progress file - session_id={session_id}")
+                logger.info(f"Removed progress file - session_id={session_id}")
         except Exception as e:
             logger.warning(f"Could not remove progress file: {e} - session_id={session_id}")
         
@@ -519,134 +531,200 @@ def rebuild_vector_store(session_id, user_id, batch_size=20, resume=True, progre
             'success_count': total_success,
             'error_count': total_errors,
             'duration_seconds': duration,
-            'progress': 100
+            'progress': 100,
+            'session_id': session_id,
+            'user_id': user_id
         }
-        
     except Exception as e:
-        logger.error(f"❌ Critical error in vector rebuild: {e} - session_id={session_id}")
+        logger.error(f"Critical error in vector rebuild: {e} - session_id={session_id}")
         logger.error(traceback.format_exc())
         
         # Get progress for reporting
-        progress_percent = calculate_progress(progress_file, total_valid=len(bookmarks) if 'bookmarks' in locals() else 0)
+        progress_percent = 0
+        try:
+            if os.path.exists(progress_file):
+                with open(progress_file, 'r') as f:
+                    progress_data = json.load(f)
+                    progress_percent = progress_data.get('progress_percent', 0)
+        except Exception as progress_error:
+            logger.error(f"Error reading progress file: {progress_error} - session_id={session_id}")
             
         return {
             'success': False,
             'error': str(e),
-            'traceback': traceback.format_exc(),
             'message': "Critical error during vector rebuild",
-            'progress': progress_percent
+            'progress': progress_percent,
+            'session_id': session_id,
+            'user_id': user_id
         }
     finally:
         # Always clean up lock file
         try:
-            if os.path.exists(lock_file):
-                os.remove(lock_file)
-                logger.info(f"🔓 Removed lock file - session_id={session_id}")
+            if os.path.exists(lock_file_path):
+                os.remove(lock_file_path)
+                logger.info(f"Removed lock file - session_id={session_id}")
         except Exception as e:
             logger.error(f"Error removing lock file: {e} - session_id={session_id}")
+            # Not much we can do at this point
 
 def get_vector_store_with_retry(user_id, session_id, max_retries=3, initial_backoff=1):
-    """
-    Attempt to initialize the vector store with retry logic and exponential backoff
-    
-    Args:
-        user_id (int): User ID
-        session_id (str): Session ID for tracking
-        max_retries (int): Maximum number of retry attempts
-        initial_backoff (float): Initial backoff time in seconds
+    """Get a vector store instance with retry logic."""
+    # Check if vector store is disabled
+    if os.environ.get('DISABLE_VECTOR_STORE', 'false').lower() == 'true':
+        logger.warning(f"Vector store is disabled by environment variable - session_id={session_id}")
+        return None
         
-    Returns:
-        VectorStoreMultiUser or None: Initialized vector store or None if failed
-    """
-    from vector_store_final import VectorStoreMultiUser
-    import time
-    import random
+    logger.info(f"Getting vector store - user_id={user_id} - session_id={session_id}")
     
-    attempt = 0
-    backoff = initial_backoff
-    
-    while attempt <= max_retries:
-        attempt += 1
+    for attempt in range(max_retries):
         try:
-            logger.info(f"🔄 Initializing vector store (attempt {attempt}/{max_retries + 1}) - session_id={session_id}")
-            vector_store = VectorStoreMultiUser(user_id=user_id)
-            logger.info(f"✅ Vector store initialized successfully - session_id={session_id}")
-            return vector_store
+            logger.info(f"Vector store attempt {attempt+1}/{max_retries} - session_id={session_id}")
+            
+            try:
+                # First try importing with relative imports (when running as a package)
+                from .vector_store_final import VectorStoreMultiUser, DummyVectorStore
+                logger.info(f"Imported vector store with relative import - session_id={session_id}")
+            except ImportError:
+                # Fall back to absolute import (when running as a script)
+                from database.multi_user_db.vector_store_final import VectorStoreMultiUser, DummyVectorStore
+                logger.info(f"Imported vector store with absolute import - session_id={session_id}")
+            except Exception as import_error:
+                logger.error(f"Error importing vector store: {import_error} - session_id={session_id}")
+                if attempt < max_retries - 1:
+                    backoff = initial_backoff * (2 ** attempt)
+                    logger.info(f"Retrying in {backoff}s - session_id={session_id}")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    logger.error(f"Failed to import vector store after {max_retries} attempts - session_id={session_id}")
+                    return None
+                
+            try:
+                # Try importing the getter function first
+                from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                logger.info(f"Using get_multi_user_vector_store - session_id={session_id}")
+                vector_store = get_multi_user_vector_store()
+                
+                # Check if we got a dummy store
+                if hasattr(vector_store, 'is_dummy') and vector_store.is_dummy:
+                    logger.warning(f"Received dummy vector store - session_id={session_id}")
+                    # Return None to trigger fallback handling
+                    return None
+                    
+                logger.info(f"Successfully got vector store - session_id={session_id}")
+                return vector_store
+            except Exception as getter_error:
+                logger.warning(f"Error using getter function: {getter_error} - session_id={session_id}")
+                # Fall back to direct instantiation
+                logger.info(f"Falling back to direct instantiation - session_id={session_id}")
+                
+                try:
+                    vector_store = VectorStoreMultiUser(user_id=user_id)
+                    logger.info(f"Successfully created vector store directly - session_id={session_id}")
+                    return vector_store
+                except Exception as direct_error:
+                    logger.error(f"Error creating vector store directly: {direct_error} - session_id={session_id}")
+                    if attempt < max_retries - 1:
+                        backoff = initial_backoff * (2 ** attempt)
+                        logger.info(f"Retrying in {backoff}s - session_id={session_id}")
+                        time.sleep(backoff)
+                    else:
+                        logger.error(f"Failed to create vector store after {max_retries} attempts - session_id={session_id}")
+                        return None
+                        
         except Exception as e:
-            error_msg = str(e).lower()
-            
-            # Handle specific known errors differently
-            if "resource temporarily unavailable" in error_msg or "locked" in error_msg:
-                logger.warning(f"⚠️ Vector store folder may be locked: {e} - session_id={session_id}")
-            elif "permission" in error_msg:
-                logger.warning(f"⚠️ Permission issue with vector store: {e} - session_id={session_id}")
+            logger.error(f"Unexpected error in get_vector_store_with_retry: {e} - session_id={session_id}")
+            logger.error(traceback.format_exc())
+            if attempt < max_retries - 1:
+                backoff = initial_backoff * (2 ** attempt)
+                logger.info(f"Retrying in {backoff}s - session_id={session_id}")
+                time.sleep(backoff)
             else:
-                logger.error(f"❌ Error initializing vector store: {e} - session_id={session_id}")
-            
-            if attempt > max_retries:
-                logger.error(f"❌ Maximum retries reached for vector store initialization - session_id={session_id}")
+                logger.error(f"Failed after {max_retries} attempts - session_id={session_id}")
                 return None
-            
-            # Calculate backoff with jitter
-            jitter = random.uniform(0, 0.1 * backoff)
-            wait_time = backoff + jitter
-            
-            logger.info(f"⏳ Waiting {wait_time:.2f}s before retry - session_id={session_id}")
-            time.sleep(wait_time)
-            
-            # Exponential backoff
-            backoff *= 2
     
     return None
 
 def add_bookmark_with_retry(vector_store, bookmark, session_id, max_retries=2, initial_backoff=0.5):
     """
-    Add a bookmark to the vector store with retry logic
+    Attempt to add a bookmark to the vector store with retry logic and exponential backoff
     
     Args:
         vector_store: Vector store instance
-        bookmark: Bookmark object to add
-        session_id (str): Session ID for tracking
-        max_retries (int): Maximum retry attempts
-        initial_backoff (float): Initial backoff time in seconds
+        bookmark: Bookmark to add
+        session_id: Session ID for tracking
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
         
     Returns:
         dict: Result of the operation
     """
-    import time
-    import random
+    # Check if we have a vector store
+    if vector_store is None:
+        logger.warning(f"No vector store available, skipping add_bookmark - session_id={session_id}")
+        return {
+            'success': True,  # Return success so processing continues
+            'message': 'Vector store not available, bookmark added to database only',
+            'bookmark_id': bookmark.get('id', 'unknown')
+        }
     
-    attempt = 0
-    backoff = initial_backoff
+    # Check if vector store is disabled
+    if os.environ.get('DISABLE_VECTOR_STORE', 'false').lower() == 'true':
+        logger.warning(f"Vector store is disabled, skipping add_bookmark - session_id={session_id}")
+        return {
+            'success': True,  # Return success so processing continues
+            'message': 'Vector store is disabled, bookmark added to database only',
+            'bookmark_id': bookmark.get('id', 'unknown')
+        }
     
-    while attempt <= max_retries:
-        attempt += 1
+    # Check if this is a dummy vector store
+    if hasattr(vector_store, 'is_dummy') and vector_store.is_dummy:
+        logger.warning(f"Dummy vector store, skipping add_bookmark - session_id={session_id}")
+        return {
+            'success': True,  # Return success so processing continues
+            'message': 'Using dummy vector store, bookmark added to database only',
+            'bookmark_id': bookmark.get('id', 'unknown')
+        }
+    
+    for attempt in range(max_retries + 1):
         try:
+            # Try adding the bookmark to the vector store
             vector_store.add_text(
-                id=bookmark.id,
-                text=bookmark.text,
+                text=bookmark.get('text', ''),
                 metadata={
-                    'url': bookmark.url,
-                    'title': bookmark.title,
-                    'created_at': bookmark.created_at.isoformat() if bookmark.created_at else None
+                    'id': bookmark.get('id', 'unknown'),
+                    'url': bookmark.get('url', ''),
+                    'author': bookmark.get('author', ''),
+                    'date': bookmark.get('date', '')
                 }
             )
-            return {'success': True}
+            return {
+                'success': True,
+                'message': f'Bookmark added to vector store - attempt={attempt+1}',
+                'bookmark_id': bookmark.get('id', 'unknown')
+            }
         except Exception as e:
-            if attempt > max_retries:
-                return {'success': False, 'error': str(e)}
+            logger.error(f"Error adding bookmark to vector store: {e} - session_id={session_id}")
             
-            # Add jitter to backoff
-            jitter = random.uniform(0, 0.1 * backoff)
-            wait_time = backoff + jitter
-            
-            logger.debug(f"⏳ Waiting {wait_time:.2f}s before retry bookmark {bookmark.id} - session_id={session_id}")
-            time.sleep(wait_time)
-            
-            # Exponential backoff
-            backoff *= 2
+            if attempt < max_retries:
+                # Calculate backoff time
+                backoff = initial_backoff * (2 ** attempt)
+                logger.info(f"Retrying add_bookmark in {backoff}s - session_id={session_id}, attempt={attempt+1}/{max_retries+1}")
+                time.sleep(backoff)
+            else:
+                logger.error(f"Max retries reached for add_bookmark - session_id={session_id}")
+                return {
+                    'success': False,
+                    'error': f'Failed to add bookmark to vector store after {max_retries+1} attempts: {str(e)}',
+                    'bookmark_id': bookmark.get('id', 'unknown')
+                }
     
-    return {'success': False, 'error': "Maximum retries reached"}
+    # Should never reach here, but just in case
+    return {
+        'success': False,
+        'error': 'Unexpected error in add_bookmark_with_retry',
+        'bookmark_id': bookmark.get('id', 'unknown')
+    }
 
 def get_bookmarks_optimized(user_id):
     """
@@ -1052,7 +1130,7 @@ def dict_to_bookmark(bookmark_dict):
         user_id=user_id
     )
 
-def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None):
+def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False, user_id=None, skip_vector=False):
     """
     Final version of bookmark update function with improved error handling and progress tracking.
     
@@ -1061,6 +1139,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
         start_index (int): Index to start processing from
         rebuild_vector (bool): Whether to rebuild vector store after update
         user_id (int, optional): User ID for multi-user support
+        skip_vector (bool, optional): If True, skip all vector store operations
         
     Returns:
         dict: Results of the update operation
@@ -1138,7 +1217,7 @@ def final_update_bookmarks(session_id=None, start_index=0, rebuild_vector=False,
             )
             
             # Rebuild vector store if requested
-            if rebuild_vector:
+            if rebuild_vector and not skip_vector:
                 logger.info("Starting vector store rebuild...")
                 rebuild_result = rebuild_vector_store(
                     session_id=session_id,

@@ -24,6 +24,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger('wsgi_final')
 
+# Set environment variables to make vector store more robust
+os.environ.setdefault('DISABLE_VECTOR_STORE', 'false')  # Set to 'true' to completely disable vector store
+os.environ.setdefault('QDRANT_HOST', 'localhost')  # Set Qdrant host
+os.environ.setdefault('QDRANT_PORT', '6333')  # Set Qdrant port
+os.environ.setdefault('PREFER_LOCAL_VECTOR', 'true')  # Prefer local vector store over server
+
 # Gunicorn configuration
 # Using a single worker to avoid concurrent access issues with Qdrant vector store
 # If more concurrency is needed, switch to Qdrant server mode instead of local storage
@@ -141,11 +147,55 @@ if 'message' not in db_status:
 application_error = None
 error_details = None
 
-# Attempt to import the full application
+# Try to import the full application
 try:
     # Try to import flask_session first
     import flask_session
     logger.info("flask_session module is available")
+    
+    # Import custom session interface to handle bytes session IDs
+    try:
+        from auth.api_server_multi_user import CustomSessionInterface
+        logger.info("Successfully imported CustomSessionInterface")
+    except ImportError:
+        # Define CustomSessionInterface here as fallback
+        from flask.sessions import SecureCookieSessionInterface
+        
+        class CustomSessionInterface(SecureCookieSessionInterface):
+            """Custom session interface to handle bytes-like session IDs"""
+            def save_session(self, app, session, response):
+                domain = self.get_cookie_domain(app)
+                path = self.get_cookie_path(app)
+                
+                # Don't save if session is empty and was not modified
+                if not session and not session.modified:
+                    return
+                    
+                # Get expiration
+                httponly = self.get_cookie_httponly(app)
+                secure = self.get_cookie_secure(app)
+                samesite = self.get_cookie_samesite(app)
+                expires = self.get_expiration_time(app, session)
+                
+                # Get session ID, ensuring it's a string not bytes
+                session_id = session.sid if hasattr(session, 'sid') else None
+                if session_id and isinstance(session_id, bytes):
+                    session_id = session_id.decode('utf-8')
+                    
+                # Set the cookie with the string session ID
+                if session_id:
+                    response.set_cookie(
+                        app.config['SESSION_COOKIE_NAME'],
+                        session_id,
+                        expires=expires,
+                        httponly=httponly,
+                        domain=domain,
+                        path=path,
+                        secure=secure,
+                        samesite=samesite
+                    )
+        logger.info("Created fallback CustomSessionInterface")
+        
     # Continue with normal app loading
     try:
         logger.info("Attempting to import app from auth.api_server_multi_user...")
@@ -154,6 +204,13 @@ try:
         # Set application for later use
         application = app
         logger.info("✅ Successfully loaded app from auth.api_server_multi_user")
+        
+        # Make sure the custom session interface is set
+        try:
+            application.session_interface = CustomSessionInterface()
+            logger.info("✅ Custom session interface has been set")
+        except Exception as session_interface_error:
+            logger.error(f"❌ Error setting custom session interface: {session_interface_error}")
         
         # Skip fallback mode - force using the loaded application
         logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
