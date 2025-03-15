@@ -499,6 +499,19 @@ def safe_get_vector_store():
     
     return None
 
+# Login required decorator - moved before routes that use it
+def login_required(func):
+    """Decorator to ensure user is logged in"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        user = UserContext.get_current_user()
+        if not user:
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': 'Authentication required'}), 401
+            return redirect(url_for('auth.login'))
+        return func(*args, **kwargs)
+    return wrapper
+
 # Routes
 @app.route('/')
 def index():
@@ -938,19 +951,6 @@ def api_statistics():
         logger.error(f"Error getting statistics: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
-
-# Login required decorator
-def login_required(func):
-    """Decorator to ensure user is logged in"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        user = UserContext.get_current_user()
-        if not user:
-            if request.path.startswith('/api/'):
-                return jsonify({'success': False, 'error': 'Authentication required'}), 401
-            return redirect(url_for('auth.login'))
-        return func(*args, **kwargs)
-    return wrapper
 
 # File upload route
 @app.route('/upload-bookmarks', methods=['POST'])

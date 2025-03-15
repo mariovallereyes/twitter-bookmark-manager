@@ -150,81 +150,47 @@ error_details = None
 # Try to import the full application
 try:
     # Try to import flask_session first
-    import flask_session
-    logger.info("flask_session module is available")
+    try:
+        import flask_session
+        logger.info("flask_session module is available")
+    except ImportError as e:
+        logger.warning(f"flask_session module not available: {e}")
+        logger.info("Creating mock session class")
+        
+        # Create a mock Session class to avoid errors
+        class MockSession:
+            def __init__(self, app=None):
+                self.app = app
+                logger.info("Initialized MockSession")
+                
+        # Make flask_session available with mock
+        sys.modules['flask_session'] = type('mock_flask_session', (), {'Session': MockSession})
     
-    # Import custom session interface to handle bytes session IDs
+    # First import the entire app - this way login_required will be defined before any routes use it
+    logger.info("Attempting to import app from auth.api_server_multi_user...")
+    from auth.api_server_multi_user import app as flask_app
+    
+    # Now get CustomSessionInterface from the same module
+    from auth.api_server_multi_user import CustomSessionInterface
+    
+    app = flask_app
+    # Set application for later use
+    application = app
+    logger.info("✅ Successfully loaded app from auth.api_server_multi_user")
+    
+    # Make sure the custom session interface is set
     try:
-        from auth.api_server_multi_user import CustomSessionInterface
-        logger.info("Successfully imported CustomSessionInterface")
-    except ImportError:
-        # Define CustomSessionInterface here as fallback
-        from flask.sessions import SecureCookieSessionInterface
-        
-        class CustomSessionInterface(SecureCookieSessionInterface):
-            """Custom session interface to handle bytes-like session IDs"""
-            def save_session(self, app, session, response):
-                domain = self.get_cookie_domain(app)
-                path = self.get_cookie_path(app)
-                
-                # Don't save if session is empty and was not modified
-                if not session and not session.modified:
-                    return
-                    
-                # Get expiration
-                httponly = self.get_cookie_httponly(app)
-                secure = self.get_cookie_secure(app)
-                samesite = self.get_cookie_samesite(app)
-                expires = self.get_expiration_time(app, session)
-                
-                # Get session ID, ensuring it's a string not bytes
-                session_id = session.sid if hasattr(session, 'sid') else None
-                if session_id and isinstance(session_id, bytes):
-                    session_id = session_id.decode('utf-8')
-                    
-                # Set the cookie with the string session ID
-                if session_id:
-                    response.set_cookie(
-                        app.config['SESSION_COOKIE_NAME'],
-                        session_id,
-                        expires=expires,
-                        httponly=httponly,
-                        domain=domain,
-                        path=path,
-                        secure=secure,
-                        samesite=samesite
-                    )
-        logger.info("Created fallback CustomSessionInterface")
-        
-    # Continue with normal app loading
-    try:
-        logger.info("Attempting to import app from auth.api_server_multi_user...")
-        from auth.api_server_multi_user import app as flask_app
-        app = flask_app
-        # Set application for later use
-        application = app
-        logger.info("✅ Successfully loaded app from auth.api_server_multi_user")
-        
-        # Make sure the custom session interface is set
-        try:
-            application.session_interface = CustomSessionInterface()
-            logger.info("✅ Custom session interface has been set")
-        except Exception as session_interface_error:
-            logger.error(f"❌ Error setting custom session interface: {session_interface_error}")
-        
-        # Skip fallback mode - force using the loaded application
-        logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
-        
-        # Set flags to indicate we're NOT in fallback mode
-        application.config['FALLBACK_MODE'] = False
-        application.config['FULL_APP_LOADED'] = True
-        
-        # Prevent re-entering this block
-        globals()['application'] = application
-    except Exception as import_app_error:
-        logger.error(f"❌ Error importing app from auth.api_server_multi_user: {str(import_app_error)}")
-        logger.error(f"Error details: {traceback.format_exc()}")
-        raise
+        application.session_interface = CustomSessionInterface()
+        logger.info("✅ Custom session interface has been set")
+    except Exception as session_interface_error:
+        logger.error(f"❌ Error setting custom session interface: {session_interface_error}")
+    
+    # Skip fallback mode - force using the loaded application
+    logger.info("✅ USING FULL APPLICATION MODE - Database is healthy and app loaded successfully")
+    
+    # Set flags to indicate we're NOT in fallback mode
+    application.config['FALLBACK_MODE'] = False
+    application.config['FULL_APP_LOADED'] = True
     
     # Set template path explicitly
     if hasattr(app, 'template_folder'):
@@ -243,26 +209,6 @@ try:
                     app.template_folder = path
                     logger.info(f"Updated template folder to: {path}")
                     break
-except ImportError as e:
-    logger.warning(f"flask_session module not available: {e}")
-    logger.info("Creating mock session class")
-    
-    # Create a mock Session class to avoid errors
-    class MockSession:
-        def __init__(self, app=None):
-            self.app = app
-            logger.info("Initialized MockSession")
-            
-    # Make flask_session available with mock
-    sys.modules['flask_session'] = type('mock_flask_session', (), {'Session': MockSession})
-    
-    # Load the app
-    from auth.api_server_multi_user import app as flask_app
-    app = flask_app
-    logger.info("Successfully loaded app with MockSession")
-    
-    # Set the application
-    application = app
     
     # Add DB status info for frontend templates
     if not db_status.get('healthy', False):
@@ -276,11 +222,50 @@ except ImportError as e:
         logger.info("Full application is active with healthy database")
         application.config['DB_ERROR'] = False
         application.config['ALLOW_API_RETRY'] = True
+    
 except Exception as e:
     error_details = traceback.format_exc()
     application_error = str(e)
     logger.error(f"❌ Failed to load full application: {application_error}")
     logger.error(f"Error details: {error_details}")
+    
+    # Define CustomSessionInterface here as fallback
+    from flask.sessions import SecureCookieSessionInterface
+    
+    class CustomSessionInterface(SecureCookieSessionInterface):
+        """Custom session interface to handle bytes-like session IDs"""
+        def save_session(self, app, session, response):
+            domain = self.get_cookie_domain(app)
+            path = self.get_cookie_path(app)
+            
+            # Don't save if session is empty and was not modified
+            if not session and not session.modified:
+                return
+                
+            # Get expiration
+            httponly = self.get_cookie_httponly(app)
+            secure = self.get_cookie_secure(app)
+            samesite = self.get_cookie_samesite(app)
+            expires = self.get_expiration_time(app, session)
+            
+            # Get session ID, ensuring it's a string not bytes
+            session_id = session.sid if hasattr(session, 'sid') else None
+            if session_id and isinstance(session_id, bytes):
+                session_id = session_id.decode('utf-8')
+                
+            # Set the cookie with the string session ID
+            if session_id:
+                response.set_cookie(
+                    app.config['SESSION_COOKIE_NAME'],
+                    session_id,
+                    expires=expires,
+                    httponly=httponly,
+                    domain=domain,
+                    path=path,
+                    secure=secure,
+                    samesite=samesite
+                )
+    logger.info("Created fallback CustomSessionInterface")
 
 # If full application failed to load, create fallback application
 if 'application' not in locals() and 'application' not in globals():
