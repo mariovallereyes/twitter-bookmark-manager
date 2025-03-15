@@ -559,18 +559,39 @@ def index():
                 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
                 searcher = BookmarkSearchMultiUser(conn, user_id)
                 
-                # Get recent bookmarks
-                latest_tweets = searcher.get_recent_bookmarks(limit=10, user_id=user_id)
+                # Get recent bookmarks - limit to 5 for homepage display
+                latest_tweets = searcher.get_recent_bookmarks(limit=5, user_id=user_id)
                 
+                # Get categories for the navigation
+                categories = searcher.get_categories(user_id=user_id)
+                
+                # Debug logging to check structure and content
                 logger.info(f"Found {len(latest_tweets)} recent bookmarks for user {user_id}")
+                logger.info(f"Found {len(categories)} categories for user {user_id}")
                 
-                # Render template with bookmarks
-                return render_template('index_final.html', latest_tweets=latest_tweets)
+                if latest_tweets:
+                    # Log first bookmark to verify structure
+                    first_tweet = latest_tweets[0]
+                    logger.info(f"First bookmark: id={first_tweet.get('id')}, author={first_tweet.get('author_username')}")
+                    
+                    # Ensure all required fields are present
+                    for i, tweet in enumerate(latest_tweets):
+                        if not tweet.get('id'):
+                            tweet['id'] = f"missing-id-{i}"
+                        if not tweet.get('author_username'):
+                            tweet['author_username'] = "unknown_user"
+                        if not tweet.get('categories'):
+                            tweet['categories'] = []
+                else:
+                    logger.warning("No bookmarks found in database for this user")
+                
+                # Render template with bookmarks and categories
+                return render_template('index_final.html', latest_tweets=latest_tweets, categories=categories)
             except Exception as e:
                 logger.error(f"Error fetching bookmarks: {e}")
                 logger.error(traceback.format_exc())
                 # Fallback to render without bookmarks
-                return render_template('index_final.html', latest_tweets=[])
+                return render_template('index_final.html', latest_tweets=[], categories=[])
         else:
             # User is not authenticated, redirect to login
             logger.info("User not authenticated, redirecting to login")
