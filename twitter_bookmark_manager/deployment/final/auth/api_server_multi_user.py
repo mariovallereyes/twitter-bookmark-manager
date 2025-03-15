@@ -62,9 +62,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 # Custom imports
-from auth.user_context_final import UserContext
-# Import login_required from decorators to avoid circular imports
-from auth.decorators import login_required
+from auth.user_context_final import UserContext, login_required
 # Import database utilities
 from database.multi_user_db.db_final import (
     get_db_connection,

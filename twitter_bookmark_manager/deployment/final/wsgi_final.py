@@ -147,13 +147,9 @@ if 'message' not in db_status:
 try:
     logger.info("Pre-loading critical modules to avoid circular imports...")
     
-    # Import decorators module first
-    from auth.decorators import login_required
-    logger.info("✅ Successfully imported login_required decorator")
-    
-    # Import user context
-    from auth.user_context_final import UserContext
-    logger.info("✅ Successfully imported UserContext")
+    # Import login_required from user_context_final
+    from auth.user_context_final import UserContext, login_required
+    logger.info("✅ Successfully imported UserContext and login_required")
     
 except Exception as preload_error:
     logger.error(f"❌ Failed to preload critical modules: {preload_error}")
