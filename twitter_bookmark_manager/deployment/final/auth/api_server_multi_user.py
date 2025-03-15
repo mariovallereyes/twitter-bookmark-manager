@@ -62,7 +62,20 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 # Custom imports - separate imports to avoid circular references
-from auth.user_context_final import UserContext
+try:
+    from auth.user_context_final import UserContext
+except ImportError as e:
+    # Fallback UserContext
+    class UserContext:
+        @staticmethod
+        def get_user_id():
+            return None
+        
+        @staticmethod
+        def is_authenticated():
+            return False
+    print(f"Created fallback UserContext due to import error: {e}")
+
 # login_required is now imported separately to avoid circular dependencies
 try:
     from auth.user_context_final import login_required
@@ -1325,6 +1338,9 @@ def api_health_check():
             "message": str(e),
             "timestamp": datetime.now().isoformat()
         }), 500
+
+# Force disable vector store
+os.environ['DISABLE_VECTOR_STORE'] = 'true'
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
