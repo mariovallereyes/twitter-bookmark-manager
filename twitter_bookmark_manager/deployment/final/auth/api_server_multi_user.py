@@ -548,7 +548,29 @@ def index():
         
         if user:
             # User is authenticated, load the main page
-            return render_template('index_final.html')
+            try:
+                # Get user ID
+                user_id = user.id
+                
+                # Get database connection
+                conn = get_db_connection()
+                
+                # Create bookmark search instance
+                from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
+                searcher = BookmarkSearchMultiUser(conn, user_id)
+                
+                # Get recent bookmarks
+                latest_tweets = searcher.get_recent_bookmarks(limit=10, user_id=user_id)
+                
+                logger.info(f"Found {len(latest_tweets)} recent bookmarks for user {user_id}")
+                
+                # Render template with bookmarks
+                return render_template('index_final.html', latest_tweets=latest_tweets)
+            except Exception as e:
+                logger.error(f"Error fetching bookmarks: {e}")
+                logger.error(traceback.format_exc())
+                # Fallback to render without bookmarks
+                return render_template('index_final.html', latest_tweets=[])
         else:
             # User is not authenticated, redirect to login
             logger.info("User not authenticated, redirecting to login")
