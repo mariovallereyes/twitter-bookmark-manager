@@ -298,7 +298,7 @@ try:
             </html>
             """), 500
         
-        @app.route('/health')
+        @app.route('/wsgi-health')
         def emergency_health():
             return jsonify({"status": "error", "message": "Emergency application loaded due to import failures"}), 500
 
