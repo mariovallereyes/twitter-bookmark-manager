@@ -1342,5 +1342,25 @@ def api_health_check():
 # Force disable vector store
 os.environ['DISABLE_VECTOR_STORE'] = 'true'
 
+# Modify Python path to avoid circular imports
+import sys
+if not hasattr(sys, '_vector_store_disabled'):
+    sys._vector_store_disabled = True
+    # Avoid trying to import vector store modules if disabled
+    class DummyModule:
+        def __getattr__(self, name):
+            return None
+    
+    # Register dummy modules for potentially problematic imports
+    vector_store_modules = [
+        'database.multi_user_db.vector_store_final',
+        'database.multi_user_db.minimal_vector_store'
+    ]
+    for module_name in vector_store_modules:
+        if module_name not in sys.modules:
+            sys.modules[module_name] = DummyModule()
+    
+    logger.info("Registered dummy modules to prevent import errors")
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
