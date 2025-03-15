@@ -46,7 +46,7 @@ except ImportError:
     Session = None
 
 # === Local Module Imports ===
-from database.multi_user_db.vector_store_final import get_multi_user_vector_store, VectorStore, cleanup_vector_store
+from database.multi_user_db.vector_store_final import get_multi_user_vector_store, VectorStore, cleanup_vector_store, DummyVectorStore
 from auth.user_context import get_current_user
 from auth.user_context_final import login_required, UserContext, UserContextMiddleware, with_user_context
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
@@ -1529,19 +1529,45 @@ def safe_get_vector_store():
     MAX_RETRIES = 3
     initial_backoff = 1
     session_id = str(uuid.uuid4())[:8]
+    
     for attempt in range(MAX_RETRIES):
         try:
             logger.info(f"[RETRY-{session_id}] Attempting to import VectorStoreMultiUser (attempt {attempt+1}/{MAX_RETRIES})")
-            from database.multi_user_db.vector_store_final import VectorStoreMultiUser
+            from database.multi_user_db.vector_store_final import VectorStoreMultiUser, DummyVectorStore
             logger.info(f"[RETRY-{session_id}] Successfully imported VectorStoreMultiUser")
+            
             user = UserContext.get_current_user()
             if not user:
                 logger.warning(f"[RETRY-{session_id}] No user context found, cannot initialize vector store")
                 return None
+                
             user_id = user.id
-            vector_store = VectorStoreMultiUser(user_id=user_id)
-            logger.info(f"[RETRY-{session_id}] Successfully initialized vector store for user {user_id} on attempt {attempt+1}")
-            return vector_store
+            
+            # Get the vector store instance
+            try:
+                from database.multi_user_db.vector_store_final import get_multi_user_vector_store
+                vector_store = get_multi_user_vector_store()
+                
+                # Check if we got a dummy vector store
+                if isinstance(vector_store, DummyVectorStore):
+                    logger.warning(f"[RETRY-{session_id}] Received DummyVectorStore: {vector_store.error_message}")
+                    # Return the dummy store, it's designed to handle operations gracefully
+                    return vector_store
+                    
+                logger.info(f"[RETRY-{session_id}] Successfully initialized vector store for user {user_id} on attempt {attempt+1}")
+                return vector_store
+            except Exception as vs_error:
+                logger.error(f"[RETRY-{session_id}] Error initializing vector store: {vs_error}")
+                logger.error(traceback.format_exc())
+                if attempt < MAX_RETRIES - 1:
+                    backoff = initial_backoff * (2 ** attempt)
+                    logger.info(f"[RETRY-{session_id}] Retrying in {backoff} seconds...")
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
+                    # Return the dummy store as a last resort
+                    return DummyVectorStore(f"Failed after {MAX_RETRIES} attempts: {vs_error}")
+        
         except ImportError as e:
             logger.error(f"[RETRY-{session_id}] Import error for VectorStoreMultiUser: {e}")
             logger.error(traceback.format_exc())
@@ -1551,17 +1577,18 @@ def safe_get_vector_store():
                 time.sleep(backoff)
             else:
                 logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
-            return None
+                return None
         except Exception as e:
-            logger.error(f"[RETRY-{session_id}] Unexpected error in safe_get_vector_store: {e}")
+            logger.error(f"[RETRY-{session_id}] Unexpected error: {e}")
             logger.error(traceback.format_exc())
             if attempt < MAX_RETRIES - 1:
                 backoff = initial_backoff * (2 ** attempt)
-                logger.info(f"[RETRY-{session_id}] Retrying in {backoff} seconds due to unexpected error...")
+                logger.info(f"[RETRY-{session_id}] Retrying in {backoff} seconds...")
                 time.sleep(backoff)
             else:
-                logger.error(f"[RETRY-{session_id}] Failed to recover from unexpected error after {MAX_RETRIES} attempts")
-            return None
+                logger.error(f"[RETRY-{session_id}] Failed to initialize vector store after {MAX_RETRIES} attempts")
+                return None
+    
     return None
 
 @app.route('/api/rebuild-vector-store', methods=['POST'])
