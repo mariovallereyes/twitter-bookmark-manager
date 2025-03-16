@@ -349,7 +349,7 @@ def check_db_health():
                 return jsonify({'success': False, 'error': 'Database not configured'}), 500
             else:
                 flash("Database connection not available", "error")
-                return render_template('error.html', error="Database connection not available")
+                return render_template('error_final.html', error="Database connection not available")
     
     except Exception as e:
         logger.error(f"Error checking database health: {e}")
@@ -572,7 +572,7 @@ def index():
     except Exception as e:
         logger.error(f"Error rendering index page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/chat')
 @login_required
@@ -585,7 +585,7 @@ def chat():
     except Exception as e:
         logger.error(f"Error rendering chat page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/search')
 @login_required
@@ -597,7 +597,7 @@ def search():
     except Exception as e:
         logger.error(f"Error rendering search page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/recent')
 @login_required
@@ -609,7 +609,7 @@ def recent():
     except Exception as e:
         logger.error(f"Error rendering recent page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/api/chat', methods=['POST'])
 @login_required
@@ -828,7 +828,7 @@ def update_database():
     except Exception as e:
         logger.error(f"Error rendering update database page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/rebuild-vector-store')
 @login_required
@@ -840,7 +840,7 @@ def rebuild_vector_store():
     except Exception as e:
         logger.error(f"Error rendering rebuild vector store page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/api/rebuild-vector-store', methods=['POST'])
 @login_required
@@ -1138,7 +1138,7 @@ def handle_exception(e):
             'type': e.__class__.__name__
         }), 500
     
-    return render_template('error.html', error=str(e)), 500
+    return render_template('error_final.html', error=str(e)), 500
 
 @app.errorhandler(404)
 def page_not_found(e):
@@ -1202,7 +1202,7 @@ def upload():
     except Exception as e:
         logger.error(f"Error rendering upload page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/upload-status')
 @login_required
@@ -1219,7 +1219,7 @@ def upload_status():
     except Exception as e:
         logger.error(f"Error rendering upload status page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.route('/debug-data', methods=['GET'])
 @login_required
@@ -1290,7 +1290,7 @@ def process_status_page():
     except Exception as e:
         logger.error(f"Error rendering process status page: {e}")
         logger.error(traceback.format_exc())
-        return render_template('error.html', error=str(e))
+        return render_template('error_final.html', error=str(e))
 
 @app.errorhandler(413)
 def request_entity_too_large(e):

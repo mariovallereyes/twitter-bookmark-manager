@@ -54,36 +54,34 @@ class TwitterOAuth(OAuthProvider):
             self.config = {'twitter': config}
     
     def get_authorization_url(self):
-        """Generate Twitter OAuth authorization URL with PKCE."""
+        """Generate Twitter OAuth 2.0 authorization URL."""
         try:
-            logger.info("Generating Twitter OAuth authorization URL")
+            logger.info("Generating Twitter OAuth 2.0 authorization URL")
             
             # Get provider config
             provider_config = self.config.get('twitter', {})
             if not provider_config:
-                logger.error("No Twitter provider configuration found")
+                logger.error("Twitter provider config not found")
                 return None
                 
-            # Log provider config (omitting sensitive data)
-            logger.info(f"Twitter client_id length: {len(provider_config.get('client_id', ''))}")
-            logger.info(f"Twitter callback_url: {provider_config.get('callback_url', '')}")
+            # Generate PKCE code verifier and challenge
+            code_verifier = secrets.token_urlsafe(64)
+            # Ensure code verifier is not too long
+            if len(code_verifier) > 128:
+                code_verifier = code_verifier[:128]
+                
+            # Generate code challenge using S256 method
+            code_challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode()).digest()
+            ).decode().rstrip('=')
             
-            # Create PKCE values
-            code_verifier = secrets.token_urlsafe(96)[:128]
-            code_verifier_bytes = code_verifier.encode('ascii')
-            code_challenge_bytes = hashlib.sha256(code_verifier_bytes).digest()
-            code_challenge = base64.urlsafe_b64encode(code_challenge_bytes).decode('ascii').rstrip('=')
-            
-            # Generate state for CSRF protection
+            # Generate state parameter for CSRF protection
             state = secrets.token_urlsafe(32)
             
-            # Log PKCE values (truncated for security)
-            logger.info(f"Generated code_verifier (truncated): {code_verifier[:5]}...")
-            logger.info(f"Generated code_challenge (truncated): {code_challenge[:5]}...")
-            logger.info(f"Generated state (truncated): {state[:5]}...")
-            
-            # Build authorization URL
+            # Twitter authorization URL
             base_url = 'https://twitter.com/i/oauth2/authorize'
+            
+            # Required parameters for OAuth 2.0 with PKCE
             params = {
                 'response_type': 'code',
                 'client_id': provider_config['client_id'],
@@ -94,19 +92,23 @@ class TwitterOAuth(OAuthProvider):
                 'code_challenge_method': 'S256'
             }
             
-            # Log the authorization URL (omitting sensitive data)
+            # Build full authorization URL
             auth_url = f"{base_url}?{urlencode(params)}"
-            logger.info(f"Generated Twitter authorization URL: {base_url} with {len(params)} parameters")
             
+            # Log URL generation (without exposing sensitive data)
+            client_id_partial = f"{provider_config['client_id'][:5]}...{provider_config['client_id'][-5:]}"
+            logger.info(f"Generated authorization URL with client_id: {client_id_partial}")
+            logger.info(f"Using callback URL: {provider_config['callback_url']}")
+            
+            # Return all data needed for later validation
             return {
                 'url': auth_url,
                 'state': state,
                 'code_verifier': code_verifier,
                 'code_challenge': code_challenge
             }
-            
         except Exception as e:
-            logger.error(f"Error generating Twitter authorization URL: {e}")
+            logger.error(f"Error generating authorization URL: {e}")
             logger.error(traceback.format_exc())
             return None
     

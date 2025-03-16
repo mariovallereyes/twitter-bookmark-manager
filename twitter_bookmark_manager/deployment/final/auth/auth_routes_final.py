@@ -5,6 +5,7 @@ Handles login, logout, and OAuth callback functionality.
 
 import os
 import logging
+import traceback
 from flask import Blueprint, request, redirect, url_for, session, render_template, flash, current_app, jsonify
 from urllib.parse import urlparse, urljoin
 
