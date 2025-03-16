@@ -112,8 +112,9 @@ app.config.update(
     TESTING=ENV_VARS['TESTING'],
     APPLICATION_ROOT=ENV_VARS['APPLICATION_ROOT'],
     DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE'],
-    SESSION_COOKIE_SECURE=not ENV_VARS['DEBUG'],  # Secure cookies in production
-    SESSION_COOKIE_HTTPONLY=True
+    SESSION_COOKIE_SECURE=False,  # Set to False to allow HTTP during testing
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax'  # Allow cookies to be sent with same-site requests
 )
 
 # Add database connection function to app config
@@ -1468,6 +1469,17 @@ def api_categories():
 def twitter_oauth_callback():
     """Route to handle Twitter OAuth callback at the root level"""
     logger.info("Twitter OAuth callback received at root level")
+    logger.info(f"Full request URL: {request.url}")
+    logger.info(f"Request args: {request.args}")
+    logger.info(f"Session keys: {list(session.keys())}")
+    
+    # Check for error response from Twitter
+    if request.args.get('error'):
+        error = request.args.get('error')
+        error_description = request.args.get('error_description', 'No description provided')
+        logger.error(f"Twitter OAuth error: {error} - {error_description}")
+        return redirect(url_for('auth.login'))
+    
     # Import auth blueprint's oauth_callback function
     try:
         from auth.auth_routes_final import oauth_callback
@@ -1545,6 +1557,43 @@ def debug_auth_config():
         })
     except Exception as e:
         logger.error(f"Error in debug_auth_config: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Debug endpoint to check session state
+@app.route('/debug/session')
+def debug_session():
+    """Debugging endpoint to check session state"""
+    # Only allow in debug mode
+    if not ENV_VARS['DEBUG']:
+        return jsonify({'error': 'Debug mode not enabled'}), 403
+        
+    try:
+        # Get session details
+        session_data = {
+            'keys': list(session.keys()),
+            'user_id': session.get('user_id'),
+            'next': session.get('next'),
+            'twitter_code_verifier_exists': 'twitter_code_verifier' in session,
+            'twitter_oauth_state_exists': 'twitter_oauth_state' in session,
+            'sid': getattr(session, 'sid', None)
+        }
+        
+        return jsonify({
+            'session': session_data,
+            'headers': {
+                'cookie': request.headers.get('Cookie'),
+                'user_agent': request.headers.get('User-Agent')
+            },
+            'request': {
+                'path': request.path,
+                'url': request.url,
+                'method': request.method,
+                'remote_addr': request.remote_addr
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error in debug_session: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 

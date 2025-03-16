@@ -83,9 +83,14 @@ def login():
     if next_url and is_safe_url(next_url):
         session['next'] = next_url
     
-    # Clear any existing auth related session data
-    for key in ['oauth_token', 'oauth_verifier', 'provider', 'user_id', 'twitter_code_verifier', 'twitter_oauth_state']:
-        session.pop(key, None)
+    # Clear the entire session except for 'next'
+    next_url_temp = session.get('next')
+    session.clear()
+    if next_url_temp:
+        session['next'] = next_url_temp
+    
+    logger.info("Session cleared for new login attempt")
+    logger.info(f"Session keys after clearing: {list(session.keys())}")
         
     return render_template('login_final.html')
 
@@ -116,6 +121,9 @@ def oauth_callback(provider):
     ensure_string_session()
     
     logger.info(f"OAuth callback received for provider: {provider}")
+    logger.info(f"Full request URL: {request.url}")
+    logger.info(f"Request args: {request.args}")
+    logger.info(f"Session keys before processing: {list(session.keys())}")
     
     # Extract OAuth data based on provider
     oauth_data = {}
@@ -124,9 +132,21 @@ def oauth_callback(provider):
         code = request.args.get('code')
         state = request.args.get('state')
         
+        logger.info(f"Twitter callback received - code present: {bool(code)}, state present: {bool(state)}")
+        
         if not code:
             flash('Authentication failed: No authorization code received. Please try again.', 'error')
             logger.error(f"Missing authorization code from Twitter callback")
+            return redirect(url_for('auth.login'))
+        
+        # Check if the required session data is available
+        code_verifier = session.get('twitter_code_verifier')
+        expected_state = session.get('twitter_oauth_state')
+        logger.info(f"Session data - code_verifier present: {bool(code_verifier)}, expected_state present: {bool(expected_state)}")
+        
+        if not code_verifier:
+            logger.error("Missing code_verifier in session - session may have been lost")
+            flash('Authentication failed: Session data lost. Please try again.', 'error')
             return redirect(url_for('auth.login'))
         
         # Store OAuth data
@@ -177,6 +197,7 @@ def oauth_callback(provider):
             
             # Store user ID in session as string
             session['user_id'] = str(user.id)
+            logger.info(f"Set user_id in session: {session.get('user_id')}")
             
             # Redirect to next_url or home
             next_url = session.pop('next', '/')
