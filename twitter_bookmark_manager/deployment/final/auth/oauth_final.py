@@ -92,7 +92,7 @@ class TwitterOAuth:
                 'response_type': 'code',
                 'client_id': self.client_id,
                 'redirect_uri': self.callback_url,
-                'scope': 'tweet.read users.read',
+                'scope': 'tweet.read users.read bookmark.read bookmark.write',
                 'state': state,
                 'code_challenge': code_challenge,
                 'code_challenge_method': 'S256'
