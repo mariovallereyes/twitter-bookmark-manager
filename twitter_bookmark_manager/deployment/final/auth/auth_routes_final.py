@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urljoin
 import json
 
 # Import custom modules
-from auth.oauth_final import OAuthManager, TwitterOAuth1, TwitterOAuth
+from auth.oauth_final import OAuthManager, TwitterOAuth
 from auth.user_context_final import UserContext, get_user_context, user_required, store_user_in_session
 from database.multi_user_db.user_model_final import (
     get_user_by_provider_id, 
@@ -82,42 +82,52 @@ def login():
 @auth_bp.route('/login/twitter')
 def login_twitter():
     """
-    Initiates Twitter OAuth 1.0a authentication process.
+    Initiates Twitter OAuth 2.0 authentication process.
     
-    Generates a request token and redirects the user to Twitter's
+    Generates a PKCE code challenge and redirects the user to Twitter's
     authorization page to grant access to the application.
     """
-    logger.info("-------- Starting Twitter OAuth 1.0a authentication process --------")
+    logger.info("-------- Starting Twitter OAuth 2.0 authentication process --------")
     
     try:
-        # Get Twitter API credentials from environment variables
-        api_key = os.environ.get('TWITTER_API_KEY')
-        api_secret = os.environ.get('TWITTER_API_SECRET')
-        callback_url = request.url_root.rstrip('/') + url_for('twitter_oauth_callback')
+        # Get Twitter OAuth configuration from environment variables
+        client_id = os.environ.get('TWITTER_CLIENT_ID')
+        client_secret = os.environ.get('TWITTER_CLIENT_SECRET')
+        callback_url = os.environ.get('TWITTER_REDIRECT_URI')
         
-        # Log API keys and callback URL lengths without exposing values
-        logger.info(f"Twitter API key length: {len(api_key) if api_key else 'None'}")
-        logger.info(f"Twitter API secret length: {len(api_secret) if api_secret else 'None'}")
+        # Log OAuth configuration without exposing values
+        logger.info(f"Twitter client_id length: {len(client_id) if client_id else 'None'}")
+        logger.info(f"Twitter client_secret length: {len(client_secret) if client_secret else 'None'}")
         logger.info(f"Twitter callback URL: {callback_url}")
         
-        # Initialize Twitter OAuth 1.0a client
-        twitter_oauth = TwitterOAuth1(api_key, api_secret, callback_url)
+        # Initialize Twitter OAuth 2.0 client
+        provider_config = {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'callback_url': callback_url
+        }
+        twitter_oauth = TwitterOAuth(provider_config)
         
-        # Get request token from Twitter
-        request_token, request_token_secret, callback_confirmed = twitter_oauth.get_request_token()
+        # Generate authorization URL with PKCE
+        auth_data = twitter_oauth.get_authorization_url()
         
-        if not request_token or not request_token_secret:
-            logger.error("Failed to get Twitter request token")
-            flash("Authentication failed: Could not get authorization from Twitter.", "error")
+        if not auth_data or 'url' not in auth_data:
+            logger.error("Failed to generate Twitter authorization URL")
+            flash("Authentication failed: Could not connect to Twitter.", "error")
             return redirect(url_for('auth.login'))
         
-        # Store request token and secret in session for later use
-        session['twitter_request_token'] = request_token
-        session['twitter_request_token_secret'] = request_token_secret
-        logger.info(f"Stored Twitter request token in session: {request_token[:10]}...")
+        # Store PKCE values in session
+        session['oauth_state'] = auth_data.get('state')
+        session['code_verifier'] = auth_data.get('code_verifier')
+        session['code_challenge'] = auth_data.get('code_challenge')
+        logger.info(f"Stored OAuth state in session: {auth_data.get('state')[:10]}...")
+        logger.info(f"Stored code verifier (length: {len(auth_data.get('code_verifier', ''))})")
+        
+        # Force session to be saved
+        session.modified = True
         
         # Generate authorization URL and redirect user
-        auth_url = twitter_oauth.get_authorization_url(request_token)
+        auth_url = auth_data.get('url')
         if not auth_url:
             logger.error("Failed to generate Twitter authorization URL")
             flash("Authentication failed: Unable to redirect to Twitter.", "error")
