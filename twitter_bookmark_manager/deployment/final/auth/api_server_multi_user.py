@@ -1650,5 +1650,62 @@ def debug_session_config():
         "test_session_value": test_value
     })
 
+# Top-level routes to handle missing auth routes
+@app.route('/logout')
+def top_level_logout():
+    """Redirect to auth blueprint logout route or handle directly if blueprint not available"""
+    logger.info("Top-level logout route accessed")
+    # Clear the session directly in case the blueprint route fails
+    session.clear()
+    flash("You have been logged out successfully.", "success")
+    return redirect(url_for('index'))
+
+@app.route('/login/twitter')
+def top_level_twitter_login():
+    """Redirect to Twitter OAuth flow or handle directly if blueprint not available"""
+    logger.info("Top-level Twitter login route accessed")
+    try:
+        # Initialize Twitter OAuth with configuration
+        from auth.oauth_final import TwitterOAuth
+        
+        # Initialize provider with correct config
+        provider_config = {
+            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'callback_url': os.environ.get('TWITTER_REDIRECT_URI', '')
+        }
+        
+        # Log config (without sensitive info)
+        logger.info(f"Twitter client_id present: {bool(provider_config['client_id'])}")
+        logger.info(f"Twitter callback_url: {provider_config['callback_url']}")
+        
+        # Create OAuth manager and get authorization URL
+        twitter_oauth = TwitterOAuth(provider_config)
+        auth_data = twitter_oauth.get_authorization_url()
+        
+        if not auth_data or 'url' not in auth_data:
+            logger.error("Failed to generate Twitter authorization URL")
+            flash("Failed to connect to Twitter", "error")
+            return redirect(url_for('index'))
+        
+        # Store PKCE data in session
+        session['oauth_state'] = auth_data.get('state')
+        session['code_verifier'] = auth_data.get('code_verifier')
+        session['code_challenge'] = auth_data.get('code_challenge')
+        
+        # Force session to be saved
+        session.modified = True
+        
+        # Redirect to Twitter auth page
+        auth_url = auth_data['url']
+        logger.info(f"Redirecting to Twitter authorization URL (truncated): {auth_url[:60]}...")
+        
+        return redirect(auth_url)
+    except Exception as e:
+        logger.error(f"Twitter login error: {str(e)}")
+        logger.error(traceback.format_exc())
+        flash("An error occurred connecting to Twitter. Please try again.", "error")
+        return redirect(url_for('index'))
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
