@@ -12,8 +12,8 @@
             <div class="login-method">
                 <h2>Login with Twitter</h2>
                 <p>Use your Twitter account to authenticate and access your bookmarks.</p>
-                <a href="{{ url_for('auth.login_twitter') }}" class="btn btn-twitter">
-                    <i class="fab fa-twitter"></i> Login with Twitter (OAuth 1.0a)
+                <a href="{{ url_for('auth.twitter_auth') }}" class="btn btn-twitter">
+                    <i class="fab fa-twitter"></i> Login with Twitter
                 </a>
                 <p class="login-note">We will not post to your account or access private information beyond what is needed for authentication.</p>
                 <div id="debug-messages"></div>

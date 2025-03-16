@@ -53,303 +53,173 @@ class OAuthProvider:
         """Get user info from the OAuth provider"""
         raise NotImplementedError()
 
-class TwitterOAuth(OAuthProvider):
-    """Twitter OAuth 2.0 implementation"""
+class TwitterOAuth:
+    """Twitter OAuth provider implementation"""
     
     def __init__(self, config=None):
-        """Initialize with optional config override."""
-        # Pass config to parent class properly
-        super().__init__(config)
-        if config:
-            self.config = {'twitter': config}
-        logger.info(f"TwitterOAuth initialized with config: {bool(self.config)}")
+        """Initialize with Twitter OAuth configuration."""
+        self.config = config or {}
+        self.client_id = self.config.get('client_id', os.environ.get('TWITTER_CLIENT_ID', ''))
+        self.client_secret = self.config.get('client_secret', os.environ.get('TWITTER_CLIENT_SECRET', ''))
+        self.callback_url = self.config.get('callback_url', os.environ.get('TWITTER_REDIRECT_URI', ''))
+        self.auth_url = 'https://twitter.com/i/oauth2/authorize'
+        self.token_url = 'https://api.twitter.com/2/oauth2/token'
+        self.user_info_url = 'https://api.twitter.com/2/users/me'
+        
+        logging.info(f"TwitterOAuth initialized with client ID length: {len(self.client_id)}")
+        logging.info(f"TwitterOAuth callback URL: {self.callback_url}")
     
     def get_authorization_url(self):
-        """Generate Twitter OAuth 2.0 authorization URL."""
+        """Generate authorization URL with PKCE."""
         try:
-            logger.info("Generating Twitter OAuth 2.0 authorization URL")
-            
-            # Get provider config
-            provider_config = self.config.get('twitter', {})
-            if not provider_config:
-                logger.error("Twitter provider config not found")
-                return None
-                
-            # Generate PKCE code verifier - must be between 43-128 characters
-            code_verifier = secrets.token_urlsafe(43)  # This will generate a string of ~58 chars
-            
-            # Log the exact length of the code verifier
-            logger.info(f"Generated code_verifier with length: {len(code_verifier)}")
-            
-            # Generate S256 code challenge properly
-            code_verifier_bytes = code_verifier.encode('ascii')
-            code_challenge_bytes = hashlib.sha256(code_verifier_bytes).digest()
-            code_challenge = base64.urlsafe_b64encode(code_challenge_bytes).decode('ascii').rstrip('=')
-            
-            # Generate state parameter for CSRF protection
+            # Generate random state and code verifier
             state = secrets.token_urlsafe(32)
+            code_verifier = secrets.token_urlsafe(64)  # Between 43-128 chars
             
-            # Twitter authorization URL
-            base_url = 'https://twitter.com/i/oauth2/authorize'
+            # Ensure code verifier meets Twitter's requirements (43-128 chars)
+            if len(code_verifier) < 43:
+                code_verifier = code_verifier + secrets.token_urlsafe(43 - len(code_verifier))
+            elif len(code_verifier) > 128:
+                code_verifier = code_verifier[:128]
             
-            # Log the exact callback URL to verify it matches developer portal
-            callback_url = provider_config.get('callback_url', '')
-            logger.info(f"Using exact callback URL: '{callback_url}'")
+            logging.info(f"Generated code verifier length: {len(code_verifier)}")
             
-            # Required parameters for OAuth 2.0 with PKCE
+            # Generate code challenge using SHA256
+            code_challenge = self._generate_code_challenge(code_verifier)
+            
+            # Build authorization URL
             params = {
                 'response_type': 'code',
-                'client_id': provider_config['client_id'],
-                'redirect_uri': callback_url,
+                'client_id': self.client_id,
+                'redirect_uri': self.callback_url,
                 'scope': 'tweet.read users.read',
                 'state': state,
                 'code_challenge': code_challenge,
-                'code_challenge_method': 'S256'  # Explicitly use S256
+                'code_challenge_method': 'S256'
             }
             
-            # Build full authorization URL
-            auth_url = f"{base_url}?{urlencode(params)}"
+            authorization_url = f"{self.auth_url}?{urlencode(params)}"
             
-            # Log full URL for debugging (removing client_id)
-            safe_url = auth_url.replace(provider_config['client_id'], 'CLIENT_ID_REDACTED')
-            logger.info(f"Generated authorization URL: {safe_url}")
-            
-            # Return all data needed for later validation
             return {
-                'url': auth_url,
+                'url': authorization_url,
                 'state': state,
                 'code_verifier': code_verifier,
                 'code_challenge': code_challenge
             }
+            
         except Exception as e:
-            logger.error(f"Error generating authorization URL: {e}")
-            logger.error(traceback.format_exc())
+            logging.error(f"Error generating authorization URL: {str(e)}")
+            logging.error(traceback.format_exc())
             return None
     
-    def get_user_info(self, callback_data):
-        """Get user info from Twitter OAuth 2.0 callback data"""
+    def get_token(self, code, code_verifier):
+        """Exchange authorization code for access token."""
         try:
-            # Verify state parameter to prevent CSRF
-            state = callback_data.get('state')
-            expected_state = session.pop('twitter_oauth_state', None)
-            
-            # Log state values for debugging
-            logger.info(f"State comparison: received={state}, expected={expected_state}")
-            
-            if not state or state != expected_state:
-                logger.error(f"State mismatch: received {state}, expected {expected_state}")
+            if not code or not code_verifier:
+                logging.error("Missing code or code_verifier in get_token")
                 return None
             
-            # Extract authorization code
-            code = callback_data.get('code')
-            if not code:
-                logger.error("No authorization code received from Twitter")
-                return None
+            logging.info(f"Exchanging code for token with verifier length: {len(code_verifier)}")
             
-            # Get code verifier from session
-            code_verifier = session.pop('twitter_code_verifier', None)
-            if not code_verifier:
-                logger.error("No code verifier in session")
-                return None
-                
-            logger.info(f"Code verifier length: {len(code_verifier)}")
-            
-            # Exchange code for access token
-            logger.info("Exchanging authorization code for access token")
-            
-            # Format token request properly for Twitter
-            token_payload = {
+            # Prepare token request
+            token_data = {
                 'code': code,
                 'grant_type': 'authorization_code',
-                'client_id': self.config['twitter']['client_id'],
-                'redirect_uri': self.config['twitter']['callback_url'],
+                'client_id': self.client_id,
+                'redirect_uri': self.callback_url,
                 'code_verifier': code_verifier
             }
             
-            # Twitter expects client authentication via Basic Auth
-            auth_string = f"{self.config['twitter']['client_id']}:{self.config['twitter']['client_secret']}"
-            auth_bytes = auth_string.encode('ascii')
-            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
-            
+            # Basic auth for client_id and client_secret
+            auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
             headers = {
-                'Authorization': f'Basic {auth_b64}',
-                'Content-Type': 'application/x-www-form-urlencoded'
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': f'Basic {auth}'
             }
             
-            # Log token request details (without sensitive info)
-            logger.info(f"Token request URL: {TWITTER_TOKEN_URL}")
-            logger.info(f"Token request payload keys: {list(token_payload.keys())}")
-            
-            token_response = requests.post(
-                TWITTER_TOKEN_URL,
-                data=token_payload,
+            # Make token request
+            response = requests.post(
+                self.token_url,
+                data=token_data,
                 headers=headers
             )
             
-            # Log the response status
-            logger.info(f"Token response status: {token_response.status_code}")
-            if token_response.status_code != 200:
-                logger.error(f"Token request failed: {token_response.status_code} - {token_response.text}")
+            if response.status_code != 200:
+                logging.error(f"Token request failed with status {response.status_code}")
+                logging.error(f"Response: {response.text}")
                 return None
-                
-            tokens = token_response.json()
-            access_token = tokens.get('access_token')
             
-            # Get user info
-            logger.info("Fetching user info from Twitter")
-            user_response = requests.get(
-                f"{TWITTER_USER_INFO_URL}?user.fields=profile_image_url,name,username",
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                }
+            # Extract token data
+            token_response = response.json()
+            
+            logging.info("Successfully retrieved access token")
+            
+            return token_response
+            
+        except Exception as e:
+            logging.error(f"Error getting token: {str(e)}")
+            logging.error(traceback.format_exc())
+            return None
+    
+    def get_user_info(self, access_token):
+        """Get user information from Twitter API."""
+        try:
+            if not access_token:
+                logging.error("No access token provided to get_user_info")
+                return None
+            
+            # Make user info request
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            params = {
+                'user.fields': 'id,name,username,profile_image_url'
+            }
+            
+            response = requests.get(
+                self.user_info_url,
+                headers=headers,
+                params=params
             )
             
-            # Log user info response status
-            logger.info(f"User info response status: {user_response.status_code}")
-            if user_response.status_code != 200:
-                logger.error(f"User info request failed: {user_response.status_code} - {user_response.text}")
-                return None
-                
-            user_data = user_response.json()
-            
-            # In OAuth 2.0, Twitter returns user data in a different format
-            user = user_data.get('data', {})
-            
-            # Log user data received
-            safe_user = {k: v for k, v in user.items() if k != 'id'}
-            logger.info(f"Received user data keys: {list(user.keys())}")
-            logger.info(f"User info (without ID): {safe_user}")
-            
-            return {
-                'id': user.get('id'),
-                'username': user.get('username'),
-                'name': user.get('name'),
-                'profile_image_url': user.get('profile_image_url', ''),
-                'access_token': access_token,
-                'refresh_token': tokens.get('refresh_token', '')
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting Twitter user info: {e}")
-            logger.error(traceback.format_exc())
-            return None
-
-    def get_token(self, code, code_verifier):
-        """Exchange authorization code for token."""
-        try:
-            # Log the start of token exchange
-            logger.info("Starting token exchange with Twitter OAuth 2.0")
-            
-            # Get provider config
-            provider_config = self.config.get('twitter', {})
-            if not provider_config:
-                logger.error("No Twitter provider configuration found")
-                return None
-            
-            # Prepare token request data
-            token_url = 'https://api.twitter.com/2/oauth2/token'
-            
-            # Log parameters (without exposing sensitive data)
-            logger.info(f"Token request to: {token_url}")
-            logger.info(f"Code verifier length: {len(code_verifier)}")
-            logger.info(f"Code length: {len(code)}")
-            
-            # Create form data for token request
-            data = {
-                'client_id': provider_config['client_id'],
-                'code': code,
-                'grant_type': 'authorization_code',
-                'redirect_uri': provider_config['callback_url'],
-                'code_verifier': code_verifier
-            }
-            
-            # Create Basic Auth header for client_id and client_secret
-            auth_string = f"{provider_config['client_id']}:{provider_config['client_secret']}"
-            auth_bytes = auth_string.encode('ascii')
-            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
-            
-            headers = {
-                'Authorization': f'Basic {auth_b64}',
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            
-            # Log headers (without exposing sensitive data)
-            logger.info(f"Authorization header present: {bool(headers.get('Authorization'))}")
-            logger.info(f"Content-Type: {headers.get('Content-Type')}")
-            
-            # Make the token request
-            logger.info("Sending token request to Twitter...")
-            response = requests.post(token_url, data=data, headers=headers)
-            
-            # Log response code
-            logger.info(f"Token response status: {response.status_code}")
-            
-            # Check if the request was successful
             if response.status_code != 200:
-                logger.error(f"Token request failed: {response.status_code}")
-                logger.error(f"Response: {response.text}")
+                logging.error(f"User info request failed with status {response.status_code}")
+                logging.error(f"Response: {response.text}")
                 return None
             
-            # Parse response
-            token_data = response.json()
-            logger.info("Successfully obtained token from Twitter")
+            # Extract user data
+            user_response = response.json()
             
-            return token_data
-        except Exception as e:
-            logger.error(f"Error exchanging code for token: {e}")
-            logger.error(traceback.format_exc())
-            return None
-
-    def get_user_info(self, access_token):
-        """Get user information using access token."""
-        try:
-            # Log the start of user info retrieval
-            logger.info("Getting user info from Twitter")
+            if 'data' not in user_response:
+                logging.error(f"Invalid user info response: {user_response}")
+                return None
             
-            # Twitter API endpoint for user info
-            user_info_url = 'https://api.twitter.com/2/users/me'
+            user_data = user_response['data']
             
-            # Parameters to request additional user fields
-            params = {
-                'user.fields': 'profile_image_url,name,username'
+            # Create standardized user info
+            user_info = {
+                'id': user_data.get('id'),
+                'username': user_data.get('username'),
+                'name': user_data.get('name'),
+                'profile_image_url': user_data.get('profile_image_url')
             }
             
-            # Headers with access token
-            headers = {
-                'Authorization': f'Bearer {access_token}'
-            }
+            logging.info(f"Got user info for Twitter user: {user_info['username']}")
             
-            # Make the request
-            logger.info(f"Sending user info request to Twitter: {user_info_url}")
-            response = requests.get(user_info_url, params=params, headers=headers)
+            return user_info
             
-            # Log response code
-            logger.info(f"User info response status: {response.status_code}")
-            
-            # Check if the request was successful
-            if response.status_code != 200:
-                logger.error(f"User info request failed: {response.status_code}")
-                logger.error(f"Response: {response.text}")
-                return None
-            
-            # Parse response
-            user_data = response.json()
-            
-            # Extract user data from Twitter's response structure
-            if 'data' in user_data:
-                user_info = user_data['data']
-                # Log user info received (with ID partially masked for privacy)
-                user_id = user_info.get('id', '')
-                logger.info(f"Received user info for Twitter ID: {user_id[:3]}...{user_id[-3:] if len(user_id) > 6 else ''}")
-                return user_info
-            else:
-                logger.error(f"Missing data in user response: {user_data}")
-                return None
         except Exception as e:
-            logger.error(f"Error getting user info: {e}")
-            logger.error(traceback.format_exc())
+            logging.error(f"Error getting user info: {str(e)}")
+            logging.error(traceback.format_exc())
             return None
+    
+    def _generate_code_challenge(self, code_verifier):
+        """Generate PKCE code challenge from verifier using S256 method."""
+        sha256 = hashlib.sha256(code_verifier.encode('utf-8')).digest()
+        code_challenge = base64.urlsafe_b64encode(sha256).decode('utf-8').rstrip('=')
+        return code_challenge
 
 class GoogleOAuth(OAuthProvider):
     """Google OAuth implementation"""
@@ -433,245 +303,6 @@ class GoogleOAuth(OAuthProvider):
             
         except Exception as e:
             logger.error(f"Error getting Google user info: {e}")
-            return None
-
-class TwitterOAuth1:
-    """Twitter OAuth 1.0a implementation for authentication"""
-    
-    def __init__(self, api_key, api_secret, callback_url):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.callback_url = callback_url
-        self.request_token_url = "https://api.twitter.com/oauth/request_token"
-        self.authorize_url = "https://api.twitter.com/oauth/authenticate"
-        self.access_token_url = "https://api.twitter.com/oauth/access_token"
-        self.user_info_url = "https://api.twitter.com/1.1/account/verify_credentials.json"
-        
-        logger.info(f"TwitterOAuth1 initialized with callback URL: {callback_url}")
-        logger.info(f"API key length: {len(api_key) if api_key else 'None'}")
-        logger.info(f"API secret length: {len(api_secret) if api_secret else 'None'}")
-    
-    def _generate_nonce(self):
-        """Generate a unique nonce for OAuth 1.0a requests"""
-        return secrets.token_hex(16)
-    
-    def _get_timestamp(self):
-        """Get current timestamp for OAuth 1.0a requests"""
-        return str(int(time.time()))
-    
-    def _generate_signature(self, method, url, params, token_secret=""):
-        """Generate OAuth 1.0a signature"""
-        # Create parameter string
-        # Sort parameters alphabetically
-        sorted_params = sorted(params.items())
-        param_string = "&".join([f"{quote(k)}={quote(v)}" for k, v in sorted_params])
-        
-        # Create signature base string
-        signature_base_string = f"{method.upper()}&{quote(url)}&{quote(param_string)}"
-        
-        # Create signing key
-        signing_key = f"{quote(self.api_secret)}&{quote(token_secret)}"
-        
-        # Generate signature
-        signature = hmac.new(
-            signing_key.encode('utf-8'),
-            signature_base_string.encode('utf-8'),
-            hashlib.sha1
-        ).digest()
-        
-        return base64.b64encode(signature).decode('utf-8')
-    
-    def get_request_token(self):
-        """Step 1: Get a request token from Twitter"""
-        logger.info("Getting Twitter request token...")
-        
-        # Set OAuth parameters
-        oauth_params = {
-            'oauth_consumer_key': self.api_key,
-            'oauth_nonce': self._generate_nonce(),
-            'oauth_signature_method': 'HMAC-SHA1',
-            'oauth_timestamp': self._get_timestamp(),
-            'oauth_version': '1.0',
-            'oauth_callback': self.callback_url
-        }
-        
-        # Generate signature
-        oauth_params['oauth_signature'] = self._generate_signature(
-            'POST',
-            self.request_token_url,
-            oauth_params
-        )
-        
-        # Create Authorization header
-        auth_header = 'OAuth ' + ', '.join([
-            f'{quote(k)}="{quote(v)}"' for k, v in oauth_params.items()
-        ])
-        
-        try:
-            # Make request to get request token
-            response = requests.post(
-                self.request_token_url,
-                headers={'Authorization': auth_header}
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to get request token: {response.status_code} {response.text}")
-                return None, None, None
-            
-            # Parse response
-            response_params = dict(parse_qsl(response.text))
-            request_token = response_params.get('oauth_token')
-            request_token_secret = response_params.get('oauth_token_secret')
-            callback_confirmed = response_params.get('oauth_callback_confirmed')
-            
-            logger.info(f"Request token received: {request_token[:10]}...")
-            logger.info(f"Callback confirmed: {callback_confirmed}")
-            
-            return request_token, request_token_secret, callback_confirmed
-        
-        except Exception as e:
-            logger.error(f"Exception getting request token: {e}")
-            logger.error(traceback.format_exc())
-            return None, None, None
-    
-    def get_authorization_url(self, request_token):
-        """Step 2: Generate authorization URL for user redirect"""
-        if not request_token:
-            logger.error("Cannot generate authorization URL without request token")
-            return None
-        
-        authorization_url = f"{self.authorize_url}?oauth_token={request_token}"
-        logger.info(f"Generated authorization URL: {authorization_url[:50]}...")
-        
-        return authorization_url
-    
-    def get_access_token(self, request_token, request_token_secret, oauth_verifier):
-        """Step 3: Exchange request token for access token using the verifier"""
-        logger.info(f"Getting access token with verifier: {oauth_verifier[:10]}... and token: {request_token[:10]}...")
-        
-        # Set OAuth parameters
-        oauth_params = {
-            'oauth_consumer_key': self.api_key,
-            'oauth_nonce': self._generate_nonce(),
-            'oauth_signature_method': 'HMAC-SHA1',
-            'oauth_timestamp': self._get_timestamp(),
-            'oauth_token': request_token,
-            'oauth_verifier': oauth_verifier,
-            'oauth_version': '1.0'
-        }
-        
-        # Generate signature
-        oauth_params['oauth_signature'] = self._generate_signature(
-            'POST',
-            self.access_token_url,
-            oauth_params,
-            request_token_secret
-        )
-        
-        # Create Authorization header
-        auth_header = 'OAuth ' + ', '.join([
-            f'{quote(k)}="{quote(v)}"' for k, v in oauth_params.items()
-        ])
-        
-        try:
-            # Make request to get access token
-            response = requests.post(
-                self.access_token_url,
-                headers={'Authorization': auth_header}
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to get access token: {response.status_code} {response.text}")
-                return None
-            
-            # Parse response
-            response_params = dict(parse_qsl(response.text))
-            access_token = response_params.get('oauth_token')
-            access_token_secret = response_params.get('oauth_token_secret')
-            user_id = response_params.get('user_id')
-            screen_name = response_params.get('screen_name')
-            
-            logger.info(f"Access token received: {access_token[:10]}...")
-            logger.info(f"User ID: {user_id}, Screen name: {screen_name}")
-            
-            user_info = {
-                'id': user_id,
-                'screen_name': screen_name,
-                'access_token': access_token,
-                'access_token_secret': access_token_secret
-            }
-            
-            return user_info
-        
-        except Exception as e:
-            logger.error(f"Exception getting access token: {e}")
-            logger.error(traceback.format_exc())
-            return None
-    
-    def get_user_info(self, access_token, access_token_secret):
-        """Get additional user info using the access token"""
-        logger.info(f"Getting user info with access token: {access_token[:10]}...")
-        
-        # Set OAuth parameters
-        oauth_params = {
-            'oauth_consumer_key': self.api_key,
-            'oauth_nonce': self._generate_nonce(),
-            'oauth_signature_method': 'HMAC-SHA1',
-            'oauth_timestamp': self._get_timestamp(),
-            'oauth_token': access_token,
-            'oauth_version': '1.0'
-        }
-        
-        # Additional parameters for the request
-        request_params = {
-            'include_email': 'true'
-        }
-        
-        # Combine all parameters for signature
-        all_params = {**oauth_params, **request_params}
-        
-        # Generate signature
-        oauth_params['oauth_signature'] = self._generate_signature(
-            'GET',
-            self.user_info_url,
-            all_params,
-            access_token_secret
-        )
-        
-        # Create Authorization header
-        auth_header = 'OAuth ' + ', '.join([
-            f'{quote(k)}="{quote(v)}"' for k, v in oauth_params.items()
-        ])
-        
-        try:
-            # Make request to get user info
-            response = requests.get(
-                f"{self.user_info_url}?include_email=true",
-                headers={'Authorization': auth_header}
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to get user info: {response.status_code} {response.text}")
-                return None
-            
-            user_info = response.json()
-            logger.info(f"User info received for: {user_info.get('screen_name')}")
-            
-            # Add basic user data
-            user_data = {
-                'id': user_info.get('id_str'),
-                'username': user_info.get('screen_name'),
-                'name': user_info.get('name'),
-                'email': user_info.get('email', ''),
-                'profile_image_url': user_info.get('profile_image_url_https', ''),
-                'provider': 'twitter'
-            }
-            
-            return user_data
-        
-        except Exception as e:
-            logger.error(f"Exception getting user info: {e}")
-            logger.error(traceback.format_exc())
             return None
 
 class OAuthManager:

@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urljoin
 import json
 
 # Import custom modules
-from auth.oauth_final import OAuthManager, TwitterOAuth1
+from auth.oauth_final import OAuthManager, TwitterOAuth1, TwitterOAuth
 from auth.user_context_final import UserContext, get_user_context, user_required, store_user_in_session
 from database.multi_user_db.user_model_final import (
     get_user_by_provider_id, 
@@ -332,107 +332,217 @@ def profile():
     # Render profile template
     return render_template('profile_final.html', user=user, is_admin=is_admin)
 
+@auth_bp.route('/twitter')
+def twitter_auth():
+    """Initiate Twitter OAuth flow."""
+    logging.info("======= STARTING TWITTER OAUTH FLOW =======")
+    try:
+        # Initialize provider with correct config
+        provider_config = {
+            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'callback_url': os.environ.get('TWITTER_REDIRECT_URI', '')
+        }
+        
+        # Log config (without sensitive info)
+        logging.info(f"Twitter client_id length: {len(provider_config['client_id'])}")
+        logging.info(f"Twitter client_secret length: {len(provider_config['client_secret'])}")
+        logging.info(f"Twitter callback_url: {provider_config['callback_url']}")
+        
+        # Remove any old OAuth data from session
+        for key in ['oauth_state', 'code_verifier', 'code_challenge', 
+                   'twitter_oauth_state', 'twitter_code_verifier', 'twitter_code_challenge']:
+            if key in session:
+                session.pop(key)
+        
+        # Create OAuth manager
+        twitter_oauth = TwitterOAuth(provider_config)
+        
+        # Generate PKCE values and auth URL
+        auth_data = twitter_oauth.get_authorization_url()
+        if not auth_data or 'url' not in auth_data:
+            logging.error("Failed to generate Twitter authorization URL")
+            flash("Failed to connect to Twitter", "error")
+            return redirect(url_for('auth.login'))
+        
+        # Store PKCE data in session using both naming conventions for compatibility
+        session['oauth_state'] = auth_data.get('state')
+        session['code_verifier'] = auth_data.get('code_verifier')
+        session['code_challenge'] = auth_data.get('code_challenge')
+        
+        # Also store with twitter_ prefix
+        session['twitter_oauth_state'] = auth_data.get('state')
+        session['twitter_code_verifier'] = auth_data.get('code_verifier')
+        session['twitter_code_challenge'] = auth_data.get('code_challenge')
+        
+        # Log session storage (sanitized)
+        logging.info(f"Stored oauth_state in session: {auth_data.get('state')[:5]}... (truncated)")
+        logging.info(f"Stored code_verifier in session length: {len(auth_data.get('code_verifier'))}")
+        logging.info(f"Session keys after storage: {list(session.keys())}")
+        
+        # Force session to be saved
+        session.modified = True
+        
+        # Redirect to Twitter auth page
+        auth_url = auth_data['url']
+        logging.info(f"Redirecting to Twitter authorization URL (truncated): {auth_url[:60]}...")
+        
+        return redirect(auth_url)
+        
+    except Exception as e:
+        logging.error(f"Twitter auth error: {str(e)}")
+        logging.error(traceback.format_exc())
+        flash("An error occurred while connecting to Twitter", "error")
+        return redirect(url_for('auth.login'))
+
 @auth_bp.route('/oauth/callback/twitter')
 def oauth_callback_twitter():
-    """
-    Handles the OAuth 1.0a callback from Twitter.
-    
-    Processes the callback after user authorizes the application on Twitter,
-    exchanges the request token for an access token, and logs the user in.
-    """
-    logger.info("-------- Twitter OAuth 1.0a callback received --------")
-    logger.info(f"Full request URL: {request.url}")
-    logger.info(f"Request args: {dict(request.args)}")
-    logger.info(f"Session keys before processing: {list(session.keys())}")
-    
+    """Handle the OAuth callback from Twitter."""
     try:
-        # Check for errors from Twitter
-        if request.args.get('denied'):
-            denied_token = request.args.get('denied')
-            logger.warning(f"User denied access to Twitter account. Token: {denied_token}")
-            flash("Twitter authentication was canceled.", "warning")
+        logging.info("======= TWITTER OAUTH CALLBACK DEBUG START =======")
+        # Log the full request URL and args for debugging
+        logging.info(f"Full request URL: {request.url}")
+        logging.info(f"Request args: {dict(request.args)}")
+        logging.info(f"Session keys: {list(session.keys())}")
+        
+        # Check for OAuth error response
+        if 'error' in request.args:
+            error = request.args.get('error')
+            error_description = request.args.get('error_description', 'No description provided')
+            logging.error(f"OAuth error: {error} - {error_description}")
+            flash(f"Authentication failed: {error_description}", "error")
             return redirect(url_for('auth.login'))
         
-        # Get verifier from callback
-        oauth_verifier = request.args.get('oauth_verifier')
-        oauth_token = request.args.get('oauth_token')
+        # Extract OAuth data
+        code = request.args.get('code')
+        state = request.args.get('state')
         
-        if not oauth_verifier or not oauth_token:
-            logger.error("Missing oauth_verifier or oauth_token in callback")
-            flash("Authentication failed: Invalid response from Twitter.", "error")
+        # Verify code and state
+        if not code:
+            logging.error("No authorization code in callback")
+            flash("Authentication failed: No authorization code received", "error")
             return redirect(url_for('auth.login'))
         
-        # Verify that the token matches what we have in session
-        request_token = session.get('twitter_request_token')
-        request_token_secret = session.get('twitter_request_token_secret')
-        
-        if not request_token or not request_token_secret:
-            logger.error("Missing request token in session")
-            flash("Authentication failed: Session expired or was lost.", "error")
+        # Try both session key formats for compatibility
+        expected_state = session.get('oauth_state') or session.get('twitter_oauth_state')
+        if not expected_state:
+            logging.error(f"No state in session - Session keys: {list(session.keys())}")
+            flash("Authentication failed: Session expired", "error")
             return redirect(url_for('auth.login'))
         
-        if request_token != oauth_token:
-            logger.error(f"Token mismatch. Session: {request_token[:10]}... Callback: {oauth_token[:10]}...")
-            flash("Authentication failed: Invalid token.", "error")
+        if state != expected_state:
+            logging.error(f"State mismatch: {state} != {expected_state}")
+            flash("Authentication failed: Security check failed", "error")
             return redirect(url_for('auth.login'))
         
-        # Get Twitter API credentials
-        api_key = os.environ.get('TWITTER_API_KEY')
-        api_secret = os.environ.get('TWITTER_API_SECRET')
-        callback_url = request.url_root.rstrip('/') + url_for('twitter_oauth_callback')
-        
-        # Initialize Twitter OAuth 1.0a client
-        twitter_oauth = TwitterOAuth1(api_key, api_secret, callback_url)
-        
-        # Exchange request token for access token
-        user_data = twitter_oauth.get_access_token(
-            request_token, 
-            request_token_secret,
-            oauth_verifier
-        )
-        
-        if not user_data:
-            logger.error("Failed to get access token from Twitter")
-            flash("Authentication failed: Could not complete Twitter authentication.", "error")
+        # Also try both formats for code verifier
+        code_verifier = session.get('code_verifier') or session.get('twitter_code_verifier')
+        if not code_verifier:
+            logging.error("No code verifier in session")
+            flash("Authentication failed: Session data missing", "error")
             return redirect(url_for('auth.login'))
         
-        # Get user information
-        access_token = user_data.get('access_token')
-        access_token_secret = user_data.get('access_token_secret')
+        logging.info(f"Code: {code[:5]}... (truncated)")
+        logging.info(f"State: {state[:5]}... (truncated)")
+        logging.info(f"Code verifier: {code_verifier[:5]}... (truncated)")
+        logging.info(f"Code verifier length: {len(code_verifier)}")
         
-        # Get additional user info if needed
-        # user_info = twitter_oauth.get_user_info(access_token, access_token_secret)
+        # Exchange code for token
+        from auth.oauth_final import TwitterOAuth
         
-        # Create or update user in the database
-        from auth.user_api_final import find_or_create_user
+        # Initialize provider with correct config
+        provider_config = {
+            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'callback_url': os.environ.get('TWITTER_REDIRECT_URI', '')
+        }
         
-        user = find_or_create_user({
-            'provider': 'twitter',
-            'provider_id': user_data.get('id'),
-            'username': user_data.get('screen_name'),
-            'display_name': user_data.get('screen_name'),
-            'provider_data': json.dumps(user_data)
-        })
+        # Log config (without sensitive info)
+        logging.info(f"Twitter client_id length: {len(provider_config['client_id'])}")
+        logging.info(f"Twitter client_secret length: {len(provider_config['client_secret'])}")
+        logging.info(f"Twitter callback_url: {provider_config['callback_url']}")
         
-        if not user:
-            logger.error("Failed to create or find user")
-            flash("Authentication failed: Could not create user account.", "error")
+        twitter_oauth = TwitterOAuth(provider_config)
+        
+        token_data = twitter_oauth.get_token(code, code_verifier)
+        
+        if not token_data or 'access_token' not in token_data:
+            logging.error(f"Failed to get token: {token_data}")
+            flash("Failed to authenticate with Twitter", "error")
             return redirect(url_for('auth.login'))
         
-        # Store user in session
-        store_user_in_session(user)
-        logger.info(f"User logged in: {user.get('username')} (ID: {user.get('id')})")
+        # Get user info
+        user_info = twitter_oauth.get_user_info(token_data['access_token'])
+        if not user_info or 'id' not in user_info:
+            logging.error(f"Failed to get user info: {user_info}")
+            flash("Failed to get user information from Twitter", "error")
+            return redirect(url_for('auth.login'))
         
-        # Clear OAuth tokens from session
-        session.pop('twitter_request_token', None)
-        session.pop('twitter_request_token_secret', None)
+        # Log user info (sanitized)
+        logging.info(f"Twitter user ID: {user_info.get('id')}")
+        logging.info(f"Twitter username: {user_info.get('username')}")
         
-        # Redirect to home page or return URL
-        return_url = session.pop('return_url', url_for('index'))
-        return redirect(return_url)
-    
+        # Find or create user
+        from database.multi_user_db.db_final import get_db_connection, create_user, update_last_login, get_user_by_provider_id
+        
+        try:
+            # Get database connection
+            db_conn = get_db_connection()
+            
+            # Find or create user
+            user = get_user_by_provider_id(db_conn, 'twitter', user_info.get('id'))
+            if not user:
+                # Create new user
+                user = create_user(
+                    db_conn,
+                    username=user_info.get('username', ''),
+                    email=f"{user_info.get('username', '')}@twitter.placeholder",
+                    auth_provider='twitter',
+                    provider_id=user_info.get('id'),
+                    display_name=user_info.get('name', ''),
+                    profile_image_url=user_info.get('profile_image_url', '')
+                )
+                logging.info(f"Created new user from Twitter: {user.id} - {user.username}")
+            else:
+                # Update last login
+                update_last_login(db_conn, user.id)
+                logging.info(f"Updated existing user from Twitter: {user.id} - {user.username}")
+            
+            if not user:
+                logging.error("Failed to create or update user record")
+                flash("An error occurred while setting up your account", "error")
+                return redirect(url_for('auth.login'))
+            
+            # Store user ID in session
+            session['user_id'] = str(user.id)
+            session['username'] = user.username
+            logging.info(f"Stored user ID in session: {user.id}")
+        except Exception as db_error:
+            logging.error(f"Database error: {str(db_error)}")
+            logging.error(traceback.format_exc())
+            flash("A database error occurred. Please try again.", "error")
+            return redirect(url_for('auth.login'))
+        
+        # Clear OAuth-related session data
+        try:
+            for key in ['oauth_state', 'code_verifier', 'code_challenge', 
+                      'twitter_oauth_state', 'twitter_code_verifier', 'twitter_code_challenge']:
+                if key in session:
+                    session.pop(key)
+            
+            # Force session to be saved
+            session.modified = True
+        except Exception as session_error:
+            logging.error(f"Error clearing session: {str(session_error)}")
+            # Continue even if session cleanup fails
+        
+        logging.info("Authentication successful")
+        logging.info("======= TWITTER OAUTH CALLBACK DEBUG END =======")
+        
+        # Redirect to home
+        return redirect(url_for('index'))
     except Exception as e:
-        logger.error(f"Error in Twitter OAuth callback: {e}")
-        logger.error(traceback.format_exc())
-        flash("An error occurred during authentication. Please try again.", "error")
+        logging.error(f"OAuth callback error: {str(e)}")
+        logging.error(traceback.format_exc())
+        flash("An error occurred during authentication", "error")
         return redirect(url_for('auth.login')) 

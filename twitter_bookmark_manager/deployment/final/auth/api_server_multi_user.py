@@ -1429,8 +1429,8 @@ def api_categories():
 # Route to handle Twitter OAuth callback at the root level
 @app.route('/oauth/callback/twitter')
 def twitter_oauth_callback():
-    """Route to handle Twitter OAuth 1.0a callback at the root level"""
-    logger.info("-------- Twitter OAuth 1.0a callback received at root level --------")
+    """Route to handle Twitter OAuth callback at the root level"""
+    logger.info("-------- Twitter OAuth callback received at root level --------")
     logger.info(f"Full request URL: {request.url}")
     logger.info(f"Request args: {dict(request.args)}")
     logger.info(f"Session keys before processing: {list(session.keys())}")
@@ -1443,6 +1443,13 @@ def twitter_oauth_callback():
     except Exception as e:
         logger.error(f"Error in root twitter_oauth_callback: {e}")
         logger.error(traceback.format_exc())
+        
+        # Check if we have the specific error about the import
+        if "No module named" in str(e) or "cannot import name" in str(e):
+            logger.error("Import error - trying to handle callback directly")
+            # Add code here to handle the callback directly if needed
+            return redirect(url_for('auth.login'))
+        
         return redirect(url_for('auth.login'))
 
 # Debug endpoint to check Twitter auth configuration
