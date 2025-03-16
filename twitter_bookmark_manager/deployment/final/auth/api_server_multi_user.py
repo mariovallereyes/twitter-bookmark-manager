@@ -273,6 +273,16 @@ def shutdown_cleanup(exception=None):
 
 # Request handlers
 @app.before_request
+def log_request_details():
+    """Log details about each request for debugging"""
+    # Log request details
+    logger.info(f"Request: {request.method} {request.path}")
+    logger.info(f"Blueprint: {request.blueprint}")
+    logger.info(f"Endpoint: {request.endpoint}")
+    logger.info(f"Session keys: {list(session.keys())}")
+    # Don't log sensitive data like cookies or headers with auth info
+
+@app.before_request
 def log_session_info():
     """Log session information for debugging"""
     try:
@@ -285,36 +295,44 @@ def log_session_info():
 
 @app.before_request
 def check_user_authentication():
-    """Check if the user is authenticated"""
-    try:
-        # Exclude public routes
-        public_paths = [
-            '/auth/login', 
-            '/auth/callback', 
-            '/static', 
-            '/status', 
-            '/-/health',
-            '/api/status',
-            '/auth/logout'
-        ]
+    """Check if the user is authenticated and redirect to login if not"""
+    # Skip authentication for login, logout, static files and health check routes
+    auth_exempt_paths = [
+        '/auth/login', 
+        '/auth/twitter',
+        '/oauth/callback/twitter',
+        '/auth/twitter_auth',
+        '/auth/logout', 
+        '/static/', 
+        '/favicon.ico',
+        '/-/health',
+        '/api/health',
+        '/check-auth',
+        '/debug/'
+    ]
+    
+    # Skip authentication for exempt paths
+    if any(request.path.startswith(path) for path in auth_exempt_paths):
+        logger.debug(f"Skipping authentication check for {request.path}")
+        return
+    
+    # Skip authentication for auth blueprint routes
+    if request.blueprint == 'auth':
+        logger.debug(f"Skipping authentication check for auth blueprint: {request.path}")
+        return
         
-        # Check if the path matches any public path prefix
-        if any(request.path.startswith(path) for path in public_paths):
-            return
-                    
-        # Get current user
-        user = UserContext.get_current_user()
-        
-        # If it's an API request, return JSON error
-        if request.path.startswith('/api/') and not user:
-            return jsonify({'success': False, 'error': 'Authentication required'}), 401
-            
-        # For non-API requests, redirect to login
-        if not user and not request.path == '/':
-            logger.info(f"Unauthenticated access attempt to {request.path}, redirecting to login")
-            return redirect(url_for('auth.login'))
-    except Exception as e:
-        logger.error(f"Error checking authentication: {e}")
+    # Check if user is authenticated
+    user_id = session.get('user_id')
+    if not user_id:
+        logger.info(f"User not authenticated, redirecting to login")
+        # Store the current URL for redirect after login
+        if request.endpoint and 'static' not in request.endpoint:
+            session['next'] = request.url
+        # Return redirect response
+        return redirect(url_for('auth.login'))
+    
+    # Log authenticated access
+    logger.debug(f"Authenticated access by user {user_id} to {request.path}")
 
 @app.before_request
 def check_db_health():
@@ -1643,12 +1661,19 @@ def debug_session_config():
 # Configure Flask Session for Railway deployment
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
     logger.info("Configuring session for Railway deployment")
+    
+    # Enable debug mode for Railway deployment temporarily
+    app.config['DEBUG'] = True
+    logger.info("DEBUG mode enabled for Railway deployment")
+    
+    # Session configuration
     app.config.update(
         SESSION_COOKIE_SECURE=False,  # Set to True only if using HTTPS
         SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE='Lax',
+        SESSION_COOKIE_SAMESITE='None',  # Try 'None' to allow cross-site cookies
         SESSION_REFRESH_EACH_REQUEST=True,
-        SESSION_COOKIE_DOMAIN=os.environ.get('RAILWAY_PUBLIC_DOMAIN'),
+        SESSION_USE_SIGNER=True,
+        SESSION_COOKIE_DOMAIN=os.environ.get('RAILWAY_PUBLIC_DOMAIN', None),
         PERMANENT_SESSION_LIFETIME=timedelta(days=7)
     )
     
@@ -1660,6 +1685,7 @@ if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
         session.modified = True
         
     logger.info(f"Session domain set to: {app.config.get('SESSION_COOKIE_DOMAIN')}")
+    logger.info(f"Session configuration: {app.config.get('SESSION_COOKIE_SAMESITE')}")
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

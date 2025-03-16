@@ -108,13 +108,13 @@ def twitter_auth():
             return redirect(url_for('auth.login'))
         
         # Store PKCE data in session
-        session['oauth_state'] = auth_data.get('state')
-        session['code_verifier'] = auth_data.get('code_verifier')
-        session['code_challenge'] = auth_data.get('code_challenge')
+        session['twitter_oauth_state'] = auth_data.get('state')
+        session['twitter_code_verifier'] = auth_data.get('code_verifier')
+        session['twitter_code_challenge'] = auth_data.get('code_challenge')
         
         # Log session storage (sanitized)
-        logging.info(f"Stored oauth_state in session: {auth_data.get('state')[:5]}... (truncated)")
-        logging.info(f"Stored code_verifier in session: {auth_data.get('code_verifier')[:5]}... (truncated)")
+        logging.info(f"Stored twitter_oauth_state in session: {auth_data.get('state')[:5]}... (truncated)")
+        logging.info(f"Stored twitter_code_verifier in session: {auth_data.get('code_verifier')[:5]}... (truncated)")
         logging.info(f"Session keys after storage: {list(session.keys())}")
         
         # Force session to be saved
