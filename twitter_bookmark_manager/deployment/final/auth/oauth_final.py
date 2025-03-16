@@ -47,68 +47,66 @@ class OAuthProvider:
 class TwitterOAuth(OAuthProvider):
     """Twitter OAuth 2.0 implementation"""
     
-    def __init__(self, config):
-        super().__init__(config)
-        # Get Twitter OAuth 2.0 credentials from config
-        twitter_config = config.get('twitter', {})
-        
-        self.client_id = twitter_config.get('client_id')
-        self.client_secret = twitter_config.get('client_secret')
-        self.callback_url = twitter_config.get('callback_url')
-        self.scopes = ['tweet.read', 'users.read', 'offline.access']
-        
-        # Log credentials for debugging
-        logger.info(f"TwitterOAuth initialized:")
-        logger.info(f"  - client_id is {'present' if self.client_id else 'MISSING'}")
-        logger.info(f"  - client_secret is {'present' if self.client_secret else 'MISSING'}")
-        logger.info(f"  - callback_url is {'present' if self.callback_url else 'MISSING'}")
-        
-    def get_authorize_url(self):
-        """Get the Twitter authorization URL using OAuth 2.0"""
-        # Log the exact callback URL being used (for debugging)
-        logger.info(f"TwitterOAuth: actual callback_url value: {self.callback_url}")
-        
+    def __init__(self, config=None):
+        """Initialize with optional config override."""
+        super().__init__()
+        if config:
+            self.config = {'twitter': config}
+    
+    def get_authorization_url(self):
+        """Generate Twitter OAuth authorization URL with PKCE."""
         try:
-            # Generate a code verifier and challenge for PKCE
-            code_verifier = secrets.token_urlsafe(64)
-            # Ensure code verifier is not too long
-            if len(code_verifier) > 128:
-                code_verifier = code_verifier[:128]
+            logger.info("Generating Twitter OAuth authorization URL")
+            
+            # Get provider config
+            provider_config = self.config.get('twitter', {})
+            if not provider_config:
+                logger.error("No Twitter provider configuration found")
+                return None
                 
-            code_challenge = base64.urlsafe_b64encode(
-                hashlib.sha256(code_verifier.encode()).digest()
-            ).decode().rstrip('=')
+            # Log provider config (omitting sensitive data)
+            logger.info(f"Twitter client_id length: {len(provider_config.get('client_id', ''))}")
+            logger.info(f"Twitter callback_url: {provider_config.get('callback_url', '')}")
             
-            # Store code verifier in session for later
-            session['twitter_code_verifier'] = code_verifier
+            # Create PKCE values
+            code_verifier = secrets.token_urlsafe(96)[:128]
+            code_verifier_bytes = code_verifier.encode('ascii')
+            code_challenge_bytes = hashlib.sha256(code_verifier_bytes).digest()
+            code_challenge = base64.urlsafe_b64encode(code_challenge_bytes).decode('ascii').rstrip('=')
             
-            # Generate a state parameter for CSRF protection
+            # Generate state for CSRF protection
             state = secrets.token_urlsafe(32)
-            session['twitter_oauth_state'] = state
+            
+            # Log PKCE values (truncated for security)
+            logger.info(f"Generated code_verifier (truncated): {code_verifier[:5]}...")
+            logger.info(f"Generated code_challenge (truncated): {code_challenge[:5]}...")
+            logger.info(f"Generated state (truncated): {state[:5]}...")
             
             # Build authorization URL
+            base_url = 'https://twitter.com/i/oauth2/authorize'
             params = {
                 'response_type': 'code',
-                'client_id': self.client_id,
-                'redirect_uri': self.callback_url,
-                'scope': ' '.join(self.scopes),
+                'client_id': provider_config['client_id'],
+                'redirect_uri': provider_config['callback_url'],
+                'scope': 'tweet.read users.read',
                 'state': state,
                 'code_challenge': code_challenge,
                 'code_challenge_method': 'S256'
             }
             
-            # Log the full authorization parameters (without sensitive info)
-            safe_params = params.copy()
-            safe_params['client_id'] = f"{safe_params['client_id'][:5]}...{safe_params['client_id'][-5:]}"
-            logger.info(f"Authorization parameters: {safe_params}")
+            # Log the authorization URL (omitting sensitive data)
+            auth_url = f"{base_url}?{urlencode(params)}"
+            logger.info(f"Generated Twitter authorization URL: {base_url} with {len(params)} parameters")
             
-            authorization_url = f"{TWITTER_AUTHORIZATION_URL}?{urlencode(params)}"
-            
-            logger.info(f"Generated Twitter OAuth 2.0 authorization URL")
-            return authorization_url
+            return {
+                'url': auth_url,
+                'state': state,
+                'code_verifier': code_verifier,
+                'code_challenge': code_challenge
+            }
             
         except Exception as e:
-            logger.error(f"Error getting Twitter authorization URL: {e}")
+            logger.error(f"Error generating Twitter authorization URL: {e}")
             logger.error(traceback.format_exc())
             return None
     
@@ -147,13 +145,13 @@ class TwitterOAuth(OAuthProvider):
             token_payload = {
                 'code': code,
                 'grant_type': 'authorization_code',
-                'client_id': self.client_id,
-                'redirect_uri': self.callback_url,
+                'client_id': self.config['twitter']['client_id'],
+                'redirect_uri': self.config['twitter']['callback_url'],
                 'code_verifier': code_verifier
             }
             
             # Twitter expects client authentication via Basic Auth
-            auth_string = f"{self.client_id}:{self.client_secret}"
+            auth_string = f"{self.config['twitter']['client_id']}:{self.config['twitter']['client_secret']}"
             auth_bytes = auth_string.encode('ascii')
             auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
             

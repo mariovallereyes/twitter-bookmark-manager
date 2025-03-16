@@ -73,26 +73,62 @@ def ensure_string_session():
 
 @auth_bp.route('/login')
 def login():
-    """Display login page"""
-    # Ensure session values are strings
-    ensure_string_session()
-    
-    next_url = request.args.get('next', '/') 
-    
-    # Store the next URL in the session
-    if next_url and is_safe_url(next_url):
-        session['next'] = next_url
-    
-    # Clear the entire session except for 'next'
-    next_url_temp = session.get('next')
-    session.clear()
-    if next_url_temp:
-        session['next'] = next_url_temp
-    
-    logger.info("Session cleared for new login attempt")
-    logger.info(f"Session keys after clearing: {list(session.keys())}")
-        
+    """Render login page."""
+    logging.info("Login page requested")
     return render_template('login_final.html')
+
+@auth_bp.route('/twitter')
+def twitter_auth():
+    """Initiate Twitter OAuth flow."""
+    logging.info("Starting Twitter OAuth flow")
+    try:
+        # Import Twitter OAuth provider
+        from auth.oauth_final import TwitterOAuth
+        
+        # Initialize provider with correct config
+        provider_config = {
+            'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+            'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+            'callback_url': os.environ.get('TWITTER_REDIRECT_URI', '')
+        }
+        
+        # Log config (without sensitive info)
+        logging.info(f"Twitter client_id length: {len(provider_config['client_id'])}")
+        logging.info(f"Twitter client_secret length: {len(provider_config['client_secret'])}")
+        logging.info(f"Twitter callback_url: {provider_config['callback_url']}")
+        
+        # Create OAuth manager
+        twitter_oauth = TwitterOAuth(provider_config)
+        
+        # Generate PKCE values and auth URL
+        auth_data = twitter_oauth.get_authorization_url()
+        if not auth_data or 'url' not in auth_data:
+            logging.error("Failed to generate Twitter authorization URL")
+            flash("Failed to connect to Twitter", "error")
+            return redirect(url_for('auth.login'))
+        
+        # Store PKCE data in session
+        session['oauth_state'] = auth_data.get('state')
+        session['code_verifier'] = auth_data.get('code_verifier')
+        session['code_challenge'] = auth_data.get('code_challenge')
+        
+        # Log session storage (sanitized)
+        logging.info(f"Stored oauth_state in session: {auth_data.get('state')[:5]}... (truncated)")
+        logging.info(f"Stored code_verifier in session: {auth_data.get('code_verifier')[:5]}... (truncated)")
+        logging.info(f"Session keys after storage: {list(session.keys())}")
+        
+        # Force session to be saved
+        session.modified = True
+        
+        # Redirect to Twitter auth page
+        logging.info(f"Redirecting to Twitter authorization URL")
+        return redirect(auth_data['url'])
+        
+    except Exception as e:
+        logging.error(f"Twitter auth error: {str(e)}")
+        logging.error(traceback.format_exc())
+        flash("An error occurred while connecting to Twitter", "error")
+        return redirect(url_for('auth.login'))
 
 # OAuth login initiator
 @auth_bp.route('/login/<provider>')

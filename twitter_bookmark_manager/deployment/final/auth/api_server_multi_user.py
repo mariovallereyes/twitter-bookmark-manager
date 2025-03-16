@@ -18,6 +18,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 from threading import Thread
+from logging.handlers import RotatingFileHandler
+from urllib.parse import urlencode
+import secrets
 
 # Load environment variables if dotenv is available
 try:
@@ -1595,6 +1598,68 @@ def debug_twitter_oauth():
         logger.error(f"Error in debug_twitter_oauth: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+
+# Debug endpoint for session configuration
+@app.route('/debug/session-config')
+def debug_session_config():
+    """Debug endpoint to check session configuration"""
+    if not app.config.get('DEBUG', False):
+        return jsonify({"error": "Debug mode disabled"}), 403
+        
+    # Get cookie settings
+    cookie_settings = {
+        "SESSION_COOKIE_DOMAIN": app.config.get('SESSION_COOKIE_DOMAIN'),
+        "SESSION_COOKIE_SECURE": app.config.get('SESSION_COOKIE_SECURE'),
+        "SESSION_COOKIE_HTTPONLY": app.config.get('SESSION_COOKIE_HTTPONLY'),
+        "SESSION_COOKIE_SAMESITE": app.config.get('SESSION_COOKIE_SAMESITE'),
+        "SESSION_REFRESH_EACH_REQUEST": app.config.get('SESSION_REFRESH_EACH_REQUEST'),
+        "PERMANENT_SESSION_LIFETIME": str(app.config.get('PERMANENT_SESSION_LIFETIME')),
+        "SECRET_KEY": "Length: " + str(len(app.config.get('SECRET_KEY', ''))) + " chars"
+    }
+    
+    # Check session interface
+    session_interface = str(type(app.session_interface).__name__)
+    
+    # Store a test value in session and check if it persists
+    test_key = 'session_test_' + secrets.token_hex(4)
+    test_value = secrets.token_hex(8)
+    session[test_key] = test_value
+    
+    # Force session save
+    session.modified = True
+    
+    return jsonify({
+        "app_config": cookie_settings,
+        "session_interface": session_interface,
+        "current_session_keys": list(session.keys()),
+        "environment": {
+            "RAILWAY_ENVIRONMENT": os.environ.get('RAILWAY_ENVIRONMENT'),
+            "RAILWAY_PUBLIC_DOMAIN": os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+        },
+        "test_session_key": test_key,
+        "test_session_value": test_value
+    })
+
+# Configure Flask Session for Railway deployment
+if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
+    logger.info("Configuring session for Railway deployment")
+    app.config.update(
+        SESSION_COOKIE_SECURE=False,  # Set to True only if using HTTPS
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE='Lax',
+        SESSION_REFRESH_EACH_REQUEST=True,
+        SESSION_COOKIE_DOMAIN=os.environ.get('RAILWAY_PUBLIC_DOMAIN'),
+        PERMANENT_SESSION_LIFETIME=timedelta(days=7)
+    )
+    
+    # Force session to be saved on every request
+    @app.before_request
+    def make_session_permanent():
+        session.permanent = True
+        # Ensure modified flag is set so session is saved
+        session.modified = True
+        
+    logger.info(f"Session domain set to: {app.config.get('SESSION_COOKIE_DOMAIN')}")
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

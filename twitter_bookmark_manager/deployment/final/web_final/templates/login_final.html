@@ -19,14 +19,14 @@
         {% endwith %}
         
         <div class="space-y-4">
-            <!-- X Login Button (Formerly Twitter) -->
-            <a href="{{ url_for('auth.oauth_login', provider='twitter') }}" 
+            <!-- Twitter Login Button -->
+            <a href="{{ url_for('auth.twitter_auth') }}" 
                class="flex items-center justify-center w-full px-4 py-3 space-x-3 text-white bg-black rounded-md hover:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 border border-gray-700">
                 <!-- X Logo SVG -->
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 fill-current" viewBox="0 0 24 24">
                     <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                 </svg>
-                <span>Sign in with X (OAuth 2.0)</span>
+                <span>Sign in with Twitter</span>
             </a>
         </div>
         
