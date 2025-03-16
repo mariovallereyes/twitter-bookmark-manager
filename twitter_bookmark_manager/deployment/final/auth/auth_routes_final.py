@@ -123,7 +123,16 @@ def oauth_callback(provider):
     logger.info(f"OAuth callback received for provider: {provider}")
     logger.info(f"Full request URL: {request.url}")
     logger.info(f"Request args: {request.args}")
+    logger.info(f"Request form data: {request.form}")
     logger.info(f"Session keys before processing: {list(session.keys())}")
+    
+    # Check for OAuth error responses
+    if 'error' in request.args:
+        error = request.args.get('error')
+        error_description = request.args.get('error_description', 'No description provided')
+        logger.error(f"OAuth error: {error} - {error_description}")
+        flash(f"Authentication error: {error_description}", "error")
+        return redirect(url_for('auth.login'))
     
     # Extract OAuth data based on provider
     oauth_data = {}
@@ -155,15 +164,24 @@ def oauth_callback(provider):
             'state': state
         }
         
-        # Get user info
+        # Get user info - don't pop the session values yet, in case the get_user_info method needs them
         try:
             oauth_manager = get_oauth_manager()
             logger.info("Getting user info from Twitter")
             user_info = oauth_manager.get_user_info('twitter', oauth_data)
             
-            if not user_info or 'id' not in user_info:
+            # Now we can clear the session values
+            session.pop('twitter_code_verifier', None)
+            session.pop('twitter_oauth_state', None)
+            
+            if not user_info:
                 flash('Failed to get user information from Twitter. Please try again.', 'error')
-                logger.error(f"Failed to get user info: {user_info}")
+                logger.error("get_user_info returned None")
+                return redirect(url_for('auth.login'))
+                
+            if 'id' not in user_info:
+                flash('Failed to get user ID from Twitter. Please try again.', 'error')
+                logger.error(f"Missing ID in user_info: {user_info}")
                 return redirect(url_for('auth.login'))
                 
             # Process user information
@@ -180,6 +198,7 @@ def oauth_callback(provider):
             
             if not user:
                 # Create new user
+                logger.info(f"Creating new user: username={username}, provider_id={provider_id}")
                 user = create_user(
                     db, 
                     username=username,
@@ -189,6 +208,11 @@ def oauth_callback(provider):
                     display_name=name,
                     profile_image_url=avatar_url
                 )
+                if not user:
+                    logger.error("Failed to create user")
+                    flash('Failed to create user account. Please try again.', 'error')
+                    return redirect(url_for('auth.login'))
+                    
                 logger.info(f"Created new user: {username} (ID: {user.id})")
             else:
                 # Update last login
@@ -198,6 +222,9 @@ def oauth_callback(provider):
             # Store user ID in session as string
             session['user_id'] = str(user.id)
             logger.info(f"Set user_id in session: {session.get('user_id')}")
+            
+            # Force session to be saved
+            session.modified = True
             
             # Redirect to next_url or home
             next_url = session.pop('next', '/')

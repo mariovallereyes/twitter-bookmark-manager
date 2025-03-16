@@ -71,6 +71,10 @@ class TwitterOAuth(OAuthProvider):
         try:
             # Generate a code verifier and challenge for PKCE
             code_verifier = secrets.token_urlsafe(64)
+            # Ensure code verifier is not too long
+            if len(code_verifier) > 128:
+                code_verifier = code_verifier[:128]
+                
             code_challenge = base64.urlsafe_b64encode(
                 hashlib.sha256(code_verifier.encode()).digest()
             ).decode().rstrip('=')
@@ -92,6 +96,12 @@ class TwitterOAuth(OAuthProvider):
                 'code_challenge': code_challenge,
                 'code_challenge_method': 'S256'
             }
+            
+            # Log the full authorization parameters (without sensitive info)
+            safe_params = params.copy()
+            safe_params['client_id'] = f"{safe_params['client_id'][:5]}...{safe_params['client_id'][-5:]}"
+            logger.info(f"Authorization parameters: {safe_params}")
+            
             authorization_url = f"{TWITTER_AUTHORIZATION_URL}?{urlencode(params)}"
             
             logger.info(f"Generated Twitter OAuth 2.0 authorization URL")
@@ -108,6 +118,10 @@ class TwitterOAuth(OAuthProvider):
             # Verify state parameter to prevent CSRF
             state = callback_data.get('state')
             expected_state = session.pop('twitter_oauth_state', None)
+            
+            # Log state values for debugging
+            logger.info(f"State comparison: received={state}, expected={expected_state}")
+            
             if not state or state != expected_state:
                 logger.error(f"State mismatch: received {state}, expected {expected_state}")
                 return None
@@ -123,28 +137,43 @@ class TwitterOAuth(OAuthProvider):
             if not code_verifier:
                 logger.error("No code verifier in session")
                 return None
+                
+            logger.info(f"Code verifier length: {len(code_verifier)}")
             
             # Exchange code for access token
             logger.info("Exchanging authorization code for access token")
-            token_data = {
-                'client_id': self.client_id,
-                'client_secret': self.client_secret,
+            
+            # Format token request properly for Twitter
+            token_payload = {
                 'code': code,
-                'code_verifier': code_verifier,
                 'grant_type': 'authorization_code',
-                'redirect_uri': self.callback_url
+                'client_id': self.client_id,
+                'redirect_uri': self.callback_url,
+                'code_verifier': code_verifier
             }
             
+            # Twitter expects client authentication via Basic Auth
+            auth_string = f"{self.client_id}:{self.client_secret}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
             headers = {
+                'Authorization': f'Basic {auth_b64}',
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
             
+            # Log token request details (without sensitive info)
+            logger.info(f"Token request URL: {TWITTER_TOKEN_URL}")
+            logger.info(f"Token request payload keys: {list(token_payload.keys())}")
+            
             token_response = requests.post(
                 TWITTER_TOKEN_URL,
-                data=token_data,
+                data=token_payload,
                 headers=headers
             )
             
+            # Log the response status
+            logger.info(f"Token response status: {token_response.status_code}")
             if token_response.status_code != 200:
                 logger.error(f"Token request failed: {token_response.status_code} - {token_response.text}")
                 return None
@@ -155,12 +184,15 @@ class TwitterOAuth(OAuthProvider):
             # Get user info
             logger.info("Fetching user info from Twitter")
             user_response = requests.get(
-                TWITTER_USER_INFO_URL,
+                f"{TWITTER_USER_INFO_URL}?user.fields=profile_image_url,name,username",
                 headers={
                     'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
                 }
             )
             
+            # Log user info response status
+            logger.info(f"User info response status: {user_response.status_code}")
             if user_response.status_code != 200:
                 logger.error(f"User info request failed: {user_response.status_code} - {user_response.text}")
                 return None
@@ -169,6 +201,11 @@ class TwitterOAuth(OAuthProvider):
             
             # In OAuth 2.0, Twitter returns user data in a different format
             user = user_data.get('data', {})
+            
+            # Log user data received
+            safe_user = {k: v for k, v in user.items() if k != 'id'}
+            logger.info(f"Received user data keys: {list(user.keys())}")
+            logger.info(f"User info (without ID): {safe_user}")
             
             return {
                 'id': user.get('id'),

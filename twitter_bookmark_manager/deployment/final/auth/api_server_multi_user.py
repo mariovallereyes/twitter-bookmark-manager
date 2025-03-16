@@ -112,9 +112,11 @@ app.config.update(
     TESTING=ENV_VARS['TESTING'],
     APPLICATION_ROOT=ENV_VARS['APPLICATION_ROOT'],
     DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE'],
-    SESSION_COOKIE_SECURE=False,  # Set to False to allow HTTP during testing
+    SESSION_COOKIE_SECURE=False,  # Set to False for HTTP during testing
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax'  # Allow cookies to be sent with same-site requests
+    SESSION_COOKIE_SAMESITE='Lax',  # Allow cookies to be sent with same-site requests
+    SESSION_REFRESH_EACH_REQUEST=True,  # Ensures session doesn't timeout during OAuth flow
+    SESSION_USE_SIGNER=True  # Signs the session cookie for additional security
 )
 
 # Add database connection function to app config
@@ -153,75 +155,27 @@ os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
 UPLOADS_DIR = app.config['UPLOAD_FOLDER']
 DATABASE_DIR = app.config['DATABASE_DIR']
 
-# Custom session interface to handle bytes vs. string session ID issues
+# Add session interface if using Flask-Session
+try:
+    from flask_session import Session
+    Session(app)
+    logger.info("Flask-Session initialized")
+except ImportError:
+    logger.warning("Flask-Session not available, using Flask's default sessions")
+
+# Set a custom session interface if needed
+from flask import Response
 class CustomSessionInterface(SecureCookieSessionInterface):
-    """Custom session interface to handle bytes-like session IDs"""
+    """Custom session interface to ensure cookies are properly set"""
     def save_session(self, app, session, response):
-        domain = self.get_cookie_domain(app)
-        path = self.get_cookie_path(app)
-        
-        # Don't save if session is empty and was not modified
-        if not session and not session.modified:
-            return
-            
-        # Get expiration
-        httponly = self.get_cookie_httponly(app)
-        secure = self.get_cookie_secure(app)
-        samesite = self.get_cookie_samesite(app)
-        expires = self.get_expiration_time(app, session)
-        
-        # Get session ID, ensuring it's a string not bytes
-        session_id = session.sid if hasattr(session, 'sid') else None
-        if session_id and isinstance(session_id, bytes):
-            try:
-                session_id = session_id.decode('utf-8')
-                logger.info(f"Converted session ID from bytes to string: {session_id[:5]}...")
-            except Exception as e:
-                logger.error(f"Error decoding session ID: {str(e)}")
-                # Don't set cookie if we can't decode the session ID
-                return
-        
-        # Set the cookie with the string session ID
-        if session_id:
-            response.set_cookie(
-                app.config['SESSION_COOKIE_NAME'],
-                session_id,
-                expires=expires,
-                httponly=httponly,
-                domain=domain,
-                path=path,
-                secure=secure,
-                samesite=samesite
-            )
-
-# Set custom session interface
-app.session_interface = CustomSessionInterface()
-
-# Helper to ensure session contains only string values
-def ensure_string_session():
-    """Convert any byte values in session to strings"""
-    modified = False
-    bad_keys = []
-    
-    for key, val in session.items():
-        if isinstance(val, bytes):
-            try:
-                # Try to decode bytes to string
-                session[key] = val.decode('utf-8')
-                modified = True
-                logger.info(f"Converted session key {key} from bytes to string")
-            except Exception as e:
-                logger.error(f"Error converting session key {key} from bytes: {e}")
-                bad_keys.append(key)
-    
-    # Remove problematic keys
-    for key in bad_keys:
-        session.pop(key, None)
-        modified = True
-        logger.warning(f"Removed problematic session key: {key}")
-    
-    if modified:
+        # Always mark the session as modified to ensure it's saved
         session.modified = True
+        # Call the parent save_session method
+        return super().save_session(app, session, response)
+
+# Use the custom session interface
+app.session_interface = CustomSessionInterface()
+logger.info("Custom session interface set")
 
 # Session status database for background tasks
 session_status_db = {}
@@ -1594,6 +1548,59 @@ def debug_session():
         })
     except Exception as e:
         logger.error(f"Error in debug_session: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Debug Twitter OAuth endpoint
+@app.route('/debug/twitter-oauth')
+def debug_twitter_oauth():
+    """Debug endpoint for Twitter OAuth configuration"""
+    # Only allow in debug mode
+    if not ENV_VARS['DEBUG']:
+        return jsonify({'error': 'Debug mode not enabled'}), 403
+        
+    try:
+        # Get Twitter OAuth configuration
+        twitter_client_id = os.environ.get('TWITTER_CLIENT_ID', '')
+        twitter_client_secret = os.environ.get('TWITTER_CLIENT_SECRET', '')
+        twitter_redirect_uri = os.environ.get('TWITTER_REDIRECT_URI', '')
+        
+        # Create OAuth manager and generate URL
+        from auth.oauth_final import OAuthManager
+        config = {
+            'twitter': {
+                'client_id': twitter_client_id,
+                'client_secret': twitter_client_secret,
+                'callback_url': twitter_redirect_uri
+            }
+        }
+        
+        oauth_manager = OAuthManager(config)
+        auth_url = oauth_manager.get_authorize_url('twitter')
+        
+        return jsonify({
+            'twitter_oauth': {
+                'client_id_exists': bool(twitter_client_id),
+                'client_id_prefix': twitter_client_id[:5] + '...' if twitter_client_id else '',
+                'client_secret_exists': bool(twitter_client_secret),
+                'redirect_uri': twitter_redirect_uri,
+                'auth_url_generated': bool(auth_url),
+                'scopes': ['tweet.read', 'users.read', 'offline.access']
+            },
+            'session': {
+                'keys': list(session.keys()),
+                'twitter_code_verifier_exists': 'twitter_code_verifier' in session,
+                'twitter_oauth_state_exists': 'twitter_oauth_state' in session
+            },
+            'app_config': {
+                'session_cookie_secure': app.config.get('SESSION_COOKIE_SECURE'),
+                'session_cookie_httponly': app.config.get('SESSION_COOKIE_HTTPONLY'),
+                'session_cookie_samesite': app.config.get('SESSION_COOKIE_SAMESITE'),
+                'session_type': app.config.get('SESSION_TYPE')
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error in debug_twitter_oauth: {e}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
