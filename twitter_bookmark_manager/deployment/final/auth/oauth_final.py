@@ -221,6 +221,122 @@ class TwitterOAuth(OAuthProvider):
             logger.error(traceback.format_exc())
             return None
 
+    def get_token(self, code, code_verifier):
+        """Exchange authorization code for token."""
+        try:
+            # Log the start of token exchange
+            logger.info("Starting token exchange with Twitter OAuth 2.0")
+            
+            # Get provider config
+            provider_config = self.config.get('twitter', {})
+            if not provider_config:
+                logger.error("No Twitter provider configuration found")
+                return None
+            
+            # Prepare token request data
+            token_url = 'https://api.twitter.com/2/oauth2/token'
+            
+            # Log parameters (without exposing sensitive data)
+            logger.info(f"Token request to: {token_url}")
+            logger.info(f"Code verifier length: {len(code_verifier)}")
+            logger.info(f"Code length: {len(code)}")
+            
+            # Create form data for token request
+            data = {
+                'client_id': provider_config['client_id'],
+                'code': code,
+                'grant_type': 'authorization_code',
+                'redirect_uri': provider_config['callback_url'],
+                'code_verifier': code_verifier
+            }
+            
+            # Create Basic Auth header for client_id and client_secret
+            auth_string = f"{provider_config['client_id']}:{provider_config['client_secret']}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            headers = {
+                'Authorization': f'Basic {auth_b64}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
+            # Log headers (without exposing sensitive data)
+            logger.info(f"Authorization header present: {bool(headers.get('Authorization'))}")
+            logger.info(f"Content-Type: {headers.get('Content-Type')}")
+            
+            # Make the token request
+            logger.info("Sending token request to Twitter...")
+            response = requests.post(token_url, data=data, headers=headers)
+            
+            # Log response code
+            logger.info(f"Token response status: {response.status_code}")
+            
+            # Check if the request was successful
+            if response.status_code != 200:
+                logger.error(f"Token request failed: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                return None
+            
+            # Parse response
+            token_data = response.json()
+            logger.info("Successfully obtained token from Twitter")
+            
+            return token_data
+        except Exception as e:
+            logger.error(f"Error exchanging code for token: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def get_user_info(self, access_token):
+        """Get user information using access token."""
+        try:
+            # Log the start of user info retrieval
+            logger.info("Getting user info from Twitter")
+            
+            # Twitter API endpoint for user info
+            user_info_url = 'https://api.twitter.com/2/users/me'
+            
+            # Parameters to request additional user fields
+            params = {
+                'user.fields': 'profile_image_url,name,username'
+            }
+            
+            # Headers with access token
+            headers = {
+                'Authorization': f'Bearer {access_token}'
+            }
+            
+            # Make the request
+            logger.info(f"Sending user info request to Twitter: {user_info_url}")
+            response = requests.get(user_info_url, params=params, headers=headers)
+            
+            # Log response code
+            logger.info(f"User info response status: {response.status_code}")
+            
+            # Check if the request was successful
+            if response.status_code != 200:
+                logger.error(f"User info request failed: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                return None
+            
+            # Parse response
+            user_data = response.json()
+            
+            # Extract user data from Twitter's response structure
+            if 'data' in user_data:
+                user_info = user_data['data']
+                # Log user info received (with ID partially masked for privacy)
+                user_id = user_info.get('id', '')
+                logger.info(f"Received user info for Twitter ID: {user_id[:3]}...{user_id[-3:] if len(user_id) > 6 else ''}")
+                return user_info
+            else:
+                logger.error(f"Missing data in user response: {user_data}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting user info: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
 class GoogleOAuth(OAuthProvider):
     """Google OAuth implementation"""
     

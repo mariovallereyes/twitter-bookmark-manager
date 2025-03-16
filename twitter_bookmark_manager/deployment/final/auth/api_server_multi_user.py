@@ -163,13 +163,16 @@ try:
 except ImportError:
     logger.warning("Flask-Session not available, using Flask's default sessions")
 
-# Set a custom session interface if needed
-from flask import Response
+# Set a custom session interface to ensure persistence
 class CustomSessionInterface(SecureCookieSessionInterface):
     """Custom session interface to ensure cookies are properly set"""
     def save_session(self, app, session, response):
         # Always mark the session as modified to ensure it's saved
         session.modified = True
+        # Update cookie parameters for better compatibility
+        app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+        app.config['SESSION_COOKIE_HTTPONLY'] = True
+        app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Allow cookies to be sent with same-site requests
         # Call the parent save_session method
         return super().save_session(app, session, response)
 
@@ -1425,27 +1428,16 @@ def twitter_oauth_callback():
     logger.info("Twitter OAuth callback received at root level")
     logger.info(f"Full request URL: {request.url}")
     logger.info(f"Request args: {request.args}")
-    logger.info(f"Session keys: {list(session.keys())}")
+    logger.info(f"Session keys before processing: {list(session.keys())}")
     
-    # Check for error response from Twitter
-    if request.args.get('error'):
-        error = request.args.get('error')
-        error_description = request.args.get('error_description', 'No description provided')
-        logger.error(f"Twitter OAuth error: {error} - {error_description}")
-        return redirect(url_for('auth.login'))
-    
-    # Import auth blueprint's oauth_callback function
+    # Import the specific Twitter callback handler
     try:
-        from auth.auth_routes_final import oauth_callback
-        logger.info("Successfully imported oauth_callback")
-        return oauth_callback('twitter')
+        from auth.auth_routes_final import oauth_callback_twitter
+        return oauth_callback_twitter()
     except Exception as e:
-        logger.error(f"Error in twitter_oauth_callback: {e}")
-        logger.error(traceback.format_exc())  # Log full traceback
-        return jsonify({
-            'status': 'error',
-            'message': f'Error in Twitter OAuth callback: {str(e)}'
-        }), 500
+        logger.error(f"Error in root twitter_oauth_callback: {e}")
+        logger.error(traceback.format_exc())
+        return redirect(url_for('auth.login'))
 
 # Debug endpoint to check Twitter auth configuration
 @app.route('/debug/auth-config')
