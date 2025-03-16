@@ -103,16 +103,20 @@ app = Flask(__name__,
 
 # Configure application
 app.config.update(
-    SECRET_KEY=ENV_VARS['SECRET_KEY'],
-    SESSION_TYPE=ENV_VARS['SESSION_TYPE'],
+    SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(16)),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    SESSION_COOKIE_SECURE=False,  # Set to True in production with HTTPS
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_TYPE='filesystem',
+    SESSION_REFRESH_EACH_REQUEST=True,
+    SESSION_USE_SIGNER=True,
+    DEBUG=bool(os.environ.get('DEBUG', False)),
     SESSION_FILE_DIR=os.path.join(tempfile.gettempdir(), 'flask_session'),
     SESSION_PERMANENT=True,
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     MAX_CONTENT_LENGTH=50 * 1024 * 1024,  # 50MB max upload size
     UPLOAD_FOLDER=os.path.join(Path(__file__).parent.parent, ENV_VARS['UPLOAD_FOLDER']),
     DATABASE_DIR=os.path.join(Path(__file__).parent.parent, 'database'),
-    DEBUG=ENV_VARS['DEBUG'],
-    TESTING=ENV_VARS['TESTING'],
     APPLICATION_ROOT=ENV_VARS['APPLICATION_ROOT'],
     DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE'],
     SESSION_COOKIE_SECURE=False,  # Set to False for HTTP during testing
@@ -1446,18 +1450,26 @@ def api_categories():
 @app.route('/oauth/callback/twitter')
 def twitter_oauth_callback():
     """Route to handle Twitter OAuth callback at the root level"""
-    logger.info("Twitter OAuth callback received at root level")
+    logger.info("-------- Twitter OAuth callback received at root level --------")
     logger.info(f"Full request URL: {request.url}")
-    logger.info(f"Request args: {request.args}")
+    logger.info(f"Request args: {dict(request.args)}")
     logger.info(f"Session keys before processing: {list(session.keys())}")
     
     # Import the specific Twitter callback handler
     try:
         from auth.auth_routes_final import oauth_callback_twitter
+        logger.info("Successfully imported oauth_callback_twitter function")
         return oauth_callback_twitter()
     except Exception as e:
         logger.error(f"Error in root twitter_oauth_callback: {e}")
         logger.error(traceback.format_exc())
+        
+        # Check if we have the specific error about the import
+        if "No module named" in str(e) or "cannot import name" in str(e):
+            logger.error("Import error - trying to handle callback directly")
+            # Add code here to handle the callback directly if needed
+            return redirect(url_for('auth.login'))
+        
         return redirect(url_for('auth.login'))
 
 # Debug endpoint to check Twitter auth configuration

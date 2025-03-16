@@ -68,16 +68,16 @@ class TwitterOAuth(OAuthProvider):
                 logger.error("Twitter provider config not found")
                 return None
                 
-            # Generate PKCE code verifier and challenge
-            code_verifier = secrets.token_urlsafe(64)
-            # Ensure code verifier is not too long
-            if len(code_verifier) > 128:
-                code_verifier = code_verifier[:128]
-                
-            # Generate code challenge using S256 method
-            code_challenge = base64.urlsafe_b64encode(
-                hashlib.sha256(code_verifier.encode()).digest()
-            ).decode().rstrip('=')
+            # Generate PKCE code verifier - must be between 43-128 characters
+            code_verifier = secrets.token_urlsafe(43)  # This will generate a string of ~58 chars
+            
+            # Log the exact length of the code verifier
+            logger.info(f"Generated code_verifier with length: {len(code_verifier)}")
+            
+            # Generate S256 code challenge properly
+            code_verifier_bytes = code_verifier.encode('ascii')
+            code_challenge_bytes = hashlib.sha256(code_verifier_bytes).digest()
+            code_challenge = base64.urlsafe_b64encode(code_challenge_bytes).decode('ascii').rstrip('=')
             
             # Generate state parameter for CSRF protection
             state = secrets.token_urlsafe(32)
@@ -85,24 +85,27 @@ class TwitterOAuth(OAuthProvider):
             # Twitter authorization URL
             base_url = 'https://twitter.com/i/oauth2/authorize'
             
+            # Log the exact callback URL to verify it matches developer portal
+            callback_url = provider_config.get('callback_url', '')
+            logger.info(f"Using exact callback URL: '{callback_url}'")
+            
             # Required parameters for OAuth 2.0 with PKCE
             params = {
                 'response_type': 'code',
                 'client_id': provider_config['client_id'],
-                'redirect_uri': provider_config['callback_url'],
+                'redirect_uri': callback_url,
                 'scope': 'tweet.read users.read',
                 'state': state,
                 'code_challenge': code_challenge,
-                'code_challenge_method': 'S256'
+                'code_challenge_method': 'S256'  # Explicitly use S256
             }
             
             # Build full authorization URL
             auth_url = f"{base_url}?{urlencode(params)}"
             
-            # Log URL generation (without exposing sensitive data)
-            client_id_partial = f"{provider_config['client_id'][:5]}...{provider_config['client_id'][-5:]}"
-            logger.info(f"Generated authorization URL with client_id: {client_id_partial}")
-            logger.info(f"Using callback URL: {provider_config['callback_url']}")
+            # Log full URL for debugging (removing client_id)
+            safe_url = auth_url.replace(provider_config['client_id'], 'CLIENT_ID_REDACTED')
+            logger.info(f"Generated authorization URL: {safe_url}")
             
             # Return all data needed for later validation
             return {
