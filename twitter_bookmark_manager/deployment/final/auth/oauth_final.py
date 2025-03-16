@@ -33,8 +33,10 @@ GOOGLE_USER_INFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo'
 class OAuthProvider:
     """Base class for OAuth providers"""
     
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config=None):
+        """Initialize with provider configuration"""
+        self.config = config or {}
+        logger.info(f"OAuthProvider initialized with config: {bool(self.config)}")
         
     def get_authorize_url(self):
         """Get the authorization URL"""
@@ -49,9 +51,11 @@ class TwitterOAuth(OAuthProvider):
     
     def __init__(self, config=None):
         """Initialize with optional config override."""
-        super().__init__()
+        # Pass config to parent class properly
+        super().__init__(config)
         if config:
             self.config = {'twitter': config}
+        logger.info(f"TwitterOAuth initialized with config: {bool(self.config)}")
     
     def get_authorization_url(self):
         """Generate Twitter OAuth 2.0 authorization URL."""
