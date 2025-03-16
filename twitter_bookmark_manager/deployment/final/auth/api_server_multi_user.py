@@ -1262,7 +1262,7 @@ def debug_data():
         try:
             # Try to import and check vector store
             from database.multi_user_db.vector_store_final import get_multi_user_vector_store
-            vector_store = safe_get_vector_store()
+            vector_store = get_multi_user_vector_store()
             if vector_store:
                 if hasattr(vector_store, 'is_dummy') and vector_store.is_dummy:
                     system_info['vector_store_status'] = {
@@ -1460,22 +1460,150 @@ def twitter_oauth_callback():
     logger.info(f"Request args: {dict(request.args)}")
     logger.info(f"Session keys before processing: {list(session.keys())}")
     
-    # Import the specific Twitter callback handler
+    # Check directly for error from Twitter response
+    if 'error' in request.args:
+        error = request.args.get('error')
+        error_description = request.args.get('error_description', 'No description provided')
+        logger.error(f"Twitter OAuth error return: {error} - {error_description}")
+        flash(f"Twitter authentication failed: {error_description}", "error")
+        return redirect('/login')
+    
+    # Check for required parameters
+    if 'code' not in request.args or 'state' not in request.args:
+        logger.error(f"Missing required OAuth parameters: {dict(request.args)}")
+        flash("Authentication failed: Missing required parameters from Twitter", "error")
+        return redirect('/login')
+        
+    code = request.args.get('code')
+    state = request.args.get('state')
+    
+    # Check session state
+    expected_state = session.get('oauth_state')
+    logger.info(f"Expected state: {expected_state}")
+    logger.info(f"Received state: {state}")
+    
+    if not expected_state:
+        logger.error("No oauth_state in session - Session state lost during redirect")
+        flash("Authentication failed: Session state was lost. Please try again.", "error")
+        return redirect('/login')
+    
+    if state != expected_state:
+        logger.error(f"State mismatch: {state} != {expected_state}")
+        flash("Authentication failed: Security verification failed", "error")
+        return redirect('/login')
+        
+    # Check for code verifier
+    code_verifier = session.get('code_verifier')
+    if not code_verifier:
+        logger.error("No code_verifier in session")
+        flash("Authentication failed: PKCE verification data missing", "error")
+        return redirect('/login')
+    
+    # Process directly if importing the auth routes fails
     try:
-        from auth.auth_routes_final import oauth_callback_twitter
-        logger.info("Successfully imported oauth_callback_twitter function")
-        return oauth_callback_twitter()
+        # Try to handle via auth blueprint first
+        try:
+            from auth.auth_routes_final import oauth_callback_twitter
+            logger.info("Successfully imported oauth_callback_twitter function")
+            return oauth_callback_twitter()
+        except Exception as import_e:
+            logger.error(f"Error importing oauth_callback_twitter: {import_e}")
+            logger.error(traceback.format_exc())
+            
+            # Handle directly as a fallback
+            logger.info("Falling back to direct OAuth handling")
+            
+            # Exchange the authorization code for an access token
+            from auth.oauth_final import TwitterOAuth
+            
+            provider_config = {
+                'client_id': os.environ.get('TWITTER_CLIENT_ID', ''),
+                'client_secret': os.environ.get('TWITTER_CLIENT_SECRET', ''),
+                'callback_url': os.environ.get('TWITTER_REDIRECT_URI', '')
+            }
+            
+            logger.info(f"Twitter client_id present: {bool(provider_config['client_id'])}")
+            logger.info(f"Twitter callback_url: {provider_config['callback_url']}")
+            
+            twitter_oauth = TwitterOAuth(provider_config)
+            
+            try:
+                # Get token using code and code_verifier
+                token_data = twitter_oauth.get_token(code, code_verifier)
+                
+                if not token_data or 'access_token' not in token_data:
+                    logger.error(f"Failed to get token: {token_data}")
+                    flash("Failed to get access token from Twitter", "error")
+                    return redirect('/login')
+                
+                # Get user info with the token
+                access_token = token_data['access_token']
+                user_info = twitter_oauth.get_user_info(access_token)
+                
+                if not user_info or 'id' not in user_info:
+                    logger.error(f"Failed to get user info: {user_info}")
+                    flash("Failed to get user information from Twitter", "error")
+                    return redirect('/login')
+                
+                # Find or create user
+                from database.multi_user_db.db_final import get_db_connection
+                from database.multi_user_db.user_model_final import get_user_by_provider_id, create_user, update_last_login
+                
+                # Get DB connection
+                db_conn = get_db_connection()
+                
+                # Get user by Twitter ID
+                user = get_user_by_provider_id(db_conn, 'twitter', user_info.get('id'))
+                
+                if not user:
+                    # Create new user
+                    username = user_info.get('username', f"twitter_{user_info.get('id')}")
+                    name = user_info.get('name', username)
+                    avatar_url = user_info.get('profile_image_url', '')
+                    
+                    logger.info(f"Creating new user: {username}")
+                    user = create_user(
+                        db_conn,
+                        username=username,
+                        email=f"{username}@twitter.placeholder",
+                        auth_provider='twitter',
+                        provider_id=user_info.get('id'),
+                        display_name=name,
+                        profile_image_url=avatar_url
+                    )
+                else:
+                    # Update existing user's last login
+                    update_last_login(db_conn, user.id)
+                    logger.info(f"Updating existing user: {user.username}")
+                
+                # Store user in session
+                session['user_id'] = user.id
+                
+                # Clear OAuth data
+                session.pop('oauth_state', None)
+                session.pop('code_verifier', None)
+                session.pop('code_challenge', None)
+                
+                # Force session to be saved
+                session.modified = True
+                
+                # Redirect to the next URL or home
+                next_url = session.pop('next', '/')
+                
+                logger.info(f"Login successful, redirecting to: {next_url}")
+                return redirect(next_url)
+                
+            except Exception as token_e:
+                logger.error(f"Error exchanging token: {token_e}")
+                logger.error(traceback.format_exc())
+                flash("Authentication failed during token exchange. Please try again.", "error")
+                return redirect('/login')
+                
     except Exception as e:
-        logger.error(f"Error in root twitter_oauth_callback: {e}")
+        logger.error(f"Unhandled error in OAuth callback: {e}")
         logger.error(traceback.format_exc())
-        
-        # Check if we have the specific error about the import
-        if "No module named" in str(e) or "cannot import name" in str(e):
-            logger.error("Import error - trying to handle callback directly")
-            # Add code here to handle the callback directly if needed
-            return redirect(url_for('auth.login'))
-        
-        return redirect(url_for('auth.login'))
+        flash("An unexpected error occurred during authentication. Please try again.", "error")
+        return redirect('/login')
 
 # Debug endpoint to check Twitter auth configuration
 @app.route('/debug/auth-config')
