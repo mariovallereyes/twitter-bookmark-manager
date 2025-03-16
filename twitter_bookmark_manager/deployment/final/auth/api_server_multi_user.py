@@ -103,28 +103,25 @@ app = Flask(__name__,
 
 # Configure application
 app.config.update(
-    SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(16)),
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-    SESSION_COOKIE_SECURE=False,  # Set to True in production with HTTPS
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    SESSION_TYPE='filesystem',
-    SESSION_REFRESH_EACH_REQUEST=True,
-    SESSION_USE_SIGNER=True,
-    DEBUG=bool(os.environ.get('DEBUG', False)),
+    SECRET_KEY=ENV_VARS['SECRET_KEY'],
+    SESSION_TYPE=ENV_VARS['SESSION_TYPE'],
     SESSION_FILE_DIR=os.path.join(tempfile.gettempdir(), 'flask_session'),
     SESSION_PERMANENT=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     MAX_CONTENT_LENGTH=50 * 1024 * 1024,  # 50MB max upload size
     UPLOAD_FOLDER=os.path.join(Path(__file__).parent.parent, ENV_VARS['UPLOAD_FOLDER']),
     DATABASE_DIR=os.path.join(Path(__file__).parent.parent, 'database'),
+    DEBUG=ENV_VARS['DEBUG'],
+    TESTING=ENV_VARS['TESTING'],
     APPLICATION_ROOT=ENV_VARS['APPLICATION_ROOT'],
     DISABLE_VECTOR_STORE=ENV_VARS['DISABLE_VECTOR_STORE'],
-    SESSION_COOKIE_SECURE=False,  # Set to False for HTTP during testing
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',  # Allow cookies to be sent with same-site requests
-    SESSION_REFRESH_EACH_REQUEST=True,  # Ensures session doesn't timeout during OAuth flow
-    SESSION_USE_SIGNER=True  # Signs the session cookie for additional security
 )
+
+# If Railway environment, add session refresh
+if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
+    app.config.update(
+        SESSION_REFRESH_EACH_REQUEST=True,
+    )
 
 # Add database connection function to app config
 app.config['get_db_connection'] = get_db_connection
@@ -162,30 +159,13 @@ os.makedirs(app.config['DATABASE_DIR'], exist_ok=True)
 UPLOADS_DIR = app.config['UPLOAD_FOLDER']
 DATABASE_DIR = app.config['DATABASE_DIR']
 
-# Add session interface if using Flask-Session
+# Set up session management
 try:
     from flask_session import Session
     Session(app)
-    logger.info("Flask-Session initialized")
+    logger.info("Using Flask-Session for session management")
 except ImportError:
     logger.warning("Flask-Session not available, using Flask's default sessions")
-
-# Set a custom session interface to ensure persistence
-class CustomSessionInterface(SecureCookieSessionInterface):
-    """Custom session interface to ensure cookies are properly set"""
-    def save_session(self, app, session, response):
-        # Always mark the session as modified to ensure it's saved
-        session.modified = True
-        # Update cookie parameters for better compatibility
-        app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
-        app.config['SESSION_COOKIE_HTTPONLY'] = True
-        app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Allow cookies to be sent with same-site requests
-        # Call the parent save_session method
-        return super().save_session(app, session, response)
-
-# Use the custom session interface
-app.session_interface = CustomSessionInterface()
-logger.info("Custom session interface set")
 
 # Session status database for background tasks
 session_status_db = {}
@@ -1669,35 +1649,6 @@ def debug_session_config():
         "test_session_key": test_key,
         "test_session_value": test_value
     })
-
-# Configure Flask Session for Railway deployment
-if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-    logger.info("Configuring session for Railway deployment")
-    
-    # Enable debug mode for Railway deployment temporarily
-    app.config['DEBUG'] = True
-    logger.info("DEBUG mode enabled for Railway deployment")
-    
-    # Session configuration
-    app.config.update(
-        SESSION_COOKIE_SECURE=False,  # Set to True only if using HTTPS
-        SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE='None',  # Try 'None' to allow cross-site cookies
-        SESSION_REFRESH_EACH_REQUEST=True,
-        SESSION_USE_SIGNER=True,
-        SESSION_COOKIE_DOMAIN=os.environ.get('RAILWAY_PUBLIC_DOMAIN', None),
-        PERMANENT_SESSION_LIFETIME=timedelta(days=7)
-    )
-    
-    # Force session to be saved on every request
-    @app.before_request
-    def make_session_permanent():
-        session.permanent = True
-        # Ensure modified flag is set so session is saved
-        session.modified = True
-        
-    logger.info(f"Session domain set to: {app.config.get('SESSION_COOKIE_DOMAIN')}")
-    logger.info(f"Session configuration: {app.config.get('SESSION_COOKIE_SAMESITE')}")
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
