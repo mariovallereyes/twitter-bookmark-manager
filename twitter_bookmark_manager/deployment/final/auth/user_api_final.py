@@ -9,6 +9,15 @@ from flask import Blueprint, jsonify, current_app, request
 from auth.user_context_final import UserContext, login_required
 from database.multi_user_db.search_final_multi_user import BookmarkSearchMultiUser
 import traceback
+import os
+import json
+from database.multi_user_db.user_model_final import (
+    get_user_by_provider_id,
+    get_user_by_id,
+    create_user as db_create_user,
+    update_last_login
+)
+from database.multi_user_db.db_final import get_db_connection
 
 # Set up logging
 logger = logging.getLogger('user_api_final')
@@ -247,4 +256,107 @@ def get_categories():
             'status': 'error',
             'message': 'Failed to retrieve categories',
             'categories': []
-        }), 500 
+        }), 500
+
+def find_or_create_user(user_data):
+    """
+    Find existing user or create a new one based on OAuth provider data.
+    
+    Args:
+        user_data (dict): User data from OAuth provider containing:
+            - provider: The OAuth provider name (e.g., 'twitter')
+            - provider_id: The user's ID from the provider
+            - username: Username
+            - display_name: Display name (optional)
+            - email: Email address (optional)
+            - profile_image_url: URL to profile image (optional)
+            - provider_data: JSON string with additional provider data (optional)
+    
+    Returns:
+        dict: User object with user information if successful, None otherwise
+    """
+    logger.info(f"Finding or creating user for provider: {user_data.get('provider')}")
+    
+    try:
+        # Get database connection
+        db_conn = get_db_connection()
+        
+        # Required fields
+        provider = user_data.get('provider')
+        provider_id = user_data.get('provider_id')
+        username = user_data.get('username')
+        
+        if not provider or not provider_id or not username:
+            logger.error("Missing required user data fields")
+            logger.error(f"Provider: {provider}, ID: {provider_id}, Username: {username}")
+            return None
+        
+        # Optional fields with defaults
+        display_name = user_data.get('display_name', username)
+        email = user_data.get('email', f"{username}@{provider}.placeholder")
+        profile_image_url = user_data.get('profile_image_url', '')
+        provider_data = user_data.get('provider_data', '{}')
+        
+        # Find existing user by provider ID
+        user = get_user_by_provider_id(db_conn, provider, provider_id)
+        
+        if user:
+            logger.info(f"Found existing user: {user.username} (ID: {user.id})")
+            
+            # Update last login timestamp
+            update_last_login(db_conn, user.id)
+            
+            # Convert user object to dictionary
+            user_dict = {
+                'id': user.id,
+                'username': user.username,
+                'display_name': user.display_name,
+                'email': user.email,
+                'auth_provider': user.auth_provider,
+                'provider_id': user.provider_id,
+                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'last_login': user.last_login.isoformat() if user.last_login else None,
+                'profile_image_url': user.profile_image_url
+            }
+            
+            return user_dict
+        
+        # Create new user
+        logger.info(f"Creating new user for {provider} user: {username}")
+        
+        new_user = db_create_user(
+            db_conn,
+            username=username,
+            email=email,
+            auth_provider=provider,
+            provider_id=provider_id,
+            display_name=display_name,
+            profile_image_url=profile_image_url,
+            provider_data=provider_data
+        )
+        
+        if not new_user:
+            logger.error("Failed to create new user")
+            return None
+        
+        logger.info(f"Created new user: {new_user.username} (ID: {new_user.id})")
+        
+        # Convert user object to dictionary
+        user_dict = {
+            'id': new_user.id,
+            'username': new_user.username,
+            'display_name': new_user.display_name,
+            'email': new_user.email,
+            'auth_provider': new_user.auth_provider,
+            'provider_id': new_user.provider_id,
+            'created_at': new_user.created_at.isoformat() if new_user.created_at else None,
+            'last_login': new_user.last_login.isoformat() if new_user.last_login else None,
+            'profile_image_url': new_user.profile_image_url
+        }
+        
+        return user_dict
+    
+    except Exception as e:
+        logger.error(f"Error in find_or_create_user: {e}")
+        logger.error(traceback.format_exc())
+        return None 

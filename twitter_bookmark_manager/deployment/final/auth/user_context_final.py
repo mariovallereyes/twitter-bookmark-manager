@@ -4,8 +4,14 @@ Provides user context tracking throughout request lifecycle.
 """
 
 from functools import wraps
-from flask import session, g, redirect, url_for, request, current_app, jsonify
+from flask import session, g, redirect, url_for, request, current_app, jsonify, flash
 from database.multi_user_db.user_model_final import get_user_by_id
+import logging
+import traceback
+import json
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class UserContext:
     """Static class for managing user context"""
@@ -162,6 +168,47 @@ def login_required(f):
             
         return f(*args, **kwargs)
     return decorated_function
+
+def store_user_in_session(user):
+    """
+    Store user information in the session after successful authentication.
+    
+    Args:
+        user (dict): User information containing at least id and username
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        if not user or not isinstance(user, dict):
+            logger.error("Invalid user data provided to store_user_in_session")
+            return False
+        
+        # Store essential user information in session
+        session['user_id'] = str(user.get('id'))
+        session['username'] = user.get('username')
+        session['auth_provider'] = user.get('auth_provider', '')
+        session['logged_in'] = True
+        session['login_time'] = datetime.now().isoformat()
+        
+        # Add display name if available
+        if user.get('display_name'):
+            session['display_name'] = user.get('display_name')
+        
+        # Store profile image URL if available
+        if user.get('profile_image_url'):
+            session['profile_image_url'] = user.get('profile_image_url')
+        
+        # Force session to be saved
+        session.modified = True
+        
+        logger.info(f"User data stored in session for user ID: {user.get('id')}")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error storing user in session: {e}")
+        logger.error(traceback.format_exc())
+        return False
 
 class UserContextMiddleware:
     """Middleware to set up user context for each request"""
