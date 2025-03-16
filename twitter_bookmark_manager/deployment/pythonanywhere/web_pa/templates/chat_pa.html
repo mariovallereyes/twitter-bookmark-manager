@@ -246,6 +246,14 @@ function chatApp() {
             this.scrollToBottom();
 
             try {
+                // Set a timeout to detect if request is taking too long
+                const timeoutId = setTimeout(() => {
+                    if (this.loading) {
+                        this.connectionIssue = true;
+                        this.error = "Request is taking longer than expected. The server might be busy or experiencing issues.";
+                    }
+                }, 15000); // 15 seconds timeout
+                
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -259,15 +267,25 @@ function chatApp() {
                         }
                     })
                 });
+                
+                // Clear timeout as we got a response
+                clearTimeout(timeoutId);
 
                 if (!response.ok) {
-                    throw new Error(`Network response error: ${response.status} ${response.statusText}`);
+                    if (response.status === 404) {
+                        throw new Error("API endpoint not found. The chat service might not be properly configured.");
+                    } else if (response.status === 401 || response.status === 403) {
+                        throw new Error("Authentication error. API key may be invalid or missing.");
+                    } else {
+                        throw new Error(`Network response error: ${response.status} ${response.statusText}`);
+                    }
                 }
 
                 const data = await response.json();
                 
-                // Short delay to show typing indicator
-                await new Promise(resolve => setTimeout(resolve, 800));
+                // Short delay to show typing indicator (variable based on response length)
+                const typingDelay = Math.min(data.response?.length / 20, 1.5) * 1000 || 800;
+                await new Promise(resolve => setTimeout(resolve, typingDelay));
                 
                 // Check if response contains an error
                 if (data.error) {
@@ -303,10 +321,24 @@ function chatApp() {
                 }
             } catch (error) {
                 console.error('Chat error:', error);
-                this.error = 'Sorry, I encountered an error. Please try again.';
+                
+                // Provide more specific error messages based on the error
+                if (error.message.includes('API endpoint not found')) {
+                    this.error = 'The chat service is not available. Please check if the API is properly configured.';
+                    this.connectionIssue = true;
+                } else if (error.message.includes('Authentication error')) {
+                    this.error = 'API authentication failed. Please check if GEMINI_API_KEY is properly set.';
+                    this.connectionIssue = true;
+                } else if (error.message.includes('NetworkError') || error.name === 'TypeError') {
+                    this.error = 'Network error. Please check your connection and try again.';
+                    this.connectionIssue = true;
+                } else {
+                    this.error = 'Sorry, I encountered an error. Please try again.';
+                }
+                
                 this.messages.push({
                     role: 'assistant',
-                    content: 'Sorry, I encountered an error. Please try again.',
+                    content: 'Sorry, I encountered an error processing your request. Please try again later.',
                     timestamp: new Date(),
                     model: 'gemini',
                     error: error.toString()
@@ -334,7 +366,10 @@ function chatApp() {
             // Reset conversation state on server
             fetch('/api/chat/reset', {
                 method: 'POST'
-            }).catch(err => console.error('Error resetting chat:', err));
+            }).catch(err => {
+                console.warn('Error resetting chat on server (API may not be implemented yet):', err);
+                // Continue with local reset even if server reset fails
+            });
             
             // Reset local state
             this.messages = [];

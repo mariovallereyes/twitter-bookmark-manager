@@ -1,0 +1,22 @@
+# Chat Functionality Environment Variable Reference
+# This is a reference file for environment variables needed for the chat functionality
+# Add these to PythonAnywhere's web interface environment variables when deploying
+
+# Vector Store Settings
+QDRANT_URL=<actual Qdrant URL in PA environment>
+QDRANT_COLLECTION=twitter_bookmarks
+EMBEDDINGS_MODEL=all-MiniLM-L6-v2
+
+# Chat Model Settings
+CHAT_MODEL=gemini
+GEMINI_MODEL=gemini-pro
+GEMINI_API_KEY=<your Gemini API key>
+
+# Chat Settings
+MAX_SEARCH_RESULTS=5  # Maximum number of bookmarks to retrieve for context
+RAG_ENABLED=true      # Enable Retrieval Augmented Generation
+CONTEXT_WINDOW_SIZE=10  # Number of recent messages to use as context
+BOOKMARK_DISPLAY_LIMIT=3  # Maximum number of bookmarks to display in UI
+
+# Note: Be careful when updating environment variables in production
+# Test changes locally first and be prepared to revert if issues arise 
