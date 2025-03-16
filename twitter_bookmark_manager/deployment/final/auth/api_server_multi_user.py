@@ -279,6 +279,31 @@ def log_session_info():
 
 @app.before_request
 def check_user_authentication():
+    """Check if user is authenticated and redirect to login if not"""
+    # Skip auth check for certain paths
+    if request.path.startswith('/static/') or \
+       request.path in ['/login', '/login/twitter', '/logout', '/oauth/callback/twitter', 
+                        '/check-auth', '/-/health', '/debug/auth-config', '/debug/session', 
+                        '/debug/twitter-oauth', '/debug/session-config'] or \
+       request.path.startswith('/auth/'):
+        return
+    
+    # Check authentication
+    if hasattr(g, 'user') and g.user is not None:
+        return
+    
+    # Redirect to login unless it's an API request
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'User not authenticated', 'authenticated': False}), 401
+    
+    # Store the requested URL in the session for post-login redirect
+    session['next'] = request.url
+    
+    # Log warning
+    logger.info('User not authenticated, redirecting to login')
+    
+    # Direct URL redirect instead of using url_for
+    return redirect('/login')
     """Check if the user is authenticated and redirect to login if not"""
     # Skip authentication for login, logout, static files and health check routes
     auth_exempt_paths = [
@@ -1658,7 +1683,7 @@ def top_level_logout():
     # Clear the session directly in case the blueprint route fails
     session.clear()
     flash("You have been logged out successfully.", "success")
-    return redirect(url_for('index'))
+    return redirect('/login')
 
 @app.route('/login/twitter')
 def top_level_twitter_login():
@@ -1706,6 +1731,13 @@ def top_level_twitter_login():
         logger.error(traceback.format_exc())
         flash("An error occurred connecting to Twitter. Please try again.", "error")
         return redirect(url_for('index'))
+
+# Top-level login route
+@app.route('/login')
+def login():
+    """Render login page"""
+    logger.info("Login page requested")
+    return render_template('login_final.html')
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
