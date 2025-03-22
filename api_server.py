@@ -146,7 +146,7 @@ def index():
 def chat():
     """Serve the chat interface"""
     try:
-        return render_template('chat.html')
+        return render_template('chat_pa.html')
     except Exception as e:
         logger.error(f"Error rendering chat: {e}")
         return jsonify({"error": str(e)}), 500
@@ -819,6 +819,27 @@ def api_chat():
         
         # Import chat engine
         try:
+            # PYTHONANYWHERE CHAT FEATURE MODIFICATION - START
+            # First try to use the PythonAnywhere-specific implementation
+            try:
+                from twitter_bookmark_manager.deployment.pythonanywhere.chat_pa import get_chat_engine, chat
+                
+                # Get the chat engine instance
+                chat_engine = get_chat_engine()
+                logger.info(f"✅ [CHAT-{session_id}] Successfully loaded PA-specific chat engine")
+                
+                # Process chat request using the PA-specific implementation
+                response_data = chat(message, context.get('history', []))
+                logger.info(f"✅ [CHAT-{session_id}] Chat response generated with PA-specific engine")
+                
+                # Return response data
+                return jsonify(response_data)
+                
+            except ImportError:
+                # Fall back to original implementation if PA-specific one is not available
+                logger.info(f"⚠️ [CHAT-{session_id}] PA-specific chat implementation not found, using original")
+            # PYTHONANYWHERE CHAT FEATURE MODIFICATION - END
+                
             from twitter_bookmark_manager.deployment.pythonanywhere.database.search_pa import BookmarkSearch
             from twitter_bookmark_manager.core.chat.engine import BookmarkChat
             
@@ -860,6 +881,45 @@ def api_chat():
             "error": "Unexpected error",
             "details": str(e)
         }), 500
+
+# PYTHONANYWHERE CHAT FEATURE MODIFICATION - START
+@app.route('/api/chat/reset', methods=['POST'])
+def reset_chat():
+    """Reset the chat conversation history"""
+    session_id = str(uuid.uuid4())[:8]
+    try:
+        logger.info(f"🔄 [CHAT-{session_id}] Resetting chat conversation")
+        
+        # Import reset_conversation function
+        try:
+            from twitter_bookmark_manager.deployment.pythonanywhere.chat_pa import reset_conversation
+            
+            # Reset the conversation
+            reset_conversation()
+            logger.info(f"✅ [CHAT-{session_id}] Chat conversation reset successfully")
+            
+            return jsonify({"status": "success", "message": "Conversation reset successfully"})
+            
+        except ImportError:
+            logger.warning(f"⚠️ [CHAT-{session_id}] PA-specific reset_conversation not available")
+            return jsonify({"status": "success", "message": "Conversation reset not implemented"}), 501
+            
+        except Exception as e:
+            logger.error(f"❌ [CHAT-{session_id}] Error resetting conversation: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                "error": "Error resetting conversation",
+                "details": str(e)
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"❌ [CHAT-{session_id}] Unexpected error in reset endpoint: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "error": "Unexpected error",
+            "details": str(e)
+        }), 500
+# PYTHONANYWHERE CHAT FEATURE MODIFICATION - END
 
 # Make the app available for WSGI
 application = app

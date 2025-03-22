@@ -189,14 +189,18 @@ function chatApp() {
         lastResponseReceived: null,
 
         initChat() {
+            console.log('Initializing chat component');
+            this.messages = [];
             this.messages.push({
                 role: 'assistant',
                 content: 'Hi! I can help you explore your Twitter bookmarks and chat about any topic. Try asking about specific topics, or just chat naturally!',
                 timestamp: new Date(),
                 model: 'gemini'
             });
+            console.log('Initial messages:', this.messages);
             this.$nextTick(() => {
                 this.$refs.chatInput.focus();
+                this.scrollToBottom();
             });
         },
 
@@ -207,6 +211,38 @@ function chatApp() {
         formatBookmarkDate(dateStr) {
             if (!dateStr) return '';
             return new Date(dateStr).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+        },
+        
+        formatMessageContent(content) {
+            if (!content) return '';
+            
+            // Log the raw content for debugging
+            console.log('Raw message content:', content);
+            
+            // Handle octal escape sequences explicitly
+            content = content.replace(/\\(\d{3})/g, function(match, octal) {
+                return String.fromCharCode(parseInt(octal, 8));
+            });
+            
+            // Fix for newline characters in Gemini responses
+            content = content.replace(/#012/g, '<br>');
+            content = content.replace(/\\n/g, '<br>');
+            content = content.replace(/\n/g, '<br>');
+            
+            // Additional formatting for special characters
+            content = content.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); // Bold text
+            content = content.replace(/\*(.*?)\*/g, '<em>$1</em>'); // Italic text
+            
+            // Convert URLs to clickable links
+            content = content.replace(
+                /(https?:\/\/[^\s]+)/g, 
+                '<a href="$1" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">$1</a>'
+            );
+            
+            // Debug the processed content
+            console.log('Processed content:', content);
+            
+            return content;
         },
 
         setSampleQuery(query) {
@@ -254,6 +290,7 @@ function chatApp() {
                     }
                 }, 15000); // 15 seconds timeout
                 
+                console.log("Sending request to /api/chat");
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -282,43 +319,47 @@ function chatApp() {
                 }
 
                 const data = await response.json();
+                console.log("Received response data:", data);
+                console.log("Response type:", typeof data);
+                console.log("Response content:", data.response);
+                console.log("Response content type:", typeof data.response);
                 
-                // Short delay to show typing indicator (variable based on response length)
-                const typingDelay = Math.min(data.response?.length / 20, 1.5) * 1000 || 800;
-                await new Promise(resolve => setTimeout(resolve, typingDelay));
+                // Short delay to show typing indicator
+                await new Promise(resolve => setTimeout(resolve, 800));
                 
                 // Check if response contains an error
                 if (data.error) {
                     this.connectionIssue = data.error.includes('404') || 
                                           data.error.includes('not found') || 
                                           data.error.includes('API');
-                }
-                
-                // Add the assistant's response
-                const assistantMessage = {
-                    role: 'assistant',
-                    content: data.response,
-                    bookmarks: data.bookmarks || [],
-                    model: data.model || 'gemini',
-                    timestamp: new Date(),
-                    error: data.error || null,
-                    bookmarks_used: data.bookmarks?.length || 0
-                };
-                
-                // If there was an error, show it in the UI
-                if (data.error) {
                     this.error = "There was an issue with the AI service. Try again later.";
-                    assistantMessage.content += "\n\nNote: I encountered an issue while processing your request. Some information might be incomplete.";
                 }
                 
-                // Add the message with a slight delay to simulate typing
-                this.messages.push(assistantMessage);
-                this.lastResponseReceived = new Date();
-                
-                // Deep copy the bookmarks for post-processing if needed
-                if (data.bookmarks && data.bookmarks.length > 0) {
-                    this.processBookmarks(data.bookmarks);
+                // Add the assistant's response - checking for different response formats
+                let responseContent = "No response received";
+                if (data.response) {
+                    responseContent = data.response;
+                } else if (data.message) {
+                    responseContent = data.message; 
+                } else if (data.text) {
+                    responseContent = data.text;
+                } else if (data.content) {
+                    responseContent = data.content;
+                } else if (typeof data === 'string') {
+                    responseContent = data;
                 }
+                
+                this.messages.push({
+                    role: 'assistant',
+                    content: responseContent,
+                    bookmarks: data.bookmarks || [],
+                    bookmarks_used: data.bookmarks?.length || 0,
+                    model: data.model || 'gemini',
+                    timestamp: new Date()
+                });
+                
+                console.log("Updated messages array:", this.messages);
+                
             } catch (error) {
                 console.error('Chat error:', error);
                 
@@ -384,6 +425,15 @@ function chatApp() {
 
         scrollToBottom() {
             this.$nextTick(() => {
+                const container = document.getElementById('messages-container');
+                if (container) {
+                    container.scrollTo({
+                        top: container.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                }
+                
+                // Fallback to window scroll if container scroll doesn't work
                 window.scrollTo({
                     top: document.body.scrollHeight,
                     behavior: 'smooth'

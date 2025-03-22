@@ -189,10 +189,10 @@ class BookmarkChatPA:
                 query = f"{context.get('current_topic', '')} {query}".strip()
                 logger.info(f"Refined followup query: '{query}'")
             
-            # Search for relevant bookmarks
-            results = self.chat_search.search(query=query, limit=5, context=context)
+            # Search for relevant bookmarks - use a higher limit initially for better recall
+            all_results = self.chat_search.search(query=query, limit=20, context=context)
             
-            if not results:
+            if not all_results:
                 logger.info(f"No search results found for '{query}'")
                 # Generate a "no results" response
                 no_results_response = (
@@ -202,30 +202,99 @@ class BookmarkChatPA:
                 return no_results_response, [], "gemini"
             
             # Log search results
-            logger.info(f"Found {len(results)} results for '{query}'")
+            logger.info(f"Found {len(all_results)} results for '{query}'")
+            
+            # Take top 10 results for analysis
+            results = all_results[:10]
             
             # Format the search results for the prompt
             bookmark_context = self.prompt_manager.format_bookmark_context(results)
             
-            # Generate a prompt for the RAG response
+            # Generate a prompt for the RAG response, including specific guidance to assess relevance
             prompt_params = {
                 'user_query': message,
-                'bookmark_context': bookmark_context
+                'bookmark_context': bookmark_context,
+                'search_query': query
             }
-            prompt = self.prompt_manager.get_prompt('rag_response', prompt_params)
+            
+            # Create a more specialized prompt that asks the model to first determine relevance
+            # and to explicitly list bookmark numbers it references in a special format
+            prompt = f"""<s>
+You are a helpful AI assistant that helps users explore their Twitter bookmarks.
+</s>
+
+<USER_QUERY>
+{message}
+</USER_QUERY>
+
+<SEARCH_QUERY>
+{query}
+</SEARCH_QUERY>
+
+<RELEVANT_BOOKMARKS>
+{bookmark_context}
+</RELEVANT_BOOKMARKS>
+
+<INSTRUCTIONS>
+1. First, carefully analyze if any of the bookmarks above are truly relevant to the search query "{query}".
+2. If ANY of the bookmarks contain relevant information about the query, acknowledge this and provide a helpful response based on the bookmarks.
+3. If NONE of the bookmarks are relevant to the query (they're just recent bookmarks), state that you couldn't find any bookmarks specifically about "{query}" and suggest trying different search terms.
+4. Reference specific content from the relevant bookmarks in your answer.
+5. Maintain a helpful and conversational tone.
+6. VERY IMPORTANT: At the end of your response, add a hidden section that lists exactly which bookmarks you referenced using this format:
+   <REFERENCED_BOOKMARKS>1,4,5</REFERENCED_BOOKMARKS>
+   This section will be removed before showing your response to the user.
+</INSTRUCTIONS>
+
+Based on the search query and the available bookmarks, here's my response:"""
             
             # Generate response with Gemini
-            response_text = self._generate_gemini_response(prompt)
+            full_response_text = self._generate_gemini_response(prompt)
+            
+            # Extract the referenced bookmark numbers and remove the hidden section
+            referenced_bookmark_ids = []
+            response_text = full_response_text
+            
+            # Look for the special tag with referenced bookmark numbers
+            import re
+            bookmark_pattern = re.compile(r'<REFERENCED_BOOKMARKS>(.*?)</REFERENCED_BOOKMARKS>', re.DOTALL)
+            match = bookmark_pattern.search(full_response_text)
+            
+            if match:
+                # Extract the comma-separated list of bookmark numbers
+                bookmark_numbers_str = match.group(1).strip()
+                try:
+                    # Convert to list of integers
+                    bookmark_numbers = [int(num.strip()) for num in bookmark_numbers_str.split(',') if num.strip()]
+                    # Convert to 0-indexed and filter results
+                    referenced_bookmark_ids = [i-1 for i in bookmark_numbers if 1 <= i <= len(results)]
+                    
+                    logger.info(f"AI referenced {len(referenced_bookmark_ids)} specific bookmarks: {bookmark_numbers_str}")
+                    
+                    # Remove the special tag from the response
+                    response_text = bookmark_pattern.sub('', full_response_text).strip()
+                except ValueError:
+                    logger.warning(f"Could not parse bookmark numbers from: {bookmark_numbers_str}")
+            else:
+                logger.warning("AI did not include referenced bookmark list, returning all results")
+            
+            # Filter results to only include referenced bookmarks, or top 5 if none specified
+            if referenced_bookmark_ids:
+                # Use the bookmarks explicitly referenced by the AI
+                filtered_results = [results[i] for i in referenced_bookmark_ids if i < len(results)]
+            else:
+                # If no bookmarks were explicitly referenced, just use the top 5
+                filtered_results = results[:5]
             
             # Track the search in conversation context
             categories = set()
-            for result in results:
+            for result in filtered_results:
                 if result.get('categories'):
                     categories.update(result.get('categories'))
                     
             self.conversation_manager.add_search_result(
                 query=query, 
-                num_results=len(results),
+                num_results=len(filtered_results),
                 categories=list(categories)
             )
             
@@ -234,13 +303,13 @@ class BookmarkChatPA:
                 role='assistant',
                 content=response_text,
                 metadata={
-                    'bookmarks_used': len(results),
+                    'bookmarks_used': len(filtered_results),
                     'query': query,
                     'categories': list(categories)
                 }
             )
             
-            return response_text, results, "gemini"
+            return response_text, filtered_results, "gemini"
             
         except Exception as e:
             logger.error(f"Error handling search intent: {e}")
@@ -270,48 +339,95 @@ class BookmarkChatPA:
             # Extract query from intent if available
             query = intent.params.get('query', message)
             
-            # Search for potentially relevant bookmarks
-            results = self.chat_search.search(query=query, limit=3, context=context)
+            # Search for potentially relevant bookmarks - use higher limit for better recall
+            all_results = self.chat_search.search(query=query, limit=10, context=context)
             
-            if results:
-                logger.info(f"Found {len(results)} bookmarks for opinion query")
+            if all_results:
+                # Limit to top results for analysis
+                results = all_results[:8]
+                logger.info(f"Found {len(results)} bookmarks for opinion query (from {len(all_results)} total)")
                 
                 # Format the search results for the prompt
                 bookmark_context = self.prompt_manager.format_bookmark_context(results)
                 
                 # Generate a prompt that asks for analysis/opinion
-                prompt = f"""<SYSTEM>
+                # and also asks to specify which bookmarks were actually referenced
+                prompt = f"""<s>
 You are a helpful AI assistant providing thoughtful analysis based on Twitter bookmarks and your own knowledge.
-When answering, you can reference the bookmarks provided but also add your own insights and analysis.
-</SYSTEM>
+</s>
 
 <USER_QUERY>
 {message}
 </USER_QUERY>
+
+<SEARCH_QUERY>
+{query}
+</SEARCH_QUERY>
 
 <RELEVANT_BOOKMARKS>
 {bookmark_context}
 </RELEVANT_BOOKMARKS>
 
 <INSTRUCTIONS>
-1. Provide a thoughtful analysis or opinion in response to the user's query.
-2. You may reference the bookmarks if relevant, but don't feel constrained by them.
-3. Clearly distinguish between information from the bookmarks and your own insights.
-4. Maintain a conversational and helpful tone.
+1. First, evaluate if the bookmarks contain information relevant to the query "{query}".
+2. If ANY bookmarks are relevant, base your analysis primarily on that information, adding your own insights.
+3. If NO bookmarks are relevant (they're just recent bookmarks), clearly state this and provide an analysis based on your general knowledge.
+4. If using information from the bookmarks, reference them specifically.
+5. Provide thoughtful analysis while maintaining a conversational tone.
+6. Clearly distinguish between information from the bookmarks and your own insights.
+7. VERY IMPORTANT: At the end of your response, add a hidden section that lists exactly which bookmarks you referenced using this format:
+   <REFERENCED_BOOKMARKS>1,4,5</REFERENCED_BOOKMARKS>
+   This section will be removed before showing your response to the user.
 </INSTRUCTIONS>
 
-Based on the user's question and the available information, here's my analysis:"""
+Here's my thoughtful response:"""
                 
                 # Generate response
-                response_text = self._generate_gemini_response(prompt)
+                full_response_text = self._generate_gemini_response(prompt)
+                
+                # Extract the referenced bookmark numbers and remove the hidden section
+                referenced_bookmark_ids = []
+                response_text = full_response_text
+                
+                # Look for the special tag with referenced bookmark numbers
+                import re
+                bookmark_pattern = re.compile(r'<REFERENCED_BOOKMARKS>(.*?)</REFERENCED_BOOKMARKS>', re.DOTALL)
+                match = bookmark_pattern.search(full_response_text)
+                
+                if match:
+                    # Extract the comma-separated list of bookmark numbers
+                    bookmark_numbers_str = match.group(1).strip()
+                    try:
+                        # Convert to list of integers
+                        bookmark_numbers = [int(num.strip()) for num in bookmark_numbers_str.split(',') if num.strip()]
+                        # Convert to 0-indexed and filter results
+                        referenced_bookmark_ids = [i-1 for i in bookmark_numbers if 1 <= i <= len(results)]
+                        
+                        logger.info(f"AI referenced {len(referenced_bookmark_ids)} specific bookmarks in opinion response: {bookmark_numbers_str}")
+                        
+                        # Remove the special tag from the response
+                        response_text = bookmark_pattern.sub('', full_response_text).strip()
+                    except ValueError:
+                        logger.warning(f"Could not parse bookmark numbers from: {bookmark_numbers_str}")
+                else:
+                    logger.warning("AI did not include referenced bookmark list in opinion response")
+                
+                # Filter results to only include referenced bookmarks
+                if referenced_bookmark_ids:
+                    # Use the bookmarks explicitly referenced by the AI
+                    filtered_results = [results[i] for i in referenced_bookmark_ids if i < len(results)]
+                else:
+                    # If no bookmarks were explicitly referenced but the AI still used them, return top 3
+                    filtered_results = results[:3]
                 
             else:
                 logger.info("No bookmarks found for opinion query, using general knowledge")
+                filtered_results = []
                 
                 # Generate a prompt for a general opinion/analysis
-                prompt = f"""<SYSTEM>
+                prompt = f"""<s>
 You are a helpful AI assistant providing thoughtful analysis and opinions based on your knowledge.
-</SYSTEM>
+</s>
 
 <USER_QUERY>
 {message}
@@ -319,36 +435,33 @@ You are a helpful AI assistant providing thoughtful analysis and opinions based 
 
 <INSTRUCTIONS>
 1. Provide a thoughtful analysis or opinion in response to the user's query.
-2. Draw on your general knowledge to provide helpful insights.
-3. If you don't have enough information to provide a definitive answer, acknowledge that limitation.
-4. Maintain a conversational and helpful tone.
+2. Make it clear that your response is not based on their Twitter bookmarks.
+3. Maintain a conversational and helpful tone.
+4. If appropriate, suggest how they might find more information on this topic.
 </INSTRUCTIONS>
 
-Here's my thoughtful response:"""
+I'll provide my analysis based on general knowledge:"""
                 
-                # Generate response
                 response_text = self._generate_gemini_response(prompt)
-                results = []  # No bookmarks used
             
             # Add assistant message to conversation history
             self.conversation_manager.add_message(
                 role='assistant',
                 content=response_text,
                 metadata={
-                    'bookmarks_used': len(results),
-                    'query': query,
-                    'intent': 'opinion'
+                    'bookmarks_used': len(filtered_results) if 'filtered_results' in locals() else 0,
+                    'query': query
                 }
             )
             
-            return response_text, results, "gemini"
+            return response_text, filtered_results if 'filtered_results' in locals() else [], "gemini"
             
         except Exception as e:
             logger.error(f"Error handling opinion intent: {e}")
             logger.error(traceback.format_exc())
             
             # Return a friendly error message
-            error_msg = "I'm sorry, I encountered an error analyzing your question. Please try again."
+            error_msg = "I'm sorry, I encountered an error processing your request. Please try again."
             return error_msg, [], "gemini"
     
     def _handle_general_intent(self, message: str, 

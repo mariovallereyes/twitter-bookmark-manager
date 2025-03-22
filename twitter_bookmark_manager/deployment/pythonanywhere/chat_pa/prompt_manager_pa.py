@@ -5,6 +5,7 @@ This module manages prompt templates for interacting with LLMs.
 
 import logging
 from typing import Dict, Any, List, Optional
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,11 @@ These bookmarks are the user's personal collection and they want accurate inform
 <INSTRUCTIONS>
 1. Use only the information in the BOOKMARK_CONTEXT section to answer the user's query.
 2. If the bookmarks don't contain enough information to fully answer, clearly state what you can and cannot answer.
-3. Be helpful, clear, and conversational in your response.
-4. If citing specific bookmarks, mention the author or clearly indicate you're referencing their content.
-5. Don't repeat all the bookmarks verbatim - synthesize a helpful response while maintaining accuracy.
+3. Write in a helpful, clear, and conversational tone - like a friendly assistant giving information to a friend.
+4. IMPORTANT: Use natural language and conversational flow. Avoid using bullet points unless absolutely necessary.
+5. Integrate mentions of bookmarks naturally into your response rather than listing them separately.
+6. If citing specific bookmarks, you can mention the author or related context, but do so in a natural way.
+7. Don't repeat all the bookmarks verbatim - synthesize a helpful response while maintaining accuracy.
 </INSTRUCTIONS>
 
 Based on the Twitter bookmarks provided, here's my response:""",
@@ -94,6 +97,7 @@ You are summarizing Twitter bookmarks that were retrieved based on the user's se
 3. If the search results are limited or don't directly address the query, acknowledge this.
 4. Mention the authors of the tweets when relevant.
 5. Organize the information in a logical way that helps the user understand the content.
+6. Use natural, conversational language rather than bullet points or lists.
 </INSTRUCTIONS>
 
 Here's a summary of the Twitter bookmarks related to your search:"""
@@ -140,19 +144,46 @@ Here's a summary of the Twitter bookmarks related to your search:"""
             
         context = []
         for i, bookmark in enumerate(bookmarks, 1):
-            author = bookmark.get('author', 'Unknown')
-            username = bookmark.get('author_username', '').strip('@')
-            text = bookmark.get('text', 'No content')
-            date = bookmark.get('created_at', 'Unknown date')
+            # Extract fields with fallbacks for different structures
+            username = bookmark.get('username', bookmark.get('author_username', 'Unknown')).strip('@')
+            title = bookmark.get('title', '')
+            description = bookmark.get('description', bookmark.get('text', 'No content'))
+            date_str = bookmark.get('created_at', 'Unknown date')
+            
+            # Try to parse the date if it's an ISO string
+            date = date_str
+            if isinstance(date_str, str):
+                try:
+                    # Convert date to more readable format if possible
+                    date_obj = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    date = date_obj.strftime('%B %d, %Y')
+                except (ValueError, TypeError):
+                    pass
+                    
+            # Get categories or tags
             categories = bookmark.get('categories', [])
             categories_str = ", ".join(categories) if categories else "Uncategorized"
             
+            # Format entry with available data
             entry = f"BOOKMARK {i}:\n"
-            entry += f"Author: {author} (@{username})\n"
-            entry += f"Text: {text}\n"
+            entry += f"Username: @{username}\n"
+            
+            if title:
+                entry += f"Title: {title}\n"
+                
+            entry += f"Content: {description}\n"
             entry += f"Date: {date}\n"
-            entry += f"Categories: {categories_str}\n"
-            entry += f"URL: https://twitter.com/{username}/status/{bookmark.get('id', '')}\n"
+            
+            if categories:
+                entry += f"Categories: {categories_str}\n"
+                
+            # Add URL if we have it, either directly or constructed from ID
+            url = bookmark.get('url', '')
+            if not url and username and bookmark.get('id'):
+                url = f"https://twitter.com/{username}/status/{bookmark.get('id')}"
+            
+            if url:
+                entry += f"URL: {url}\n"
             
             context.append(entry)
             

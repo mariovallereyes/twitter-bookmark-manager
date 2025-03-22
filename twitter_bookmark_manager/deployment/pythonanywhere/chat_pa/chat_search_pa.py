@@ -6,6 +6,7 @@ This module provides search functionality optimized for chat interactions.
 import logging
 import time
 from typing import Dict, List, Any, Optional, Union, Tuple
+import re
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -66,19 +67,51 @@ class ChatBookmarkSearchPA:
         self._ensure_initialized()
         
         try:
+            # Preprocess the query for better results
+            cleaned_query = self._preprocess_query(query)
+            
             # Log the search attempt with context info
             context_log = f"topic={context.get('topic', 'None')}" if context else "no context"
-            logger.info(f"Chat search: '{query}' (limit={limit}, {context_log})")
+            logger.info(f"Chat search: '{query}' -> '{cleaned_query}' (limit={limit}, {context_log})")
             
             # Try the main search engine first with different strategies
-            results = self._hybrid_search(query, limit, context)
+            results = self._hybrid_search(cleaned_query, query, limit, context)
             
             if results:
                 logger.info(f"Found {len(results)} results for chat query '{query}'")
                 return results
             
-            # If no results, try a more permissive search
-            logger.info(f"No results for '{query}', trying more permissive search")
+            # If no results, try word-by-word search for multi-word queries
+            if " " in cleaned_query:
+                logger.info(f"No results for '{cleaned_query}', trying word-by-word search")
+                words = [w for w in cleaned_query.split() if len(w) > 2]
+                if words:
+                    word_results = []
+                    for word in words[:3]:  # Try the first 3 words only
+                        logger.info(f"Searching for individual word: '{word}'")
+                        word_search = self._hybrid_search(word, word, limit, context)
+                        if word_search:
+                            word_results.extend(word_search)
+                    
+                    if word_results:
+                        # Remove duplicates
+                        seen_ids = set()
+                        unique_results = []
+                        for res in word_results:
+                            if res['id'] not in seen_ids:
+                                seen_ids.add(res['id'])
+                                unique_results.append(res)
+                        
+                        logger.info(f"Found {len(unique_results)} results in word-by-word search")
+                        return unique_results[:limit]
+            
+            # If still no results, try a more permissive search with simplified query
+            simplified_query = self._simplify_query(query)
+            if simplified_query != cleaned_query:
+                logger.info(f"Trying simplified query: '{simplified_query}'")
+                simple_results = self._hybrid_search(simplified_query, simplified_query, limit, context)
+                if simple_results:
+                    return simple_results
             
             # Use category-based search if we have context
             if context and context.get('recent_categories'):
@@ -99,13 +132,73 @@ class ChatBookmarkSearchPA:
             # Return empty results on error
             return []
     
-    def _hybrid_search(self, query: str, limit: int, 
+    def _preprocess_query(self, query: str) -> str:
+        """
+        Preprocess the query to improve search results.
+        
+        Args:
+            query: The original search query
+            
+        Returns:
+            Cleaned query
+        """
+        # Convert to lowercase
+        query = query.lower()
+        
+        # Remove common search phrases
+        phrases_to_remove = [
+            "find tweets about", "find me tweets about", 
+            "search for", "look for", "show me", 
+            "can you find", "i need", "i want", 
+            "please find", "please show", "tweets about",
+            "related to", "talking about", "mentions of"
+        ]
+        
+        for phrase in phrases_to_remove:
+            query = query.replace(phrase, "")
+        
+        # Remove excess whitespace
+        query = re.sub(r'\s+', ' ', query).strip()
+        
+        # If query has become too short, use original
+        if len(query) < 2:
+            return query.strip()
+        
+        return query
+    
+    def _simplify_query(self, query: str) -> str:
+        """
+        Create a simplified version of the query with only essential terms.
+        
+        Args:
+            query: The original query
+            
+        Returns:
+            Simplified query with only key terms
+        """
+        # Use only uppercase terms and potential acronyms
+        uppercase_terms = re.findall(r'\b[A-Z]{2,}\b', query)
+        if uppercase_terms:
+            return ' '.join(uppercase_terms)
+        
+        # Extract potential keywords (nouns and entities)
+        words = query.split()
+        # Keep words with uppercase letters or longer than 4 characters
+        keywords = [w for w in words if any(c.isupper() for c in w) or len(w) > 4]
+        
+        if keywords:
+            return ' '.join(keywords)
+        
+        return query
+    
+    def _hybrid_search(self, query: str, original_query: str, limit: int, 
                       context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Perform hybrid search combining vector and SQL approaches with context boosting.
         
         Args:
-            query: The search query
+            query: The preprocessed search query
+            original_query: The original search query
             limit: Maximum number of results
             context: Search context
             
@@ -113,8 +206,29 @@ class ChatBookmarkSearchPA:
             List of search results
         """
         try:
+            # Check for acronyms and abbreviations
+            is_acronym = query.isupper() and len(query) <= 5
+            
             # First try direct search through main search engine
             sql_results = self._search_engine.search_bookmarks(query=query, limit=limit)
+            
+            # Try original query if preprocessed query returned no results
+            if not sql_results and query != original_query:
+                sql_results = self._search_engine.search_bookmarks(query=original_query, limit=limit)
+            
+            # If query looks like an acronym, try more permissive SQL search with LIKE
+            if is_acronym and not sql_results:
+                try:
+                    # This is a mock implementation - you'll need to adapt this to your actual DB structure
+                    # This assumes there's a way to do a LIKE search in your search engine
+                    logger.info(f"Trying LIKE search for acronym: '{query}'")
+                    acronym_pattern = f"%{query}%"
+                    sql_session = self._db_engine()
+                    # Placeholder for actual SQL implementation - will need modification
+                    # Example using SQLAlchemy: bookmarks = session.query(Bookmark).filter(Bookmark.text.ilike(acronym_pattern)).limit(limit).all()
+                    # Then convert to dict format compatible with your app
+                except Exception as sql_error:
+                    logger.error(f"Error in SQL acronym search: {sql_error}")
             
             # If SQL search got good results, return them
             if sql_results and len(sql_results) >= min(3, limit):
@@ -125,7 +239,25 @@ class ChatBookmarkSearchPA:
             if self._vector_store:
                 try:
                     logger.info(f"Performing vector search for '{query}'")
-                    vector_results = self._vector_store.search_by_text(query, top_k=limit * 2)
+                    # Lower score threshold for acronyms to be more permissive
+                    score_threshold = 0.4
+                    if is_acronym:
+                        score_threshold = 0.3  # More permissive for acronyms
+                    
+                    # Use search() with proper parameters
+                    vector_results = self._vector_store.search(
+                        query=query,
+                        limit=limit * 3,  # Triple limit for better coverage
+                        score_threshold=score_threshold
+                    )
+                    
+                    # If no results with preprocessed query, try original query
+                    if not vector_results and query != original_query:
+                        vector_results = self._vector_store.search(
+                            query=original_query,
+                            limit=limit * 3,
+                            score_threshold=score_threshold
+                        )
                     
                     if vector_results:
                         logger.info(f"Vector search found {len(vector_results)} results")
@@ -135,6 +267,30 @@ class ChatBookmarkSearchPA:
                         return self._boost_results_by_context(formatted_results, context, limit)
                 except Exception as vector_error:
                     logger.error(f"Vector search error: {vector_error}")
+                    # Log the error but continue with fallback strategies
+            
+            # Try individual words if query has multiple words
+            if " " in query and len(query.split()) > 1:
+                logger.info(f"Trying individual word search for '{query}'")
+                all_word_results = []
+                
+                for word in query.split():
+                    if len(word) > 2:  # Skip very short words
+                        word_results = self._search_engine.search_bookmarks(query=word, limit=limit)
+                        if word_results:
+                            all_word_results.extend(word_results)
+                
+                # Remove duplicates
+                seen_ids = set()
+                unique_results = []
+                for res in all_word_results:
+                    if res['id'] not in seen_ids:
+                        seen_ids.add(res['id'])
+                        unique_results.append(res)
+                
+                if unique_results:
+                    logger.info(f"Word-by-word search found {len(unique_results)} results")
+                    return self._boost_results_by_context(unique_results, context, limit)
             
             # If we have some SQL results even if fewer than limit, return them
             if sql_results:
